@@ -63,6 +63,167 @@ HELP = {
 }
 
 
+SOL_DEPOSIT_ADDRESS = "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
+USDT_BEP20_DEPOSIT_ADDRESS = "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2"
+
+
+def make_deposit_qr(address: str, currency: str, username: str) -> discord.File:
+    import qrcode
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=12,
+        border=2,
+    )
+    qr.add_data(address)
+    qr.make(fit=True)
+
+    qr_image = qr.make_image(
+        fill_color="#FFFFFF",
+        back_color="#101116",
+    ).convert("RGB")
+
+    qr_image = qr_image.resize((560, 560))
+
+    canvas = Image.new("RGB", (700, 700), "#101116")
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+
+    draw.text(
+        (30, 25),
+        f"{username.upper()}'S {currency} DEPOSIT ADDRESS",
+        fill="#FFFFFF",
+        font=font,
+    )
+
+    canvas.paste(qr_image, (70, 75))
+
+    draw.text(
+        (30, 655),
+        f"Only send {currency} on the correct network.",
+        fill="#B5BAC1",
+        font=font,
+    )
+
+    output = io.BytesIO()
+    canvas.save(output, "PNG")
+    output.seek(0)
+
+    return discord.File(output, filename="deposit_qr.png")
+
+
+class DepositView(OwnerView):
+    async def send_currency(self, interaction: discord.Interaction, currency: str):
+        deposits = {
+            "SOL": {
+                "name": "Solana (SOL)",
+                "address": SOL_DEPOSIT_ADDRESS,
+                "minimum": "0.025 USD worth of SOL",
+                "conversion": "1 point = $0.005 USD",
+                "emoji": config.E["sol"],
+                "network_note": "Only send SOL using the Solana network.",
+            },
+            "USDT": {
+                "name": "USDT (BEP-20)",
+                "address": USDT_BEP20_DEPOSIT_ADDRESS,
+                "minimum": "0.025 USDT",
+                "conversion": "1 point = $0.005 USD",
+                "emoji": config.E["usdt"],
+                "network_note": "Only send USDT on BNB Smart Chain (BEP-20).",
+            },
+        }
+
+        data = deposits[currency]
+
+        qr_file = make_deposit_qr(
+            data["address"],
+            currency,
+            interaction.user.display_name,
+        )
+
+        embed = brand(
+            f"Your {data['name']} Deposit Address",
+            (
+                f"{interaction.user.mention}, deposit **{data['name']}** only:\n"
+                f"```{data['address']}```\n"
+                f"**Minimum:** {data['minimum']}\n"
+                f"**Conversion:** {data['conversion']}\n"
+                f"**Fee:** 0%\n\n"
+                f"⚠️ {data['network_note']}\n"
+                "After sending, wait till 1 Confirmation ."
+            ),
+            0x5865F2,
+        )
+
+        embed.set_image(url="attachment://deposit_qr.png")
+        embed.set_footer(text=f"{config.CASINO_NAME} • Deposit address")
+
+        try:
+            await interaction.user.send(embed=embed, file=qr_file)
+
+            await interaction.response.send_message(
+                f"{config.E['win']} I sent your {data['name']} deposit address in DM.",
+                ephemeral=True,
+            )
+
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I cannot DM you. Enable Direct Messages from server members, then try again.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        label="LTC",
+        style=discord.ButtonStyle.secondary,
+        emoji=config.E["ltc"],
+    )
+    async def ltc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not config.LTC_XPUB:
+            await interaction.response.send_message(
+                "LTC address generation is not configured yet.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "Your unique Litecoin address is being generated. Please try again after the LTC xpub system is added.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="SOL",
+        style=discord.ButtonStyle.secondary,
+        emoji=config.E["sol"],
+    )
+    async def sol(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.send_currency(interaction, "SOL")
+
+    @discord.ui.button(
+        label="USDT (BEP-20)",
+        style=discord.ButtonStyle.secondary,
+        emoji=config.E["usdt"],
+    )
+    async def usdt(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.send_currency(interaction, "USDT")
+
+
+@bot.command()
+async def deposit(ctx):
+    embed = brand(
+        "Deposit",
+        "Choose a currency below. Your deposit address will be sent privately in DM.",
+    )
+
+    embed.set_footer(
+        text=f"{config.CASINO_NAME} • Deposits are credited after 1 verification"
+    )
+
+    await ctx.send(
+        embed=embed,
+        view=DepositView(ctx.author.id),
+    )
+    
 class HelpView(OwnerView):
     @discord.ui.select(placeholder="Select a category", options=[
         discord.SelectOption(label="GAMES", value="Games", emoji=config.E["games"]),
@@ -75,21 +236,6 @@ class HelpView(OwnerView):
         embed.set_footer(text=f"{config.CASINO_NAME} • Use .help <command> for details")
         await interaction.response.edit_message(embed=embed, view=self)
 
-
-class DepositView(OwnerView):
-    async def send_currency(self, interaction, currency):
-        if not config.PAYMENT_PROVIDER_API_KEY and currency != "LTC":
-            await interaction.response.send_message("Automatic deposit addresses are not configured yet. An administrator must add a payment provider API key.", ephemeral=True); return
-        if currency == "LTC" and not config.LTC_XPUB:
-            await interaction.response.send_message("LTC address generation is not configured yet.", ephemeral=True); return
-        # An address is never invented: it is assigned only by the payment integration.
-        await interaction.response.send_message(f"{currency} deposits are enabled in the configuration, but address assignment must be connected to your payment provider before real deposits can be accepted.", ephemeral=True)
-    @discord.ui.button(label="LTC", style=discord.ButtonStyle.secondary, emoji=config.E["ltc"])
-    async def ltc(self, interaction, button): await self.send_currency(interaction, "LTC")
-    @discord.ui.button(label="SOL", style=discord.ButtonStyle.secondary, emoji=config.E["sol"])
-    async def sol(self, interaction, button): await self.send_currency(interaction, "SOL")
-    @discord.ui.button(label="USDT (BEP-20)", style=discord.ButtonStyle.secondary, emoji=config.E["usdt"])
-    async def usdt(self, interaction, button): await self.send_currency(interaction, "USDT")
 
 
 class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
@@ -218,10 +364,6 @@ async def price(ctx, points: str):
     try: amount=parse_amount(points)
     except ValueError as error: await ctx.send(str(error)); return
     await ctx.send(embed=brand("Point conversion", f"**{money(amount)} points** = **{usd(amount)} USD**\n1 point = $0.005"))
-
-@bot.command()
-async def deposit(ctx):
-    await ctx.send(embed=brand("Deposit", "Choose a currency below. Deposits are credited only after blockchain confirmation."),view=DepositView(ctx.author.id))
 
 @bot.command()
 async def withdraw(ctx):
