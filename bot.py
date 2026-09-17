@@ -58,18 +58,57 @@ def blackjack_table(player, dealer, reveal=False) -> discord.File:
     for index, card in enumerate(player): paste_card(card, 50 + index * 175, 425)
     return image_file(canvas, "blackjack_table.png")
 
-def coinflip_image(result: str) -> discord.File:
-    canvas = Image.new("RGB", (900, 520), "#12141a")
-    draw = ImageDraw.Draw(canvas); font = ImageFont.load_default()
-    colour = "#f4c542" if result == "heads" else "#9ca3af"
-    draw.ellipse((260, 40, 640, 420), fill=colour, outline="#ffffff", width=8)
-    draw.text((385, 220), result.upper(), fill="#161616", font=font)
-    draw.text((315, 465), f"{config.CASINO_NAME.upper()} COINFLIP", fill="#ffffff", font=font)
-    return image_file(canvas, "coinflip.png")
+COINFLIP_IMAGES = {
+    "tails": "https://media.discordapp.net/attachments/1524764567916384256/1549963005104758784/image.png?ex=6aac9b09&is=6aab4989&hm=92dfb2bcab7b6d727648983b4cee345281fcb15d46dbd04b60036fd208b386c5&=&format=webp&quality=lossless",
+    "heads": "https://media.discordapp.net/attachments/1524764567916384256/1549963108552802344/image.png?ex=6aac9b22&is=6aab49a2&hm=3e1091d9ee25f60c010281eac36815b31c633ff2db0c3971a723c11f8a5c3368&=&format=webp&quality=lossless",
+}
+
+
+def _font(size=42, bold=False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        str(CARDS_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")),
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
+
+
+def card_face_image(card: str, filename="hilo_card.png") -> discord.File:
+    canvas = Image.new("RGB", (900, 520), "#101522")
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((180, 35, 720, 485), radius=32, fill="#fafafa", outline="#d8b45c", width=8)
+    rank, suit = card[:-1], card[-1]
+    ink = "#d62828" if suit in ("♥", "♦") else "#151515"
+    draw.text((235, 80), rank, fill=ink, font=_font(100, True))
+    draw.text((250, 205), suit, fill=ink, font=_font(170, True))
+    draw.text((560, 350), rank, fill=ink, font=_font(100, True))
+    draw.text((45, 20), "HILO", fill="#ffffff", font=_font(42, True))
+    return image_file(canvas, filename)
+
+
+def limbo_image(crash: float, target: float, won: bool) -> discord.File:
+    canvas = Image.new("RGB", (1200, 620), "#0b1020")
+    draw = ImageDraw.Draw(canvas)
+    for x in range(0, 1200, 80):
+        draw.line((x, 0, x, 620), fill="#1c2940", width=2)
+    for y in range(0, 620, 80):
+        draw.line((0, y, 1200, y), fill="#1c2940", width=2)
+    title = "LIMBO — WIN" if won else "LIMBO — LOST"
+    draw.text((55, 45), title, fill="#57f287" if won else "#ed4245", font=_font(66, True))
+    draw.text((55, 190), f"{crash:.2f}x", fill="#ffffff", font=_font(150, True))
+    draw.text((60, 385), f"Target: {target:.2f}x", fill="#d9e2f2", font=_font(54, True))
+    draw.text((60, 475), "The round has ended", fill="#9fb0c8", font=_font(38))
+    return image_file(canvas, "limbo.png")
+
 
 def market_image(result: str) -> discord.File:
     canvas = Image.new("RGB", (1000, 500), "#111318")
-    draw = ImageDraw.Draw(canvas); font = ImageFont.load_default()
+    draw = ImageDraw.Draw(canvas)
+    font = _font(34, True)
     for x in range(40, 1000, 80): draw.line((x, 35, x, 450), fill="#252a33")
     for y in range(50, 460, 70): draw.line((35, y, 965, y), fill="#252a33")
     points=[]; value=330
@@ -291,7 +330,10 @@ class HiloView(OwnerView):
     def __init__(self, owner, bet):
         super().__init__(owner.id, timeout=60); self.bet=bet; self.current=random.randint(2,14); self.rounds=0; self.finished=False
     def rank(self, value): return {11:"J",12:"Q",13:"K",14:"A"}.get(value,str(value))
-    def game_embed(self): return brand("HiLo",f"**Current Card:** {self.rank(self.current)}\n**Next Card:** ??\n\nHigher or Lower? • Multiplier: **{1 + self.rounds*.14:.2f}x**")
+    def game_embed(self):
+        embed = brand("HiLo", f"**Current Card:** {self.rank(self.current)}\n**Next Card:** ??\n\nHigher or Lower? • Multiplier: **{1 + self.rounds*.14:.2f}x**")
+        embed.set_image(url="attachment://hilo_card.png")
+        return embed
     async def guess(self, interaction, high):
         if self.finished: return
         next_card=random.randint(2,14); won=(next_card>self.current) if high else (next_card<self.current)
@@ -299,14 +341,18 @@ class HiloView(OwnerView):
             self.finished=True
             for item in self.children: item.disabled=True
             await bot.db.record_game(self.owner_id,self.bet,0,"hilo")
-            await interaction.response.edit_message(embed=brand("HiLo — Lost",f"Current: **{self.rank(self.current)}** • Next: **{self.rank(next_card)}**\nYou lost **{money(self.bet)} points**.",0xED4245),view=self); return
+            embed = brand("HiLo — Lost", f"Current: **{self.rank(self.current)}** • Next: **{self.rank(next_card)}**\nYou lost **{money(self.bet)} points**.", 0xED4245)
+            embed.set_image(url="attachment://hilo_card.png")
+            await interaction.response.edit_message(embed=embed, attachments=[card_face_image(self.rank(next_card)+"♠")], view=self); return
         self.rounds+=1; self.current=next_card
         if self.rounds>=8:
             self.finished=True; payout=round(self.bet*(1+self.rounds*.14),4)
             for item in self.children: item.disabled=True
             await bot.db.record_game(self.owner_id,self.bet,payout,"hilo")
-            await interaction.response.edit_message(embed=brand("HiLo — Won",f"{config.E['win']} You won **{money(payout)} points**.",0x57F287),view=self); return
-        await interaction.response.edit_message(embed=self.game_embed(),view=self)
+            embed = brand("HiLo — Won", f"{config.E['win']} You won **{money(payout)} points**.", 0x57F287)
+            embed.set_image(url="attachment://hilo_card.png")
+            await interaction.response.edit_message(embed=embed, attachments=[card_face_image(self.rank(next_card)+"♠")], view=self); return
+        await interaction.response.edit_message(embed=self.game_embed(), attachments=[card_face_image(self.rank(self.current)+"♠")], view=self)
     @discord.ui.button(label="Higher", style=discord.ButtonStyle.success)
     async def higher(self, interaction, button): await self.guess(interaction,True)
     @discord.ui.button(label="Lower", style=discord.ButtonStyle.primary)
@@ -382,8 +428,8 @@ async def coinflip(ctx, bet: str, choice: str="r"):
     result=random.choice(["heads","tails"]); payout=round(amount*1.92,4) if pick==result else 0
     await bot.db.record_game(ctx.author.id,amount,payout,"coinflip")
     embed=brand("Coinflip — Won" if payout else "Coinflip — Lost",f"You chose **{pick.title()}**. The coin landed on **{result.title()}**.\n{'You won **'+money(payout)+' points**.' if payout else 'You lost **'+money(amount)+' points**.'}",0x57F287 if payout else 0xED4245)
-    embed.set_image(url="attachment://coinflip.png")
-    await ctx.send(embed=embed,file=coinflip_image(result))
+    embed.set_image(url=COINFLIP_IMAGES[result])
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def addbal(ctx, member: discord.Member, points: str):
@@ -450,7 +496,7 @@ async def hilo(ctx, bet: str):
     except ValueError as error: await ctx.send(str(error)); return
     if not await bot.db.change_balance(ctx.author.id,-amount,"hilo_bet"): await ctx.send("Insufficient balance."); return
     view=HiloView(ctx.author,amount)
-    await ctx.send(embed=view.game_embed(),view=view)
+    await ctx.send(embed=view.game_embed(), file=card_face_image(view.rank(view.current)+"♠"), view=view)
 
 @bot.command()
 async def market(ctx, bet: str):
