@@ -341,17 +341,6 @@ Your existing `discord.py`, `Pillow`, and database dependencies can stay.
 
 You already have `LTC_XPUB`. Keep it there and add these settings if you want to customize the deposit message.
 
-```pyt::chatgpt-content-reference{index="1"}
-
- sure your existing `config.py` already imports `os`:
-
-```pyt::chatgpt-content-reference{index="2"}
-
-
-# 3. Complete replacement: `DepositView` + `$deposit`
-
-Replace your old `DepositView` class and `deposit` command with this code.
-
 import io
 import hashlib
 
