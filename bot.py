@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio, io, random, time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import aiohttp
 import discord
@@ -19,6 +20,66 @@ def usd(points) -> str: return f"${float(points) * config.POINT_USD:,.2f}"
 def brand(title: str, description: str = "", colour=0x2B2D31):
     return discord.Embed(title=f"{config.CASINO_NAME} — {title}", description=description, colour=colour, timestamp=datetime.now(timezone.utc))
 def allowed_admin(ctx): return ctx.author.id in config.ADMIN_USER_IDS or ctx.author.guild_permissions.administrator
+
+CARDS_DIR = Path("assets/cards")
+
+def image_file(image: Image.Image, name: str) -> discord.File:
+    output = io.BytesIO()
+    image.save(output, "PNG")
+    output.seek(0)
+    return discord.File(output, filename=name)
+
+def card_image_name(card: str) -> str:
+    rank, suit = card[:-1], card[-1]
+    rank_name = {"A": "ace", "J": "jack", "Q": "queen", "K": "king"}.get(rank, rank)
+    suit_name = {"♣": "clubs", "♦": "diamonds", "♥": "hearts", "♠": "spades"}[suit]
+    return f"{rank_name}_of_{suit_name}.png"
+
+def blackjack_table(player, dealer, reveal=False) -> discord.File:
+    canvas = Image.new("RGB", (1200, 680), "#0a422d")
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((25, 25, 1175, 655), radius=35, outline="#d9b66b", width=5)
+    font = ImageFont.load_default()
+    draw.text((50, 55), "DEALER", fill="#f5e7c0", font=font)
+    draw.text((50, 385), "PLAYER", fill="#f5e7c0", font=font)
+    def paste_card(card, x, y, hidden=False):
+        if hidden:
+            draw.rounded_rectangle((x, y, x + 150, y + 220), radius=12, fill="#111827", outline="#d9b66b", width=4)
+            draw.text((x + 53, y + 105), "?", fill="#d9b66b", font=font)
+            return
+        path = CARDS_DIR / card_image_name(card)
+        if path.exists():
+            image = Image.open(path).convert("RGBA").resize((150, 220), Image.Resampling.LANCZOS)
+            canvas.paste(image, (x, y), image)
+        else:
+            draw.rounded_rectangle((x, y, x + 150, y + 220), radius=12, fill="#f7f7f7")
+            draw.text((x + 40, y + 105), card, fill="#111111", font=font)
+    for index, card in enumerate(dealer): paste_card(card, 50 + index * 175, 95, hidden=(index == 1 and not reveal))
+    for index, card in enumerate(player): paste_card(card, 50 + index * 175, 425)
+    return image_file(canvas, "blackjack_table.png")
+
+def coinflip_image(result: str) -> discord.File:
+    canvas = Image.new("RGB", (900, 520), "#12141a")
+    draw = ImageDraw.Draw(canvas); font = ImageFont.load_default()
+    colour = "#f4c542" if result == "heads" else "#9ca3af"
+    draw.ellipse((260, 40, 640, 420), fill=colour, outline="#ffffff", width=8)
+    draw.text((385, 220), result.upper(), fill="#161616", font=font)
+    draw.text((315, 465), f"{config.CASINO_NAME.upper()} COINFLIP", fill="#ffffff", font=font)
+    return image_file(canvas, "coinflip.png")
+
+def market_image(result: str) -> discord.File:
+    canvas = Image.new("RGB", (1000, 500), "#111318")
+    draw = ImageDraw.Draw(canvas); font = ImageFont.load_default()
+    for x in range(40, 1000, 80): draw.line((x, 35, x, 450), fill="#252a33")
+    for y in range(50, 460, 70): draw.line((35, y, 965, y), fill="#252a33")
+    points=[]; value=330
+    direction = -1 if result == "up" else 1
+    for x in range(50, 940, 55):
+        value += direction * random.randint(8, 27) + random.randint(-12, 12)
+        value=max(60,min(430,value)); points.append((x,value))
+    draw.line(points, fill="#57f287" if result == "up" else "#ed4245", width=6)
+    draw.text((45, 18), f"MARKET CLOSED {result.upper()}", fill="#ffffff", font=font)
+    return image_file(canvas, "market.png")
 
 
 class CasinoBot(commands.Bot):
@@ -63,198 +124,6 @@ HELP = {
 }
 
 
-SOL_DEPOSIT_ADDRESS = "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
-USDT_BEP20_DEPOSIT_ADDRESS = "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2"
-
-
-def make_deposit_qr(address: str, currency: str, username: str) -> discord.File:
-    import qrcode
-
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=12,
-        border=2,
-    )
-    qr.add_data(address)
-    qr.make(fit=True)
-
-    qr_image = qr.make_image(
-        fill_color="#FFFFFF",
-        back_color="#101116",
-    ).convert("RGB")
-
-    qr_image = qr_image.resize((560, 560))
-
-    canvas = Image.new("RGB", (700, 700), "#101116")
-    draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
-
-    draw.text(
-        (30, 25),
-        f"{username.upper()}'S {currency} DEPOSIT ADDRESS",
-        fill="#FFFFFF",
-        font=font,
-    )
-
-    canvas.paste(qr_image, (70, 75))
-
-    draw.text(
-        (30, 655),
-        f"Only send {currency} on the correct network.",
-        fill="#B5BAC1",
-        font=font,
-    )
-
-    output = io.BytesIO()
-    canvas.save(output, "PNG")
-    output.seek(0)
-
-    return discord.File(output, filename="deposit_qr.png")
-
-
-class DepositView(OwnerView):
-    async def send_currency(self, interaction: discord.Interaction, currency: str):
-        deposits = {
-            "SOL": {
-                "name": "Solana (SOL)",
-                "address": SOL_DEPOSIT_ADDRESS,
-                "minimum": "0.025 USD worth of SOL",
-                "conversion": "1 point = $0.005 USD",
-                "emoji": config.E["sol"],
-                "network_note": "Only send SOL using the Solana network.",
-            },
-            "USDT": {
-                "name": "USDT (BEP-20)",
-                "address": USDT_BEP20_DEPOSIT_ADDRESS,
-                "minimum": "0.025 USDT",
-                "conversion": "1 point = $0.005 USD",
-                "emoji": config.E["usdt"],
-                "network_note": "Only send USDT on BNB Smart Chain (BEP-20).",
-            },
-        }
-
-        data = deposits[currency]
-
-        qr_file = make_deposit_qr(
-            data["address"],
-            currency,
-            interaction.user.display_name,
-        )
-
-        embed = brand(
-            f"Your {data['name']} Deposit Address",
-            (
-                f"{interaction.user.mention}, deposit **{data['name']}** only:\n"
-                f"```{data['address']}```\n"
-                f"**Minimum:** {data['minimum']}\n"
-                f"**Conversion:** {data['conversion']}\n"
-                f"**Fee:** 0%\n\n"
-                f"⚠️ {data['network_note']}\n"
-                "After sending, wait till 1 Confirmation ."
-            ),
-            0x5865F2,
-        )
-
-        embed.set_image(url="attachment://deposit_qr.png")
-        embed.set_footer(text=f"{config.CASINO_NAME} • Deposit address")
-
-        try:
-            await interaction.user.send(embed=embed, file=qr_file)
-
-            await interaction.response.send_message(
-                f"{config.E['win']} I sent your {data['name']} deposit address in DM.",
-                ephemeral=True,
-            )
-
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "I cannot DM you. Enable Direct Messages from server members, then try again.",
-                ephemeral=True,
-            )
-
-    @discord.ui.button(
-        label="LTC",
-        style=discord.ButtonStyle.secondary,
-        emoji=config.E["ltc"],
-    )
-    async def ltc(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not config.LTC_XPUB:
-            await interaction.response.send_message(
-                "LTC address generation is not configured yet.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            "Your unique Litecoin address is being generated. Please try again after the LTC xpub system is added.",
-            ephemeral=True,
-        )
-
-    @discord.ui.button(
-        label="SOL",
-        style=discord.ButtonStyle.secondary,
-        emoji=config.E["sol"],
-    )
-    async def sol(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.send_currency(interaction, "SOL")
-
-    @discord.ui.button(
-        label="USDT (BEP-20)",
-        style=discord.ButtonStyle.secondary,
-        emoji=config.E["usdt"],
-    )
-    async def usdt(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.send_currency(interaction, "USDT")
-
-
-@bot.command()
-async def addbal(ctx, member: discord.Member, points: str):
-    if not allowed_admin(ctx):
-        await ctx.send("Administrator only.")
-        return
-
-    try:
-        amount = parse_amount(points)
-    except ValueError as error:
-        await ctx.send(str(error))
-        return
-
-    await bot.db.change_balance(
-        member.id,
-        amount,
-        "admin_add_balance",
-        f"Added by {ctx.author.id}",
-    )
-
-    await ctx.send(
-        embed=brand(
-            "Balance Added",
-            (
-                f"{config.E['win']} Added **{money(amount)} points** "
-                f"to {member.mention}.\n"
-                f"New value: **{usd(amount)}**"
-            ),
-            0x57F287,
-        )
-    )
-    
-@bot.command()
-async def deposit(ctx):
-    embed = brand(
-        "Deposit",
-        "Choose a currency below. Your deposit address will be sent privately in DM.",
-    )
-
-    embed.set_footer(
-        text=f"{config.CASINO_NAME} • Deposits are credited after 1 verification"
-    )
-
-    await ctx.send(
-        embed=embed,
-        view=DepositView(ctx.author.id),
-    )
-    
 class HelpView(OwnerView):
     @discord.ui.select(placeholder="Select a category", options=[
         discord.SelectOption(label="GAMES", value="Games", emoji=config.E["games"]),
@@ -267,6 +136,21 @@ class HelpView(OwnerView):
         embed.set_footer(text=f"{config.CASINO_NAME} • Use .help <command> for details")
         await interaction.response.edit_message(embed=embed, view=self)
 
+
+class DepositView(OwnerView):
+    async def send_currency(self, interaction, currency):
+        if not config.PAYMENT_PROVIDER_API_KEY and currency != "LTC":
+            await interaction.response.send_message("Automatic deposit addresses are not configured yet. An administrator must add a payment provider API key.", ephemeral=True); return
+        if currency == "LTC" and not config.LTC_XPUB:
+            await interaction.response.send_message("LTC address generation is not configured yet.", ephemeral=True); return
+        # An address is never invented: it is assigned only by the payment integration.
+        await interaction.response.send_message(f"{currency} deposits are enabled in the configuration, but address assignment must be connected to your payment provider before real deposits can be accepted.", ephemeral=True)
+    @discord.ui.button(label="LTC", style=discord.ButtonStyle.secondary, emoji=config.E["ltc"])
+    async def ltc(self, interaction, button): await self.send_currency(interaction, "LTC")
+    @discord.ui.button(label="SOL", style=discord.ButtonStyle.secondary, emoji=config.E["sol"])
+    async def sol(self, interaction, button): await self.send_currency(interaction, "SOL")
+    @discord.ui.button(label="USDT (BEP-20)", style=discord.ButtonStyle.secondary, emoji=config.E["usdt"])
+    async def usdt(self, interaction, button): await self.send_currency(interaction, "USDT")
 
 
 class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
@@ -287,10 +171,10 @@ class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
             await interaction.response.send_message("USDT BEP-20 needs a BSC address beginning with 0x.", ephemeral=True); return
         if not await bot.db.change_balance(interaction.user.id, -amount, "withdraw_request", f"{self.currency}:{address}"):
             await interaction.response.send_message("You do not have enough points.", ephemeral=True); return
-        embed = brand("Withdrawal requested", f"**Total:** {money(amount)} points ({usd(amount)})\n**Currency:** {self.currency}\n**Address:** `{address}`\n\nWithdraw Succesful.", 0xFEE75C)
+        embed = brand("Withdrawal requested", f"**Total:** {money(amount)} points ({usd(amount)})\n**Currency:** {self.currency}\n**Address:** `{address}`\n\nYour withdrawal request will be sent by an administrator within a few hours.", 0xFEE75C)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         channel = bot.get_channel(config.WITHDRAW_LOG_CHANNEL_ID)
-        if channel: await channel.send(embed=brand("Withdrawal request", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment Sended."))
+        if channel: await channel.send(embed=brand("Withdrawal request", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment will be sent by an administrator within a few hours."))
 
 
 class WithdrawView(OwnerView):
@@ -324,7 +208,6 @@ class MinesView(OwnerView):
         for index in range(25):
             button = discord.ui.Button(label="\u200b", style=discord.ButtonStyle.secondary, row=index//5, custom_id=str(index))
             button.callback = self.pick; self.add_item(button)
-        cash = discord.ui.Button(label="Cash out", style=discord.ButtonStyle.success, row=4); cash.callback = self.cashout; self.add_item(cash)
     def multiplier(self): return max(1.0, (25 / (25-self.mines)) ** self.opened * .96)
     async def pick(self, interaction):
         if self.finished: return
@@ -332,10 +215,13 @@ class MinesView(OwnerView):
         if index in self.bombs:
             self.finished=True; button.emoji=config.E["bomb"]; button.style=discord.ButtonStyle.danger; button.disabled=True
             for x in self.children:
-                if x.custom_id and int(x.custom_id) in self.bombs: x.emoji=config.E["bomb"]; x.disabled=True
+                if x.custom_id and x.custom_id.isdigit() and int(x.custom_id) in self.bombs: x.emoji=config.E["bomb"]; x.disabled=True
             await bot.db.record_game(self.owner_id, self.bet, 0, "mines")
             await interaction.response.edit_message(embed=brand("Mines — Lost", f"You hit a mine and lost **{money(self.bet)} points**.", 0xED4245), view=self); return
-        self.opened += 1; button.emoji=config.E["diamond"]; button.style=discord.ButtonStyle.success; button.disabled=True
+        self.opened += 1; button.emoji=config.E["diamond"]; button.style=discord.ButtonStyle.success
+        # Discord allows at most 25 components. Turn the opened safe tile into
+        # the cash-out button, keeping the requested 5x5 board intact.
+        button.label="Cash out"; button.callback=self.cashout; button.custom_id="cashout"
         if self.opened == 25-self.mines: await self.cashout(interaction); return
         await interaction.response.edit_message(embed=brand("Mines", f"Diamonds: **{self.opened}** • Current payout: **{money(self.bet*self.multiplier())} points**"), view=self)
     async def cashout(self, interaction):
@@ -352,6 +238,10 @@ class BlackjackView(OwnerView):
     def text(self, reveal=False):
         dealer = ", ".join(self.dealer) if reveal else f"{self.dealer[0]}, ??"
         return f"**Your Hand:** {', '.join(self.player)} (**{hand_total(self.player)}**)\n**Dealer's Hand:** {dealer}" 
+    def embed_and_file(self, reveal=False, title="Blackjack", colour=0x2B2D31, extra=""):
+        embed=brand(title,self.text(reveal)+extra,colour)
+        embed.set_image(url="attachment://blackjack_table.png")
+        return embed, blackjack_table(self.player,self.dealer,reveal)
     async def finish(self, interaction):
         while hand_total(self.dealer) < 17: self.dealer.append(self.deck.pop())
         player,dealer_total=hand_total(self.player),hand_total(self.dealer)
@@ -361,12 +251,15 @@ class BlackjackView(OwnerView):
         for item in self.children: item.disabled=True
         outcome="Won" if payout else "Lost"; colour=0x57F287 if payout else 0xED4245
         fair=f"\n\n**Provably Fair**\nPublic Hash: `{self.hash}`\nServer Seed: `{self.server}`\nClient Seed: `{self.owner_id}`"
-        await interaction.response.edit_message(embed=brand(f"Blackjack — {outcome}", self.text(True)+fair,colour),view=self)
+        embed,table=self.embed_and_file(True,f"Blackjack — {outcome}",colour,fair)
+        await interaction.response.edit_message(embed=embed,attachments=[table],view=self)
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction, button):
         self.player.append(self.deck.pop())
         if hand_total(self.player)>21: await self.finish(interaction)
-        else: await interaction.response.edit_message(embed=brand("Blackjack",self.text()),view=self)
+        else:
+            embed,table=self.embed_and_file()
+            await interaction.response.edit_message(embed=embed,attachments=[table],view=self)
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)
     async def stand(self, interaction, button): await self.finish(interaction)
     @discord.ui.button(label="Double", style=discord.ButtonStyle.success)
@@ -376,6 +269,48 @@ class BlackjackView(OwnerView):
         self.bet*=2; self.player.append(self.deck.pop()); await self.finish(interaction)
     @discord.ui.button(label="Split", style=discord.ButtonStyle.secondary, disabled=True)
     async def split(self, interaction, button): await interaction.response.send_message("Split will be enabled in the next blackjack update.",ephemeral=True)
+
+
+class MarketView(OwnerView):
+    def __init__(self, owner, bet): super().__init__(owner.id, timeout=45); self.bet=bet; self.finished=False
+    async def resolve(self, interaction, pick):
+        if self.finished: return
+        self.finished=True; result=random.choice(["up","down"]); payout=round(self.bet*1.97,4) if pick==result else 0
+        await bot.db.record_game(self.owner_id,self.bet,payout,"market")
+        for item in self.children: item.disabled=True
+        embed=brand("Market — Won" if payout else "Market — Lost",f"You chose **{pick.upper()}**. Market closed **{result.upper()}**.\n{'You won **'+money(payout)+' points**.' if payout else 'You lost **'+money(self.bet)+' points**.'}",0x57F287 if payout else 0xED4245)
+        embed.set_image(url="attachment://market.png")
+        await interaction.response.edit_message(embed=embed,attachments=[market_image(result)],view=self)
+    @discord.ui.button(label="Up", style=discord.ButtonStyle.success, emoji=config.E["graph"])
+    async def up(self, interaction, button): await self.resolve(interaction,"up")
+    @discord.ui.button(label="Down", style=discord.ButtonStyle.danger)
+    async def down(self, interaction, button): await self.resolve(interaction,"down")
+
+
+class HiloView(OwnerView):
+    def __init__(self, owner, bet):
+        super().__init__(owner.id, timeout=60); self.bet=bet; self.current=random.randint(2,14); self.rounds=0; self.finished=False
+    def rank(self, value): return {11:"J",12:"Q",13:"K",14:"A"}.get(value,str(value))
+    def game_embed(self): return brand("HiLo",f"**Current Card:** {self.rank(self.current)}\n**Next Card:** ??\n\nHigher or Lower? • Multiplier: **{1 + self.rounds*.14:.2f}x**")
+    async def guess(self, interaction, high):
+        if self.finished: return
+        next_card=random.randint(2,14); won=(next_card>self.current) if high else (next_card<self.current)
+        if not won:
+            self.finished=True
+            for item in self.children: item.disabled=True
+            await bot.db.record_game(self.owner_id,self.bet,0,"hilo")
+            await interaction.response.edit_message(embed=brand("HiLo — Lost",f"Current: **{self.rank(self.current)}** • Next: **{self.rank(next_card)}**\nYou lost **{money(self.bet)} points**.",0xED4245),view=self); return
+        self.rounds+=1; self.current=next_card
+        if self.rounds>=8:
+            self.finished=True; payout=round(self.bet*(1+self.rounds*.14),4)
+            for item in self.children: item.disabled=True
+            await bot.db.record_game(self.owner_id,self.bet,payout,"hilo")
+            await interaction.response.edit_message(embed=brand("HiLo — Won",f"{config.E['win']} You won **{money(payout)} points**.",0x57F287),view=self); return
+        await interaction.response.edit_message(embed=self.game_embed(),view=self)
+    @discord.ui.button(label="Higher", style=discord.ButtonStyle.success)
+    async def higher(self, interaction, button): await self.guess(interaction,True)
+    @discord.ui.button(label="Lower", style=discord.ButtonStyle.primary)
+    async def lower(self, interaction, button): await self.guess(interaction,False)
 
 
 @bot.command()
@@ -397,8 +332,12 @@ async def price(ctx, points: str):
     await ctx.send(embed=brand("Point conversion", f"**{money(amount)} points** = **{usd(amount)} USD**\n1 point = $0.005"))
 
 @bot.command()
+async def deposit(ctx):
+    await ctx.send(embed=brand("Deposit", "Choose a currency below. Deposits are credited only after blockchain confirmation."),view=DepositView(ctx.author.id))
+
+@bot.command()
 async def withdraw(ctx):
-    await ctx.send(embed=brand("Withdraw", "Choose the currency to withdraw.\nLTC minimum: **20** • SOL: **220** • USDT: **150** points\n\n5-10Min Minimum before Crypto arrives"),view=WithdrawView(ctx.author.id))
+    await ctx.send(embed=brand("Withdraw", "Choose the currency to withdraw.\nLTC minimum: **20** • SOL: **220** • USDT: **150** points\n\nRequests are sent by an administrator within a few hours."),view=WithdrawView(ctx.author.id))
 
 @bot.command()
 async def tip(ctx, member: discord.Member, points: str):
@@ -442,7 +381,9 @@ async def coinflip(ctx, bet: str, choice: str="r"):
     pick=random.choice(["heads","tails"]) if choice.lower() in ("r","random") else ("heads" if choice.lower().startswith("h") else "tails")
     result=random.choice(["heads","tails"]); payout=round(amount*1.92,4) if pick==result else 0
     await bot.db.record_game(ctx.author.id,amount,payout,"coinflip")
-    await ctx.send(embed=brand("Coinflip — Won" if payout else "Coinflip — Lost",f"You chose **{pick.title()}**. The coin landed on **{result.title()}**.\n{'You won **'+money(payout)+' points**.' if payout else 'You lost **'+money(amount)+' points**.'}",0x57F287 if payout else 0xED4245))
+    embed=brand("Coinflip — Won" if payout else "Coinflip — Lost",f"You chose **{pick.title()}**. The coin landed on **{result.title()}**.\n{'You won **'+money(payout)+' points**.' if payout else 'You lost **'+money(amount)+' points**.'}",0x57F287 if payout else 0xED4245)
+    embed.set_image(url="attachment://coinflip.png")
+    await ctx.send(embed=embed,file=coinflip_image(result))
 
 @bot.command(aliases=["bj"])
 async def blackjack(ctx, bet: str):
@@ -450,7 +391,7 @@ async def blackjack(ctx, bet: str):
     try: amount=parse_amount(bet)
     except ValueError as error: await ctx.send(str(error)); return
     if not await bot.db.change_balance(ctx.author.id,-amount,"blackjack_bet"): await ctx.send("Insufficient balance."); return
-    view=BlackjackView(ctx.author,amount); await ctx.send(embed=brand("Blackjack",view.text()),view=view)
+    view=BlackjackView(ctx.author,amount); embed,table=view.embed_and_file(); await ctx.send(embed=embed,file=table,view=view)
 
 @bot.command()
 async def mines(ctx, bet: str, mine_count: int=3):
@@ -472,14 +413,22 @@ async def limbo(ctx, bet: str, target: float):
     await bot.db.record_game(ctx.author.id,amount,payout,"limbo"); await ctx.send(embed=brand("Limbo — Won" if payout else "Limbo — Lost",f"Crashed at **{crash:.2f}x** • Target: **{target:.2f}x**\n{'Won **'+money(payout)+' points**.' if payout else 'Your bet did not reach the target.'}",0x57F287 if payout else 0xED4245))
 
 @bot.command()
-async def market(ctx, bet: str, choice: str="up"):
+async def hilo(ctx, bet: str):
     if not await bot.game_allowed(ctx): return
     try: amount=parse_amount(bet)
     except ValueError as error: await ctx.send(str(error)); return
-    if choice.lower() not in ("up","down"): await ctx.send("Choose `up` or `down`."); return
+    if not await bot.db.change_balance(ctx.author.id,-amount,"hilo_bet"): await ctx.send("Insufficient balance."); return
+    view=HiloView(ctx.author,amount)
+    await ctx.send(embed=view.game_embed(),view=view)
+
+@bot.command()
+async def market(ctx, bet: str):
+    if not await bot.game_allowed(ctx): return
+    try: amount=parse_amount(bet)
+    except ValueError as error: await ctx.send(str(error)); return
     if not await bot.db.change_balance(ctx.author.id,-amount,"market_bet"): await ctx.send("Insufficient balance."); return
-    result=random.choice(["up","down"]); payout=round(amount*1.97,4) if result==choice.lower() else 0
-    await bot.db.record_game(ctx.author.id,amount,payout,"market"); await ctx.send(embed=brand("Market — Won" if payout else "Market — Lost",f"Market moved **{result.upper()}**. {'Won **'+money(payout)+' points**.' if payout else 'You lost **'+money(amount)+' points**.'}",0x57F287 if payout else 0xED4245))
+    view=MarketView(ctx.author,amount)
+    await ctx.send(embed=brand("Market",f"Bet: **{money(amount)} points**\nChoose whether the chart closes up or down."),view=view)
 
 @bot.command()
 async def stats(ctx, member: discord.Member=None):
