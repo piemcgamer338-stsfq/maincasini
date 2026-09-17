@@ -330,17 +330,28 @@ async def price(ctx, points: str):
     try: amount=parse_amount(points)
     except ValueError as error: await ctx.send(str(error)); return
     await ctx.send(embed=brand("Point conversion", f"**{money(amount)} points** = **{usd(amount)} USD**\n1 point = $0.005"))
+
 # ============================================================
-# DEPOSIT SETTINGS
+# DEPOSIT SYSTEM - COMPLETE CODE
 # ============================================================
 
-SOL_DEPOSIT_ADDRESS = (
-    "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
+import io
+import qrcode
+
+from bip_utils import (
+    Bip44,
+    Bip44Coins,
+    Bip44Changes,
 )
 
-USDT_DEPOSIT_ADDRESS = (
-    "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2"
-)
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+SOL_DEPOSIT_ADDRESS = "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
+
+USDT_DEPOSIT_ADDRESS = "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2"
 
 LTC_MIN_DEPOSIT = 0.0005
 SOL_MIN_DEPOSIT = 0.001
@@ -348,15 +359,10 @@ USDT_MIN_DEPOSIT = 1.0
 
 
 # ============================================================
-# DATABASE FOR UNIQUE LTC DEPOSIT ADDRESSES
+# DATABASE
 # ============================================================
 
 async def ensure_deposit_table():
-    """
-    Creates a table for user deposit addresses.
-
-    Each user gets one saved address per currency.
-    """
 
     await bot.db.pool.execute("""
         CREATE TABLE IF NOT EXISTS deposit_addresses (
@@ -367,16 +373,12 @@ async def ensure_deposit_table():
             created_at TIMESTAMPTZ DEFAULT NOW(),
 
             PRIMARY KEY (user_id, currency),
-
             UNIQUE (address)
         )
     """)
 
 
-async def get_saved_deposit_address(user_id: int, currency: str):
-    """
-    Returns an already-generated deposit address.
-    """
+async def get_saved_deposit_address(user_id, currency):
 
     await ensure_deposit_table()
 
@@ -392,23 +394,19 @@ async def get_saved_deposit_address(user_id: int, currency: str):
     )
 
 
+# ============================================================
+# LTC XPUB
+# ============================================================
+
 def ltc_address_from_xpub(xpub: str, index: int) -> str:
-    """
-    Derives a Litecoin address from an account-level XPUB.
-
-    Derivation:
-        XPUB -> External chain (0) -> Address index
-
-    IMPORTANT:
-    The XPUB must be for Litecoin mainnet and must support
-    public child derivation.
-    """
 
     if not xpub:
-        raise ValueError("LTC_XPUB is missing.")
+        raise ValueError(
+            "LTC_XPUB is missing from Railway variables."
+        )
 
     wallet = Bip44.FromExtendedKey(
-        xpub,
+        xpub.strip(),
         Bip44Coins.LITECOIN,
     )
 
@@ -424,27 +422,33 @@ def ltc_address_from_xpub(xpub: str, index: int) -> str:
 
 
 async def generate_ltc_deposit_address(user_id: int) -> str:
-    """
-    Generates a deterministic LTC address for each user.
 
-    The same user gets the same address after restarting the bot.
-    """
+    await ensure_deposit_table()
 
-    existing = await get_saved_deposit_address(user_id, "LTC")
+    existing = await get_saved_deposit_address(
+        user_id,
+        "LTC",
+    )
 
     if existing:
         return existing
 
-    # Use a deterministic index from the Discord user ID.
-    # This avoids needing a separate global counter.
-    index = user_id % 2147483647
+    row = await bot.db.pool.fetchrow(
+        """
+        SELECT COALESCE(
+            MAX(derivation_index), -1
+        ) + 1 AS next_index
+        FROM deposit_addresses
+        WHERE currency = 'LTC'
+        """
+    )
+
+    index = int(row["next_index"])
 
     address = ltc_address_from_xpub(
         config.LTC_XPUB,
         index,
     )
-
-    await ensure_deposit_table()
 
     await bot.db.pool.execute(
         """
@@ -460,8 +464,10 @@ async def generate_ltc_deposit_address(user_id: int) -> str:
         index,
     )
 
-    # Return the saved value in case it already existed.
-    saved = await get_saved_deposit_address(user_id, "LTC")
+    saved = await get_saved_deposit_address(
+        user_id,
+        "LTC",
+    )
 
     return saved or address
 
@@ -470,10 +476,7 @@ async def generate_ltc_deposit_address(user_id: int) -> str:
 # QR CODE
 # ============================================================
 
-def make_deposit_qr(address: str, currency: str) -> discord.File:
-    """
-    Creates a QR code for the deposit address.
-    """
+def make_deposit_qr(address: str, currency: str):
 
     qr = qrcode.QRCode(
         version=None,
@@ -482,12 +485,12 @@ def make_deposit_qr(address: str, currency: str) -> discord.File:
         border=4,
     )
 
-    # Litecoin uses a litecoin: URI.
-    # SOL and USDT use their raw addresses.
     if currency == "LTC":
         data = f"litecoin:{address}"
+
     elif currency == "SOL":
         data = f"solana:{address}"
+
     else:
         data = address
 
@@ -500,7 +503,12 @@ def make_deposit_qr(address: str, currency: str) -> discord.File:
     ).convert("RGB")
 
     output = io.BytesIO()
-    image.save(output, format="PNG")
+
+    image.save(
+        output,
+        format="PNG",
+    )
+
     output.seek(0)
 
     return discord.File(
@@ -516,31 +524,44 @@ def make_deposit_qr(address: str, currency: str) -> discord.File:
 class DepositView(OwnerView):
 
     def __init__(self, owner_id: int):
-        super().__init__(owner_id, timeout=180)
 
-    async def send_currency(self, interaction, currency: str):
+        super().__init__(
+            owner_id,
+            timeout=180,
+        )
 
-        await interaction.response.defer(ephemeral=True)
+    async def send_currency(
+        self,
+        interaction: discord.Interaction,
+        currency: str,
+    ):
+
+        try:
+
+            await interaction.response.defer(
+                ephemeral=True,
+            )
+
+        except discord.InteractionResponded:
+            pass
 
         user = interaction.user
-
-        # ----------------------------------------------------
-        # GET ADDRESS
-        # ----------------------------------------------------
 
         try:
 
             if currency == "LTC":
 
                 if not config.LTC_XPUB:
+
                     await interaction.followup.send(
-                        "LTC deposit generation is not configured yet.",
+                        "LTC_XPUB is missing from Railway variables.",
                         ephemeral=True,
                     )
+
                     return
 
                 address = await generate_ltc_deposit_address(
-                    user.id
+                    user.id,
                 )
 
                 minimum = LTC_MIN_DEPOSIT
@@ -549,12 +570,14 @@ class DepositView(OwnerView):
             elif currency == "SOL":
 
                 address = SOL_DEPOSIT_ADDRESS
+
                 minimum = SOL_MIN_DEPOSIT
                 conversion = "1 point = 0.0001 SOL"
 
             elif currency == "USDT":
 
                 address = USDT_DEPOSIT_ADDRESS
+
                 minimum = USDT_MIN_DEPOSIT
                 conversion = "1 point = 0.0001 USDT"
 
@@ -564,11 +587,85 @@ class DepositView(OwnerView):
                     "Unsupported currency.",
                     ephemeral=True,
                 )
+
                 return
+
+            print(
+                f"[DEPOSIT] {currency} selected by "
+                f"{user} ({user.id})"
+            )
+
+            qr_file = make_deposit_qr(
+                address,
+                currency,
+            )
+
+            embed = discord.Embed(
+                title=f"Your {currency} Deposit Address",
+                description=(
+                    f"{user.mention}, deposit "
+                    f"**{currency}** only:\n\n"
+                    f"```{address}```\n\n"
+                    f"Minimum: **{minimum} {currency}**\n"
+                    f"Conversion: **{conversion}**\n"
+                    f"Fee: **0%**"
+                ),
+                colour=0x3498DB,
+            )
+
+            embed.set_image(
+                url="attachment://deposit_qr.png"
+            )
+
+            embed.set_footer(
+                text=(
+                    f"Only send {currency} | "
+                    f"Minimum: {minimum} {currency}"
+                )
+            )
+
+            try:
+
+                await user.send(
+                    embed=embed,
+                    file=qr_file,
+                )
+
+            except discord.Forbidden:
+
+                await interaction.followup.send(
+                    "I couldn't DM you. "
+                    "Please enable your DMs from server members.",
+                    ephemeral=True,
+                )
+
+                return
+
+            except discord.HTTPException as error:
+
+                print(
+                    f"[DEPOSIT DM ERROR] {error}"
+                )
+
+                await interaction.followup.send(
+                    "Failed to send your deposit DM.",
+                    ephemeral=True,
+                )
+
+                return
+
+            await interaction.followup.send(
+                f"{config.E['win']} Your **{currency}** "
+                "deposit address has been sent to your DMs.",
+                ephemeral=True,
+            )
 
         except Exception as error:
 
-            print(f"[DEPOSIT ERROR] {currency}: {error}")
+            print(
+                f"[DEPOSIT ERROR] {currency}: "
+                f"{type(error).__name__}: {error}"
+            )
 
             await interaction.followup.send(
                 "Could not generate your deposit address. "
@@ -576,97 +673,16 @@ class DepositView(OwnerView):
                 ephemeral=True,
             )
 
-            return
-
-        # ----------------------------------------------------
-        # CREATE QR
-        # ----------------------------------------------------
-
-        qr_file = make_deposit_qr(
-            address,
-            currency,
-        )
-
-        # ----------------------------------------------------
-        # BUILD DM EMBED
-        # ----------------------------------------------------
-
-        embed = discord.Embed(
-            title=f"Your {currency} Deposit Address",
-            description=(
-                f"{user.mention}, deposit **{currency}** only:\n\n"
-                f"```{address}```\n\n"
-                f"Minimum: **{minimum} {currency}**\n"
-                f"Conversion: **{conversion}**\n"
-                f"Fee: **0%**"
-            ),
-            colour=0x3498DB,
-        )
-
-        embed.set_image(
-            url="attachment://deposit_qr.png"
-        )
-
-        embed.set_footer(
-            text=(
-                f"Only send {currency} | "
-                f"Minimum: {minimum} {currency}"
-            )
-        )
-
-        # ----------------------------------------------------
-        # SEND DM
-        # ----------------------------------------------------
-
-        try:
-
-            await user.send(
-                embed=embed,
-                file=qr_file,
-            )
-
-        except discord.Forbidden:
-
-            await interaction.followup.send(
-                "I couldn't DM you. "
-                "Please enable DMs from server members, "
-                "then try again.",
-                ephemeral=True,
-            )
-
-            return
-
-        except discord.HTTPException as error:
-
-            print(f"[DEPOSIT DM ERROR] {error}")
-
-            await interaction.followup.send(
-                "Failed to send the deposit DM. Please try again.",
-                ephemeral=True,
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # CONFIRM IN SERVER
-        # ----------------------------------------------------
-
-        await interaction.followup.send(
-            f"{config.E['win']} Your **{currency}** deposit address "
-            "has been sent to your DMs.",
-            ephemeral=True,
-        )
-
-    # ========================================================
-    # BUTTONS
-    # ========================================================
-
     @discord.ui.button(
         label="LTC",
         style=discord.ButtonStyle.secondary,
         emoji=config.E["ltc"],
     )
-    async def ltc(self, interaction, button):
+    async def ltc(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
 
         await self.send_currency(
             interaction,
@@ -678,7 +694,11 @@ class DepositView(OwnerView):
         style=discord.ButtonStyle.secondary,
         emoji=config.E["sol"],
     )
-    async def sol(self, interaction, button):
+    async def sol(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
 
         await self.send_currency(
             interaction,
@@ -690,7 +710,11 @@ class DepositView(OwnerView):
         style=discord.ButtonStyle.secondary,
         emoji=config.E["usdt"],
     )
-    async def usdt(self, interaction, button):
+    async def usdt(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
 
         await self.send_currency(
             interaction,
@@ -717,8 +741,11 @@ async def deposit(ctx):
 
     await ctx.send(
         embed=embed,
-        view=DepositView(ctx.author.id),
+        view=DepositView(
+            ctx.author.id,
+        ),
     )
+
 
 @bot.command()
 async def withdraw(ctx):
