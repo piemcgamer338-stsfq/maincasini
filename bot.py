@@ -189,7 +189,6 @@ from discord.ext import commands
 
 
 
-```python
 import random
 import discord
 from discord.ext import commands
