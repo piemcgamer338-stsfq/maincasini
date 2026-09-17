@@ -182,6 +182,520 @@ class HelpView(OwnerView):
         embed.set_footer(text=f"{config.CASINO_NAME} • Use .help <command> for details")
         await interaction.response.edit_message(embed=embed, view=self)
 
+import asyncio
+import random
+import discord
+from discord.ext import commands
+
+
+# =========================================================
+# SOS CONFIRMATION VIEW
+# =========================================================
+
+class SOSConfirmView(discord.ui.View):
+    def __init__(self, ctx, amount):
+        super().__init__(timeout=30)
+
+        self.ctx = ctx
+        self.amount = amount
+        self.message = None
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "Only the event host can confirm this SOS event.",
+                ephemeral=True
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Start",
+        style=discord.ButtonStyle.success,
+        emoji="✅"
+    )
+    async def start_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        if self.confirmed:
+            return
+
+        self.confirmed = True
+        self.stop()
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content="",
+            embed=discord.Embed(
+                title="🟢 SOS Event Starting",
+                description=(
+                    f"{self.ctx.author.mention} started a "
+                    f"**{money(self.amount)}** Split or Steal event.\n\n"
+                    "Players can now join the event."
+                ),
+                color=discord.Color.green()
+            ),
+            view=self
+        )
+
+        await start_sos_event(
+            self.ctx,
+            self.amount,
+            self.message
+        )
+
+    @discord.ui.button(
+        label="Decline",
+        style=discord.ButtonStyle.danger,
+        emoji="❌"
+    )
+    async def decline_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.cancel_event(interaction, "declined")
+
+    @discord.ui.button(
+        label="Don't Start",
+        style=discord.ButtonStyle.secondary,
+        emoji="🛑"
+    )
+    async def dont_start_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.cancel_event(interaction, "cancelled")
+
+    async def cancel_event(self, interaction, reason):
+        if self.confirmed:
+            return
+
+        self.confirmed = True
+        self.stop()
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="🛑 SOS Event Cancelled",
+                description=(
+                    f"{self.ctx.author.mention}'s SOS event was "
+                    f"**{reason}**.\n\n"
+                    f"Amount: **{money(self.amount)}**"
+                ),
+                color=discord.Color.red()
+            ),
+            view=self
+        )
+
+    async def on_timeout(self):
+        if self.confirmed:
+            return
+
+        self.confirmed = True
+
+        for child in self.children:
+            child.disabled = True
+
+        if self.message:
+            await self.message.edit(
+                embed=discord.Embed(
+                    title="⌛ SOS Confirmation Expired",
+                    description="The SOS event was not started in time.",
+                    color=discord.Color.orange()
+                ),
+                view=self
+            )
+
+
+# =========================================================
+# SOS JOIN VIEW
+# =========================================================
+
+class SOSJoinView(discord.ui.View):
+    def __init__(self, ctx, amount):
+        super().__init__(timeout=28)
+
+        self.ctx = ctx
+        self.amount = amount
+        self.players = []
+        self.message = None
+        self.finished = False
+
+    def player_mentions(self):
+        if not self.players:
+            return "No players have joined yet."
+
+        return " ".join(user.mention for user in self.players)
+
+    def player_names(self):
+        if not self.players:
+            return "No players have joined yet."
+
+        return "\n".join(
+            f"• {user.display_name}"
+            for user in self.players
+        )
+
+    def make_embed(self):
+        embed = discord.Embed(
+            title="⚔️ Split or Steal Event",
+            description=(
+                f"**Pot:** {money(self.amount)}\n"
+                f"**Hosted by:** {self.ctx.author.display_name}\n\n"
+                f"**Total Players Joined:** "
+                f"{len(self.players)} / 2 minimum\n\n"
+                f"**Users:**\n{self.player_names()}\n\n"
+                "Click **Join Event** to participate.\n"
+                "The event starts when the join timer ends."
+            ),
+            color=discord.Color.blurple()
+        )
+
+        embed.set_footer(text="Join period: 28 seconds")
+        return embed
+
+    @discord.ui.button(
+        label="Join Event",
+        style=discord.ButtonStyle.success,
+        emoji="🎮"
+    )
+    async def join_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        if self.finished:
+            await interaction.response.send_message(
+                "This event has already finished.",
+                ephemeral=True
+            )
+            return
+
+        if interaction.user in self.players:
+            await interaction.response.send_message(
+                "You already joined this event.",
+                ephemeral=True
+            )
+            return
+
+        self.players.append(interaction.user)
+
+        await interaction.response.edit_message(
+            content=self.player_mentions(),
+            embed=self.make_embed(),
+            view=self
+        )
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+
+        self.finished = True
+
+        for child in self.children:
+            child.disabled = True
+
+        if len(self.players) < 2:
+            await self.ctx.bot.db.change_balance(
+                self.ctx.author.id,
+                self.amount,
+                "sos_refund"
+            )
+
+            await self.message.edit(
+                content="",
+                embed=discord.Embed(
+                    title="❌ SOS Event Cancelled",
+                    description=(
+                        "Not enough players joined.\n\n"
+                        "Minimum required players: **2**\n"
+                        f"Refunded to host: **{money(self.amount)}**"
+                    ),
+                    color=discord.Color.red()
+                ),
+                view=self
+            )
+            return
+
+        selected_players = random.sample(self.players, 2)
+
+        faceoff_view = SOSDecisionView(
+            self.ctx,
+            self.amount,
+            selected_players
+        )
+        faceoff_view.message = self.message
+
+        await self.message.edit(
+            content=(
+                f"{selected_players[0].mention} "
+                f"{selected_players[1].mention}"
+            ),
+            embed=faceoff_view.make_embed(),
+            view=faceoff_view
+        )
+
+
+# =========================================================
+# SOS DECISION VIEW
+# =========================================================
+
+class SOSDecisionView(discord.ui.View):
+    def __init__(self, ctx, amount, players):
+        super().__init__(timeout=28)
+
+        self.ctx = ctx
+        self.amount = amount
+        self.players = players
+        self.choices = {}
+        self.message = None
+        self.finished = False
+
+    def make_embed(self):
+        player_one = self.players[0]
+        player_two = self.players[1]
+
+        choice_one = self.choices.get(player_one.id, "Thinking...")
+        choice_two = self.choices.get(player_two.id, "Thinking...")
+
+        embed = discord.Embed(
+            title="⚔️ SPLIT OR STEAL FACE-OFF",
+            description=(
+                "The players have been selected!\n"
+                "Decisions close in **28 seconds**.\n\n"
+                f"• **Player 1:** {player_one.display_name} "
+                f"➔ **{choice_one}**\n"
+                f"• **Player 2:** {player_two.display_name} "
+                f"➔ **{choice_two}**\n\n"
+                "Players, click your choice below to lock in "
+                "your decision privately."
+            ),
+            color=discord.Color.gold()
+        )
+
+        embed.set_footer(text="Choose Split or Steal")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id not in [user.id for user in self.players]:
+            await interaction.response.send_message(
+                "You are not one of the selected players.",
+                ephemeral=True
+            )
+            return False
+
+        if interaction.user.id in self.choices:
+            await interaction.response.send_message(
+                "You already locked in your choice.",
+                ephemeral=True
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="SPLIT",
+        style=discord.ButtonStyle.success,
+        emoji="🤝"
+    )
+    async def split_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.choose(interaction, "SPLIT")
+
+    @discord.ui.button(
+        label="STEAL",
+        style=discord.ButtonStyle.danger,
+        emoji="💰"
+    )
+    async def steal_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.choose(interaction, "STEAL")
+
+    async def choose(self, interaction, choice):
+        self.choices[interaction.user.id] = choice
+
+        await interaction.response.send_message(
+            f"Your choice **{choice}** has been locked in.",
+            ephemeral=True
+        )
+
+        await self.message.edit(
+            content=(
+                f"{self.players[0].mention} "
+                f"{self.players[1].mention}"
+            ),
+            embed=self.make_embed(),
+            view=self
+        )
+
+        if len(self.choices) == 2:
+            await self.finish_event()
+
+    async def finish_event(self):
+        if self.finished:
+            return
+
+        self.finished = True
+        self.stop()
+
+        for child in self.children:
+            child.disabled = True
+
+        player_one = self.players[0]
+        player_two = self.players[1]
+
+        choice_one = self.choices.get(player_one.id, "STEAL")
+        choice_two = self.choices.get(player_two.id, "STEAL")
+
+        result_text = ""
+
+        if choice_one == "SPLIT" and choice_two == "SPLIT":
+            reward = self.amount // 2
+
+            await self.ctx.bot.db.change_balance(
+                player_one.id,
+                reward,
+                "sos_split"
+            )
+
+            await self.ctx.bot.db.change_balance(
+                player_two.id,
+                self.amount - reward,
+                "sos_split"
+            )
+
+            result_text = (
+                f"Both players selected **SPLIT**.\n\n"
+                f"{player_one.mention} received **{money(reward)}**\n"
+                f"{player_two.mention} received "
+                f"**{money(self.amount - reward)}**"
+            )
+
+        elif choice_one == "STEAL" and choice_two == "SPLIT":
+            await self.ctx.bot.db.change_balance(
+                player_one.id,
+                self.amount,
+                "sos_steal"
+            )
+
+            result_text = (
+                f"{player_one.mention} selected **STEAL**.\n"
+                f"{player_two.mention} selected **SPLIT**.\n\n"
+                f"{player_one.mention} stole the entire pot of "
+                f"**{money(self.amount)}**."
+            )
+
+        elif choice_one == "SPLIT" and choice_two == "STEAL":
+            await self.ctx.bot.db.change_balance(
+                player_two.id,
+                self.amount,
+                "sos_steal"
+            )
+
+            result_text = (
+                f"{player_one.mention} selected **SPLIT**.\n"
+                f"{player_two.mention} selected **STEAL**.\n\n"
+                f"{player_two.mention} stole the entire pot of "
+                f"**{money(self.amount)}**."
+            )
+
+        else:
+            result_text = (
+                "Both players selected **STEAL**.\n\n"
+                "Nobody receives the pot."
+            )
+
+        await self.message.edit(
+            content="",
+            embed=discord.Embed(
+                title="🏁 SOS Event Result",
+                description=result_text,
+                color=discord.Color.green()
+            ),
+            view=self
+        )
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+
+        for player in self.players:
+            if player.id not in self.choices:
+                self.choices[player.id] = "STEAL"
+
+        await self.finish_event()
+
+
+# =========================================================
+# SOS COMMAND
+# =========================================================
+
+@bot.command(name="sos", aliases=["splitorsteal"])
+async def sos(ctx, amount: str = None):
+    if amount is None:
+        await ctx.send(
+            f"Usage: `{ctx.prefix}sos <amount>`"
+        )
+        return
+
+    try:
+        value = parse_amount(amount)
+    except Exception:
+        await ctx.send("Please enter a valid amount.")
+        return
+
+    if value <= 0:
+        await ctx.send("The amount must be greater than zero.")
+        return
+
+    # Take the pot from the host before confirmation.
+    balance_changed = await bot.db.change_balance(
+        ctx.author.id,
+        -value,
+        "sos_pot"
+    )
+
+    if not balance_changed:
+        await ctx.send("You do not have enough balance.")
+        return
+
+    confirm_view = SOSConfirmView(ctx, value)
+
+    embed = discord.Embed(
+        title="⚔️ Confirm Split or Steal",
+        description=(
+            f"{ctx.author.mention} wants to start a "
+            f"Split or Steal event.\n\n"
+            f"**Pot:** {money(value)}\n"
+            f"**Host:** {ctx.author.mention}\n\n"
+            "Do you want to start this event?"
+        ),
+        color=discord.Color.gold()
+    )
+
+    message = await ctx.send(
+        embed=embed,
+        view=confirm_view
+    )
+
+    confirm_view.message = message
+
 
 class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
     address = discord.ui.TextInput(label="Receiving address", min_length=20, max_length=128)
@@ -319,7 +833,37 @@ class HiloView(OwnerView):
     @discord.ui.button(label="Lower", style=discord.ButtonStyle.primary)
     async def lower(self, interaction, button): await self.guess(interaction,False)
 
+@bot.command(aliases=["hb", "housebal"])
+async def housebalance(ctx):
+    row = await bot.db.pool.fetchrow(
+        "SELECT balance FROM house LIMIT 1"
+    )
 
+    if not row:
+        await ctx.send(
+            embed=brand(
+                "House Balance",
+                "House balance is not configured yet.",
+                0xED4245,
+            )
+        )
+        return
+
+    house_balance = float(row["balance"])
+
+    await ctx.send(
+        embed=brand(
+            f"{config.CASINO_NAME} House Balance",
+            (
+                f"<:usd:1550062382469087274> "
+                f"**Total liquidity: ${house_balance:,.2f}**\n\n"
+                "Note: house balance can be refilled or money can be "
+                "added by Owners anytime."
+            ),
+            0x00E676,
+        )
+    )
+    
 @bot.command()
 async def help(ctx, command: str = None):
     if command:
