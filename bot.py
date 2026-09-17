@@ -21,7 +21,7 @@ def brand(title: str, description: str = "", colour=0x2B2D31):
     return discord.Embed(title=f"{config.CASINO_NAME} — {title}", description=description, colour=colour, timestamp=datetime.now(timezone.utc))
 def allowed_admin(ctx): return ctx.author.id in config.ADMIN_USER_IDS or ctx.author.guild_permissions.administrator
 
-CARDS_DIR = Path("assets/cards")
+CARDS_DIR = Path(__file__).resolve().parent / "assets" / "cards"
 
 def image_file(image: Image.Image, name: str) -> discord.File:
     output = io.BytesIO()
