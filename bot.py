@@ -176,22 +176,6 @@ class HelpView(OwnerView):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-class DepositView(OwnerView):
-    async def send_currency(self, interaction, currency):
-        if not config.PAYMENT_PROVIDER_API_KEY and currency != "LTC":
-            await interaction.response.send_message("Automatic deposit addresses are not configured yet. An administrator must add a payment provider API key.", ephemeral=True); return
-        if currency == "LTC" and not config.LTC_XPUB:
-            await interaction.response.send_message("LTC address generation is not configured yet.", ephemeral=True); return
-        # An address is never invented: it is assigned only by the payment integration.
-        await interaction.response.send_message(f"{currency} deposits are enabled in the configuration, but address assignment must be connected to your payment provider before real deposits can be accepted.", ephemeral=True)
-    @discord.ui.button(label="LTC", style=discord.ButtonStyle.secondary, emoji=config.E["ltc"])
-    async def ltc(self, interaction, button): await self.send_currency(interaction, "LTC")
-    @discord.ui.button(label="SOL", style=discord.ButtonStyle.secondary, emoji=config.E["sol"])
-    async def sol(self, interaction, button): await self.send_currency(interaction, "SOL")
-    @discord.ui.button(label="USDT (BEP-20)", style=discord.ButtonStyle.secondary, emoji=config.E["usdt"])
-    async def usdt(self, interaction, button): await self.send_currency(interaction, "USDT")
-
-
 class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
     address = discord.ui.TextInput(label="Receiving address", min_length=20, max_length=128)
     amount = discord.ui.TextInput(label="Points to withdraw", placeholder="Minimum shown in previous menu")
@@ -239,36 +223,6 @@ class ConfirmTipView(OwnerView):
         await interaction.response.edit_message(content=f"{config.E['win']} {self.owner.mention} tipped {self.recipient.mention} **{money(self.amount)} points**.", view=None)
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary)
     async def decline(self, interaction, button): await interaction.response.edit_message(content="Tip cancelled.", view=None)
-
-
-class MinesView(OwnerView):
-    def __init__(self, owner, bet, mines):
-        super().__init__(owner.id, timeout=120); self.bet, self.mines, self.opened = bet, mines, 0; self.bombs = set(random.sample(range(25), mines)); self.finished = False
-        for index in range(25):
-            button = discord.ui.Button(label="\u200b", style=discord.ButtonStyle.secondary, row=index//5, custom_id=str(index))
-            button.callback = self.pick; self.add_item(button)
-    def multiplier(self): return max(1.0, (25 / (25-self.mines)) ** self.opened * .96)
-    async def pick(self, interaction):
-        if self.finished: return
-        index = int(interaction.data["custom_id"]); button = next(x for x in self.children if x.custom_id == str(index))
-        if index in self.bombs:
-            self.finished=True; button.emoji=config.E["bomb"]; button.style=discord.ButtonStyle.danger; button.disabled=True
-            for x in self.children:
-                if x.custom_id and x.custom_id.isdigit() and int(x.custom_id) in self.bombs: x.emoji=config.E["bomb"]; x.disabled=True
-            await bot.db.record_game(self.owner_id, self.bet, 0, "mines")
-            await interaction.response.edit_message(embed=brand("Mines — Lost", f"You hit a mine and lost **{money(self.bet)} points**.", 0xED4245), view=self); return
-        self.opened += 1; button.emoji=config.E["diamond"]; button.style=discord.ButtonStyle.success
-        # Discord allows at most 25 components. Turn the opened safe tile into
-        # the cash-out button, keeping the requested 5x5 board intact.
-        button.label="Cash out"; button.callback=self.cashout; button.custom_id="cashout"
-        if self.opened == 25-self.mines: await self.cashout(interaction); return
-        await interaction.response.edit_message(embed=brand("Mines", f"Diamonds: **{self.opened}** • Current payout: **{money(self.bet*self.multiplier())} points**"), view=self)
-    async def cashout(self, interaction):
-        if self.finished: return
-        self.finished=True; payout=round(self.bet*self.multiplier(),4)
-        for x in self.children: x.disabled=True
-        await bot.db.record_game(self.owner_id, self.bet, payout, "mines")
-        await interaction.response.edit_message(embed=brand("Mines — Cashed out", f"{config.E['win']} You won **{money(payout)} points** ({self.multiplier():.2f}x).", 0x57F287), view=self)
 
 
 class BlackjackView(OwnerView):
@@ -377,9 +331,435 @@ async def price(ctx, points: str):
     except ValueError as error: await ctx.send(str(error)); return
     await ctx.send(embed=brand("Point conversion", f"**{money(amount)} points** = **{usd(amount)} USD**\n1 point = $0.005"))
 
+b::chatgpt-content-reference{index="0"}
+
+edeploy Railway.
+
+Your existing `discord.py`, `Pillow`, and database dependencies can stay.
+
+## 2. Add this to `config.py`
+
+You already have `LTC_XPUB`. Keep it there and add these settings if you want to customize the deposit message.
+
+```pyt::chatgpt-content-reference{index="1"}
+
+ sure your existing `config.py` already imports `os`:
+
+```pyt::chatgpt-content-reference{index="2"}
+
+
+# 3. Complete replacement: `DepositView` + `$deposit`
+
+Replace your old `DepositView` class and `deposit` command with this code.
+
+import io
+import hashlib
+
+import discord
+import qrcode
+
+from bip_utils import Bip44, Bip44Coins, Bip44Changes
+
+
+# ============================================================
+# DEPOSIT SETTINGS
+# ============================================================
+
+SOL_DEPOSIT_ADDRESS = (
+    "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
+)
+
+USDT_DEPOSIT_ADDRESS = (
+    "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2"
+)
+
+LTC_MIN_DEPOSIT = 0.0005
+SOL_MIN_DEPOSIT = 0.001
+USDT_MIN_DEPOSIT = 1.0
+
+
+# ============================================================
+# DATABASE FOR UNIQUE LTC DEPOSIT ADDRESSES
+# ============================================================
+
+async def ensure_deposit_table():
+    """
+    Creates a table for user deposit addresses.
+
+    Each user gets one saved address per currency.
+    """
+
+    await bot.db.pool.execute("""
+        CREATE TABLE IF NOT EXISTS deposit_addresses (
+            user_id BIGINT NOT NULL,
+            currency TEXT NOT NULL,
+            address TEXT NOT NULL,
+            derivation_index BIGINT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+
+            PRIMARY KEY (user_id, currency),
+
+            UNIQUE (address)
+        )
+    """)
+
+
+async def get_saved_deposit_address(user_id: int, currency: str):
+    """
+    Returns an already-generated deposit address.
+    """
+
+    await ensure_deposit_table()
+
+    return await bot.db.pool.fetchval(
+        """
+        SELECT address
+        FROM deposit_addresses
+        WHERE user_id = $1
+        AND currency = $2
+        """,
+        user_id,
+        currency,
+    )
+
+
+def ltc_address_from_xpub(xpub: str, index: int) -> str:
+    """
+    Derives a Litecoin address from an account-level XPUB.
+
+    Derivation:
+        XPUB -> External chain (0) -> Address index
+
+    IMPORTANT:
+    The XPUB must be for Litecoin mainnet and must support
+    public child derivation.
+    """
+
+    if not xpub:
+        raise ValueError("LTC_XPUB is missing.")
+
+    wallet = Bip44.FromExtendedKey(
+        xpub,
+        Bip44Coins.LITECOIN,
+    )
+
+    address = (
+        wallet
+        .Change(Bip44Changes.CHAIN_EXT)
+        .AddressIndex(index)
+        .PublicKey()
+        .ToAddress()
+    )
+
+    return address
+
+
+async def generate_ltc_deposit_address(user_id: int) -> str:
+    """
+    Generates a deterministic LTC address for each user.
+
+    The same user gets the same address after restarting the bot.
+    """
+
+    existing = await get_saved_deposit_address(user_id, "LTC")
+
+    if existing:
+        return existing
+
+    # Use a deterministic index from the Discord user ID.
+    # This avoids needing a separate global counter.
+    index = user_id % 2147483647
+
+    address = ltc_address_from_xpub(
+        config.LTC_XPUB,
+        index,
+    )
+
+    await ensure_deposit_table()
+
+    await bot.db.pool.execute(
+        """
+        INSERT INTO deposit_addresses
+            (user_id, currency, address, derivation_index)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id, currency)
+        DO NOTHING
+        """,
+        user_id,
+        "LTC",
+        address,
+        index,
+    )
+
+    # Return the saved value in case it already existed.
+    saved = await get_saved_deposit_address(user_id, "LTC")
+
+    return saved or address
+
+
+# ============================================================
+# QR CODE
+# ============================================================
+
+def make_deposit_qr(address: str, currency: str) -> discord.File:
+    """
+    Creates a QR code for the deposit address.
+    """
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+
+    # Litecoin uses a litecoin: URI.
+    # SOL and USDT use their raw addresses.
+    if currency == "LTC":
+        data = f"litecoin:{address}"
+    elif currency == "SOL":
+        data = f"solana:{address}"
+    else:
+        data = address
+
+    qr.add_data(data)
+    qr.make(fit=True)
+
+    image = qr.make_image(
+        fill_color="black",
+        back_color="white",
+    ).convert("RGB")
+
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+
+    return discord.File(
+        output,
+        filename="deposit_qr.png",
+    )
+
+
+# ============================================================
+# DEPOSIT VIEW
+# ============================================================
+
+class DepositView(OwnerView):
+
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id, timeout=180)
+
+    async def send_currency(self, interaction, currency: str):
+
+        await interaction.response.defer(ephemeral=True)
+
+        user = interaction.user
+
+        # ----------------------------------------------------
+        # GET ADDRESS
+        # ----------------------------------------------------
+
+        try:
+
+            if currency == "LTC":
+
+                if not config.LTC_XPUB:
+                    await interaction.followup.send(
+                        "LTC deposit generation is not configured yet.",
+                        ephemeral=True,
+                    )
+                    return
+
+                address = await generate_ltc_deposit_address(
+                    user.id
+                )
+
+                minimum = LTC_MIN_DEPOSIT
+                conversion = "1 point = 0.0001 LTC"
+
+            elif currency == "SOL":
+
+                address = SOL_DEPOSIT_ADDRESS
+                minimum = SOL_MIN_DEPOSIT
+                conversion = "1 point = 0.0001 SOL"
+
+            elif currency == "USDT":
+
+                address = USDT_DEPOSIT_ADDRESS
+                minimum = USDT_MIN_DEPOSIT
+                conversion = "1 point = 0.0001 USDT"
+
+            else:
+
+                await interaction.followup.send(
+                    "Unsupported currency.",
+                    ephemeral=True,
+                )
+                return
+
+        except Exception as error:
+
+            print(f"[DEPOSIT ERROR] {currency}: {error}")
+
+            await interaction.followup.send(
+                "Could not generate your deposit address. "
+                "Please contact an administrator.",
+                ephemeral=True,
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # CREATE QR
+        # ----------------------------------------------------
+
+        qr_file = make_deposit_qr(
+            address,
+            currency,
+        )
+
+        # ----------------------------------------------------
+        # BUILD DM EMBED
+        # ----------------------------------------------------
+
+        embed = discord.Embed(
+            title=f"Your {currency} Deposit Address",
+            description=(
+                f"{user.mention}, deposit **{currency}** only:\n\n"
+                f"```{address}```\n\n"
+                f"Minimum: **{minimum} {currency}**\n"
+                f"Conversion: **{conversion}**\n"
+                f"Fee: **0%**"
+            ),
+            colour=0x3498DB,
+        )
+
+        embed.set_image(
+            url="attachment://deposit_qr.png"
+        )
+
+        embed.set_footer(
+            text=(
+                f"Only send {currency} | "
+                f"Minimum: {minimum} {currency}"
+            )
+        )
+
+        # ----------------------------------------------------
+        # SEND DM
+        # ----------------------------------------------------
+
+        try:
+
+            await user.send(
+                embed=embed,
+                file=qr_file,
+            )
+
+        except discord.Forbidden:
+
+            await interaction.followup.send(
+                "I couldn't DM you. "
+                "Please enable DMs from server members, "
+                "then try again.",
+                ephemeral=True,
+            )
+
+            return
+
+        except discord.HTTPException as error:
+
+            print(f"[DEPOSIT DM ERROR] {error}")
+
+            await interaction.followup.send(
+                "Failed to send the deposit DM. Please try again.",
+                ephemeral=True,
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # CONFIRM IN SERVER
+        # ----------------------------------------------------
+
+        await interaction.followup.send(
+            f"{config.E['win']} Your **{currency}** deposit address "
+            "has been sent to your DMs.",
+            ephemeral=True,
+        )
+
+    # ========================================================
+    # BUTTONS
+    # ========================================================
+
+    @discord.ui.button(
+        label="LTC",
+        style=discord.ButtonStyle.secondary,
+        emoji=config.E["ltc"],
+    )
+    async def ltc(self, interaction, button):
+
+        await self.send_currency(
+            interaction,
+            "LTC",
+        )
+
+    @discord.ui.button(
+        label="SOL",
+        style=discord.ButtonStyle.secondary,
+        emoji=config.E["sol"],
+    )
+    async def sol(self, interaction, button):
+
+        await self.send_currency(
+            interaction,
+            "SOL",
+        )
+
+    @discord.ui.button(
+        label="USDT (BEP-20)",
+        style=discord.ButtonStyle.secondary,
+        emoji=config.E["usdt"],
+    )
+    async def usdt(self, interaction, button):
+
+        await self.send_currency(
+            interaction,
+            "USDT",
+        )
+
+
+# ============================================================
+# DEPOSIT COMMAND
+# ============================================================
+
 @bot.command()
 async def deposit(ctx):
-    await ctx.send(embed=brand("Deposit", "Choose a currency below. Deposits are credited only after blockchain confirmation."),view=DepositView(ctx.author.id))
+
+    embed = brand(
+        "Deposit",
+        (
+            "Choose a currency below.\n\n"
+            "Your deposit address will be sent to your DMs.\n"
+            "Deposits are credited only after blockchain confirmation."
+        ),
+        0x3498DB,
+    )
+
+    await ctx.send(
+        embed=embed,
+        view=DepositView(ctx.author.id),
+    )
+</CodeBlock>
+
+---
+
+## 4. Your XPUB setup
+
+Your::chatgpt-content-reference{index="4"}
+
+
+LTC_XPUB=your_litecoin_xpub_here
 
 @bot.command()
 async def withdraw(ctx):
@@ -470,14 +850,307 @@ async def blackjack(ctx, bet: str):
     if not await bot.db.change_balance(ctx.author.id,-amount,"blackjack_bet"): await ctx.send("Insufficient balance."); return
     view=BlackjackView(ctx.author,amount); embed,table=view.embed_and_file(); await ctx.send(embed=embed,file=table,view=view)
 
+# ============================================================
+# MINES GAME
+# ============================================================
+
+class MinesView(OwnerView):
+
+    def __init__(self, owner, bet, mines):
+        super().__init__(owner.id, timeout=120)
+
+        self.bet = bet
+        self.mines = mines
+        self.opened = 0
+
+        self.bombs = set(
+            random.sample(range(25), mines)
+        )
+
+        self.finished = False
+        self.message = None
+
+        # Keep track of opened tiles.
+        self.opened_tiles = set()
+
+        # Create 5x5 board.
+        for index in range(25):
+
+            button = discord.ui.Button(
+                label="\u200b",
+                style=discord.ButtonStyle.secondary,
+                row=index // 5,
+                custom_id=f"mines_{index}",
+            )
+
+            button.callback = self.pick
+
+            self.add_item(button)
+
+    def multiplier(self):
+        return max(
+            1.0,
+            (25 / (25 - self.mines)) ** self.opened * .96
+        )
+
+    async def pick(self, interaction):
+
+        if self.finished:
+            await interaction.response.send_message(
+                "This Mines game has ended.",
+                ephemeral=True,
+            )
+            return
+
+        index = int(
+            interaction.data["custom_id"].split("_")[1]
+        )
+
+        # Prevent clicking an already opened tile.
+        if index in self.opened_tiles:
+            await interaction.response.send_message(
+                "You already opened this tile.",
+                ephemeral=True,
+            )
+            return
+
+        button = next(
+            x for x in self.children
+            if x.custom_id == f"mines_{index}"
+        )
+
+        # ----------------------------------------------------
+        # MINE HIT
+        # ----------------------------------------------------
+
+        if index in self.bombs:
+
+            self.finished = True
+
+            button.emoji = config.E["bomb"]
+            button.style = discord.ButtonStyle.danger
+            button.disabled = True
+
+            # Reveal all bombs.
+            for x in self.children:
+
+                if (
+                    x.custom_id
+                    and x.custom_id.startswith("mines_")
+                    and int(x.custom_id.split("_")[1]) in self.bombs
+                ):
+                    x.emoji = config.E["bomb"]
+                    x.disabled = True
+
+            # Disable all tiles.
+            for x in self.children:
+                x.disabled = True
+
+            await bot.db.record_game(
+                self.owner_id,
+                self.bet,
+                0,
+                "mines",
+            )
+
+            await interaction.response.edit_message(
+                embed=brand(
+                    "Mines — Lost",
+                    (
+                        f"You hit a mine and lost "
+                        f"**{money(self.bet)} points**."
+                    ),
+                    0xED4245,
+                ),
+                view=self,
+            )
+
+            # Remove cashout reaction if present.
+            if self.message:
+                try:
+                    await self.message.clear_reactions()
+                except discord.HTTPException:
+                    pass
+
+            return
+
+        # ----------------------------------------------------
+        # SAFE TILE
+        # ----------------------------------------------------
+
+        self.opened += 1
+        self.opened_tiles.add(index)
+
+        button.emoji = config.E["diamond"]
+        button.style = discord.ButtonStyle.success
+        button.disabled = True
+
+        # ----------------------------------------------------
+        # ALL SAFE TILES OPENED
+        # ----------------------------------------------------
+
+        if self.opened == 25 - self.mines:
+
+            await self.cashout_message(
+                interaction.message
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # UPDATE BOARD
+        # ----------------------------------------------------
+
+        embed = brand(
+            "Mines",
+            (
+                f"Diamonds: **{self.opened}** • "
+                f"Current payout: "
+                f"**{money(self.bet * self.multiplier())} points**"
+            ),
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self,
+        )
+
+        # Add cashout reaction once.
+        if self.message and self.opened == 1:
+
+            try:
+                await self.message.add_reaction("💰")
+            except discord.HTTPException:
+                pass
+
+    # ========================================================
+    # CASHOUT FROM REACTION
+    # ========================================================
+
+    async def cashout_message(self, message):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        payout = round(
+            self.bet * self.multiplier(),
+            4,
+        )
+
+        # Disable all tiles.
+        for x in self.children:
+            x.disabled = True
+
+        await bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            payout,
+            "mines",
+        )
+
+        embed = brand(
+            "Mines — Cashed out",
+            (
+                f"{config.E['win']} You won "
+                f"**{money(payout)} points** "
+                f"({self.multiplier():.2f}x)."
+            ),
+            0x57F287,
+        )
+
+        await message.edit(
+            embed=embed,
+            view=self,
+        )
+
+        try:
+            await message.clear_reactions()
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        for x in self.children:
+            x.disabled = True
+
+        if self.message:
+
+            try:
+                await self.message.edit(view=self)
+                await self.message.clear_reactions()
+            except discord.HTTPException:
+                pass
+
+# ============================================================
+# MINES COMMAND
+# ============================================================
+
 @bot.command()
-async def mines(ctx, bet: str, mine_count: int=3):
-    if not await bot.game_allowed(ctx): return
-    try: amount=parse_amount(bet)
-    except ValueError as error: await ctx.send(str(error)); return
-    if not 1<=mine_count<=20: await ctx.send("Choose from 1 to 20 mines."); return
-    if not await bot.db.change_balance(ctx.author.id,-amount,"mines_bet"): await ctx.send("Insufficient balance."); return
-    view=MinesView(ctx.author,amount,mine_count); await ctx.send(embed=brand("Mines",f"Bet: **{money(amount)} points** • Mines: **{mine_count}**\nFind diamonds, then cash out."),view=view)
+async def mines(ctx, bet: str, mine_count: int = 3):
+
+    if not await bot.game_allowed(ctx):
+        return
+
+    try:
+        amount = parse_amount(bet)
+
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    if not 1 <= mine_count <= 20:
+
+        await ctx.send(
+            "Choose from 1 to 20 mines."
+        )
+
+        return
+
+    if not await bot.db.change_balance(
+        ctx.author.id,
+        -amount,
+        "mines_bet",
+    ):
+
+        await ctx.send(
+            "Insufficient balance."
+        )
+
+        return
+
+    view = MinesView(
+        ctx.author,
+        amount,
+        mine_count,
+    )
+
+    message = await ctx.send(
+        embed=brand(
+            "Mines",
+            (
+                f"Bet: **{money(amount)} points** • "
+                f"Mines: **{mine_count}**\n"
+                f"Find diamonds, then react with 💰 to cash out."
+            ),
+        ),
+        view=view,
+    )
+
+    # Save message for reaction cashout.
+    view.message = message
+
+    # Store active game by message ID.
+    if not hasattr(bot, "active_mines"):
+        bot.active_mines = {}
+
+    bot.active_mines[message.id] = view
 
 @bot.command()
 async def limbo(ctx, bet: str, target: float):
