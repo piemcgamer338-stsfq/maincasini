@@ -197,7 +197,7 @@ class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
         embed = brand("Withdrawal requested", f"**Total:** {money(amount)} points ({usd(amount)})\n**Currency:** {self.currency}\n**Address:** `{address}`\n\nYour Withdrawl has been succesfully proceed.", 0xFEE75C)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         channel = bot.get_channel(config.WITHDRAW_LOG_CHANNEL_ID)
-        if channel: await channel.send(embed=brand("Withdrawal request", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment will be recived in few minutes."))
+        if channel: await channel.send(embed=brand("Withdrawal", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment will be recived in few minutes."))
 
 
 class WithdrawView(OwnerView):
