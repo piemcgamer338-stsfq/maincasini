@@ -330,26 +330,6 @@ async def price(ctx, points: str):
     try: amount=parse_amount(points)
     except ValueError as error: await ctx.send(str(error)); return
     await ctx.send(embed=brand("Point conversion", f"**{money(amount)} points** = **{usd(amount)} USD**\n1 point = $0.005"))
-
-b::chatgpt-content-reference{index="0"}
-
-edeploy Railway.
-
-Your existing `discord.py`, `Pillow`, and database dependencies can stay.
-
-## 2. Add this to `config.py`
-
-You already have `LTC_XPUB`. Keep it there and add these settings if you want to customize the deposit message.
-
-import io
-import hashlib
-
-import discord
-import qrcode
-
-from bip_utils import Bip44, Bip44Coins, Bip44Changes
-
-
 # ============================================================
 # DEPOSIT SETTINGS
 # ============================================================
