@@ -719,16 +719,6 @@ async def deposit(ctx):
         embed=embed,
         view=DepositView(ctx.author.id),
     )
-</CodeBlock>
-
----
-
-## 4. Your XPUB setup
-
-Your::chatgpt-content-reference{index="4"}
-
-
-LTC_XPUB=your_litecoin_xpub_here
 
 @bot.command()
 async def withdraw(ctx):
