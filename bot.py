@@ -14,6 +14,13 @@ import config
 from database import Database
 from games import card_value, deck, hand_total, parse_amount, provably_fair
 
+import os
+
+print(
+    "OPENAI_API_KEY loaded:",
+    bool(os.getenv("OPENAI_API_KEY"))
+)
+
 
 def money(value) -> str: return f"{float(value):,.2f}"
 def usd(points) -> str: return f"${float(points) * config.POINT_USD:,.2f}"
