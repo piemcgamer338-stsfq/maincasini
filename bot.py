@@ -209,6 +209,37 @@ class DepositView(OwnerView):
 
 
 @bot.command()
+async def addbal(ctx, member: discord.Member, points: str):
+    if not allowed_admin(ctx):
+        await ctx.send("Administrator only.")
+        return
+
+    try:
+        amount = parse_amount(points)
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    await bot.db.change_balance(
+        member.id,
+        amount,
+        "admin_add_balance",
+        f"Added by {ctx.author.id}",
+    )
+
+    await ctx.send(
+        embed=brand(
+            "Balance Added",
+            (
+                f"{config.E['win']} Added **{money(amount)} points** "
+                f"to {member.mention}.\n"
+                f"New value: **{usd(amount)}**"
+            ),
+            0x57F287,
+        )
+    )
+    
+@bot.command()
 async def deposit(ctx):
     embed = brand(
         "Deposit",
