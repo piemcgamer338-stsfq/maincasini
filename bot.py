@@ -21,7 +21,7 @@ def brand(title: str, description: str = "", colour=0x2B2D31):
     return discord.Embed(title=f"{config.CASINO_NAME} — {title}", description=description, colour=colour, timestamp=datetime.now(timezone.utc))
 def allowed_admin(ctx): return ctx.author.id in config.ADMIN_USER_IDS or ctx.author.guild_permissions.administrator
 
-CARDS_DIR = Path(__file__).resolve().parent / "assets" / "cards"
+CARDS_DIR = Path(__file__).resolve().parent
 
 def image_file(image: Image.Image, name: str) -> discord.File:
     output = io.BytesIO()
@@ -385,6 +385,37 @@ async def coinflip(ctx, bet: str, choice: str="r"):
     embed.set_image(url="attachment://coinflip.png")
     await ctx.send(embed=embed,file=coinflip_image(result))
 
+@bot.command()
+async def addbal(ctx, member: discord.Member, points: str):
+    if not allowed_admin(ctx):
+        await ctx.send("Administrator only.")
+        return
+
+    try:
+        amount = parse_amount(points)
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    await bot.db.change_balance(
+        member.id,
+        amount,
+        "admin_add_balance",
+        f"Added by {ctx.author.id}",
+    )
+
+    await ctx.send(
+        embed=brand(
+            "Balance Added",
+            (
+                f"{config.E['win']} Added **{money(amount)} points** "
+                f"to {member.mention}.\n"
+                f"Value added: **{usd(amount)}**"
+            ),
+            0x57F287,
+        )
+    )
+    
 @bot.command(aliases=["bj"])
 async def blackjack(ctx, bet: str):
     if not await bot.game_allowed(ctx): return
