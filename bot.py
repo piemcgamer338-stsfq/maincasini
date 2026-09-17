@@ -194,10 +194,10 @@ class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
             await interaction.response.send_message("USDT BEP-20 needs a BSC address beginning with 0x.", ephemeral=True); return
         if not await bot.db.change_balance(interaction.user.id, -amount, "withdraw_request", f"{self.currency}:{address}"):
             await interaction.response.send_message("You do not have enough points.", ephemeral=True); return
-        embed = brand("Withdrawal requested", f"**Total:** {money(amount)} points ({usd(amount)})\n**Currency:** {self.currency}\n**Address:** `{address}`\n\nYour withdrawal request will be sent by an administrator within a few hours.", 0xFEE75C)
+        embed = brand("Withdrawal requested", f"**Total:** {money(amount)} points ({usd(amount)})\n**Currency:** {self.currency}\n**Address:** `{address}`\n\nYour Withdrawl has been succesfully proceed.", 0xFEE75C)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         channel = bot.get_channel(config.WITHDRAW_LOG_CHANNEL_ID)
-        if channel: await channel.send(embed=brand("Withdrawal request", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment will be sent by an administrator within a few hours."))
+        if channel: await channel.send(embed=brand("Withdrawal request", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment will be recived in few minutes."))
 
 
 class WithdrawView(OwnerView):
@@ -749,7 +749,7 @@ async def deposit(ctx):
 
 @bot.command()
 async def withdraw(ctx):
-    await ctx.send(embed=brand("Withdraw", "Choose the currency to withdraw.\nLTC minimum: **20** • SOL: **220** • USDT: **150** points\n\nRequests are sent by an administrator within a few hours."),view=WithdrawView(ctx.author.id))
+    await ctx.send(embed=brand("Withdraw", "Choose the currency to withdraw.\nLTC minimum: **20** • SOL: **220** • USDT: **150** points\n\nYour Withdrawl will be proceed automatic"),view=WithdrawView(ctx.author.id))
 
 @bot.command()
 async def tip(ctx, member: discord.Member, points: str):
