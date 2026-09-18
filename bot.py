@@ -1222,28 +1222,29 @@ embed.set_image(
     url="attachment://market.png"
 )
 
-    # SEND THE IMAGE HERE
+# SEND THE IMAGE HERE
+message = await ctx.send(
+    embed=embed,
+    file=file
+)
 
-    message = await ctx.send(
-        embed=embed,
-        file=file
-    )
+# Wait 2 seconds
+await asyncio.sleep(2)
 
-    # Wait 2 seconds
-    await asyncio.sleep(2)
+# Add buttons
+view = MarketView(
+    ctx,
+    bet,
+    direction
+)
 
-    # Add buttons
-    view = MarketView(
-        ctx,
-        bet,
-        direction
-    )
+view.message = message
 
-    view.message = message
+await message.edit(
+    view=view
+)
 
-    await message.edit(
-        view=view
-    )
+await view.wait()
 
     await view.wait()
 @bot.command()
