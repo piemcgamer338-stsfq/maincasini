@@ -1697,286 +1697,14 @@ import discord
 
 
 # =========================================================
-# COINFLIP IMAGE GENERATOR
+# COINFLIP IMAGES
 # =========================================================
 
-import io
-import random
-import asyncio
-from PIL import Image, ImageDraw, ImageFont
-import discord
+COINFLIP_IMAGES = {
+    "heads": "https://media.discordapp.net/attachments/1550136730731024425/1550495453781426216/image.png?ex=6aae8aea&is=6aad396a&hm=871a61aec62433c1a7cc838f9405b39095b00e521ee5b64a154b7318f3e2d80d&=&format=webp&quality=lossless&width=640&height=516",
 
-
-def cf_font(size, bold=False):
-    if bold:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-            "arialbd.ttf"
-        ]
-    else:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            "arial.ttf"
-        ]
-
-    for path in paths:
-        try:
-            return ImageFont.truetype(path, size)
-        except:
-            continue
-
-    return ImageFont.load_default()
-
-
-def cf_center_text(draw, text, y, font, fill, width=900):
-    bbox = draw.textbbox(
-        (0, 0),
-        text,
-        font=font
-    )
-
-    text_width = bbox[2] - bbox[0]
-
-    draw.text(
-        (
-            (width - text_width) // 2,
-            y
-        ),
-        text,
-        font=font,
-        fill=fill
-    )
-
-
-def create_coinflip_image(
-    username,
-    pick,
-    result,
-    payout
-):
-    WIDTH = 900
-    HEIGHT = 520
-
-    # =====================================================
-    # BACKGROUND
-    # =====================================================
-
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        "#101522"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    # Dark gradient
-    for y in range(HEIGHT):
-        ratio = y / HEIGHT
-
-        r = int(15 + ratio * 7)
-        g = int(17 + ratio * 7)
-        b = int(30 + ratio * 12)
-
-        draw.line(
-            [(0, y), (WIDTH, y)],
-            fill=(r, g, b)
-        )
-
-    # Futuristic diagonal lines
-    for x in range(-HEIGHT, WIDTH, 40):
-        draw.line(
-            [
-                (x, 0),
-                (x + HEIGHT, HEIGHT)
-            ],
-            fill="#1c2032",
-            width=2
-        )
-
-    # =====================================================
-    # FONTS
-    # =====================================================
-
-    top_font = cf_font(32, True)
-    result_font = cf_font(43, True)
-    bottom_font = cf_font(25, False)
-
-    # =====================================================
-    # TOP TEXT
-    # =====================================================
-
-    top_text = (
-        f"{username} bet on {pick.title()}"
-    )
-
-    cf_center_text(
-        draw,
-        top_text,
-        30,
-        top_font,
-        "#f5f5f7"
-    )
-
-    # =====================================================
-    # COIN SHADOW
-    # =====================================================
-
-    draw.ellipse(
-        (
-            295,
-            145,
-            645,
-            490
-        ),
-        fill="#080a12"
-    )
-
-    # =====================================================
-    # COIN OUTER RIM
-    # =====================================================
-
-    draw.ellipse(
-        (
-            270,
-            105,
-            630,
-            465
-        ),
-        fill="#e7a928"
-    )
-
-    # Bright outer ring
-    draw.ellipse(
-        (
-            280,
-            115,
-            620,
-            455
-        ),
-        outline="#ffd85c",
-        width=13
-    )
-
-    # Dark gold edge
-    draw.ellipse(
-        (
-            300,
-            135,
-            600,
-            435
-        ),
-        fill="#bd7816"
-    )
-
-    # Main coin face
-    draw.ellipse(
-        (
-            315,
-            150,
-            585,
-            420
-        ),
-        fill="#eca92d"
-    )
-
-    # Inner gold ring
-    draw.ellipse(
-        (
-            328,
-            163,
-            572,
-            407
-        ),
-        outline="#ffd45c",
-        width=8
-    )
-
-    # =====================================================
-    # COIN SYMBOL
-    # =====================================================
-
-    if result.lower() == "heads":
-
-        # Large H for heads
-        symbol = "H"
-        symbol_font = cf_font(105, True)
-
-    else:
-
-        # Stylized tails symbol
-        symbol = "T"
-        symbol_font = cf_font(100, True)
-
-    bbox = draw.textbbox(
-        (0, 0),
-        symbol,
-        font=symbol_font
-    )
-
-    symbol_width = bbox[2] - bbox[0]
-    symbol_height = bbox[3] - bbox[1]
-
-    draw.text(
-        (
-            (WIDTH - symbol_width) // 2,
-            250 - symbol_height // 2
-        ),
-        symbol,
-        font=symbol_font,
-        fill="#a8630d"
-    )
-
-    # =====================================================
-    # RESULT
-    # =====================================================
-
-    won = payout > 0
-
-    if won:
-        result_color = "#4fd45c"
-        result_text = f"Landed on {result.upper()}"
-        sub_text = f"You won {money(payout)} points"
-
-    else:
-        result_color = "#ed4b4b"
-        result_text = f"Landed on {result.upper()}"
-        sub_text = f"You lost {money(pick_amount_global)} points"
-
-    cf_center_text(
-        draw,
-        result_text,
-        430,
-        result_font,
-        result_color
-    )
-
-    cf_center_text(
-        draw,
-        sub_text,
-        478,
-        bottom_font,
-        "#c0c0c8"
-    )
-
-    # =====================================================
-    # RETURN DISCORD FILE
-    # =====================================================
-
-    output = io.BytesIO()
-
-    image.save(
-        output,
-        format="PNG"
-    )
-
-    output.seek(0)
-
-    return discord.File(
-        output,
-        filename="coinflip_result.png"
-    )
+    "tails": "https://media.discordapp.net/attachments/1550136730731024425/1550495462342267053/image.png?ex=6aae8aed&is=6aad396d&hm=276af9bbf5c628c07c7d3c735d1ea7092a2e679502af81856cee5fd45820484a&=&format=webp&quality=lossless"
+}
 
 
 # =========================================================
@@ -1996,9 +1724,9 @@ async def coinflip(
     if not await bot.game_allowed(ctx):
         return
 
-    # =====================================================
-    # PARSE AMOUNT
-    # =====================================================
+    # -----------------------------------------------------
+    # PARSE BET
+    # -----------------------------------------------------
 
     try:
         amount = parse_amount(bet)
@@ -2013,9 +1741,9 @@ async def coinflip(
         )
         return
 
-    # =====================================================
-    # PARSE CHOICE
-    # =====================================================
+    # -----------------------------------------------------
+    # CHOICE
+    # -----------------------------------------------------
 
     choice = choice.lower()
 
@@ -2032,9 +1760,9 @@ async def coinflip(
         )
         return
 
-    # =====================================================
-    # TAKE BET
-    # =====================================================
+    # -----------------------------------------------------
+    # REMOVE BET
+    # -----------------------------------------------------
 
     if not await bot.db.change_balance(
         ctx.author.id,
@@ -2046,57 +1774,57 @@ async def coinflip(
         )
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # PLAYER PICK
-    # =====================================================
+    # -----------------------------------------------------
 
-    if choice in ("r", "random"):
+    if choice in ("h", "heads"):
+        pick = "heads"
 
+    elif choice in ("t", "tails"):
+        pick = "tails"
+
+    else:
         pick = random.choice([
             "heads",
             "tails"
         ])
 
-    elif choice in ("h", "heads"):
-
-        pick = "heads"
-
-    else:
-
-        pick = "tails"
-
-    # =====================================================
+    # -----------------------------------------------------
     # FLIPPING MESSAGE
-    # =====================================================
+    # -----------------------------------------------------
 
-    flipping_embed = discord.Embed(
-        title="🪙 Coinflip",
-        description=(
-            f"{ctx.author.mention} is flipping the coin...\n\n"
+    flipping_embed = brand(
+        "🪙 Coinflip",
+        (
+            f"{ctx.author.mention} flipped a coin...\n\n"
             f"Bet: **{money(amount)} points**\n"
             f"Choice: **{pick.title()}**"
-        ),
-        color=0x5865F2
+        )
     )
 
     flipping_message = await ctx.send(
         embed=flipping_embed
     )
 
-    # =====================================================
-    # 2 SECOND DELAY
-    # =====================================================
+    # -----------------------------------------------------
+    # WAIT 2 SECONDS
+    # -----------------------------------------------------
 
     await asyncio.sleep(2)
 
-    # =====================================================
+    # -----------------------------------------------------
     # RESULT
-    # =====================================================
+    # -----------------------------------------------------
 
     result = random.choice([
         "heads",
         "tails"
     ])
+
+    # -----------------------------------------------------
+    # PAYOUT
+    # -----------------------------------------------------
 
     if pick == result:
 
@@ -2105,25 +1833,19 @@ async def coinflip(
             4
         )
 
-    else:
-
-        payout = 0
-
-    # =====================================================
-    # PAY WIN
-    # =====================================================
-
-    if payout > 0:
-
         await bot.db.change_balance(
             ctx.author.id,
             payout,
             "coinflip_win"
         )
 
-    # =====================================================
+    else:
+
+        payout = 0
+
+    # -----------------------------------------------------
     # RECORD GAME
-    # =====================================================
+    # -----------------------------------------------------
 
     await bot.db.record_game(
         ctx.author.id,
@@ -2132,63 +1854,55 @@ async def coinflip(
         "coinflip"
     )
 
-    # =====================================================
-    # CREATE RESULT IMAGE
-    # =====================================================
-
-    # Used by the image generator for the loss text.
-    global pick_amount_global
-    pick_amount_global = amount
-
-    result_file = create_coinflip_image(
-        username=ctx.author.display_name,
-        pick=pick,
-        result=result,
-        payout=payout
-    )
-
-    # =====================================================
+    # -----------------------------------------------------
     # RESULT EMBED
-    # =====================================================
+    # -----------------------------------------------------
 
     if payout > 0:
 
-        embed = discord.Embed(
-            title="✅ You Won!",
-            description=(
+        embed = brand(
+            "You Won!",
+            (
                 f"You bet on **{pick.title()}** "
                 f"and won **{money(payout)} points!** 🎉"
             ),
-            color=0x57F287
+            0x57F287
         )
 
     else:
 
-        embed = discord.Embed(
-            title="❌ You Lost!",
-            description=(
+        embed = brand(
+            "You Lost!",
+            (
                 f"You bet on **{pick.title()}** "
                 f"and lost **{money(amount)} points.**"
             ),
-            color=0xED4245
+            0xED4245
         )
 
+    # -----------------------------------------------------
+    # USE HEADS/TAILS IMAGE
+    # -----------------------------------------------------
+
     embed.set_image(
-        url="attachment://coinflip_result.png"
+        url=COINFLIP_IMAGES[result]
     )
+
+    # -----------------------------------------------------
+    # FOOTER
+    # -----------------------------------------------------
 
     embed.set_footer(
-        text="🔒 Provably Fair • Coinflip"
+        text="🔒 Provably Fair | Coinflip"
     )
 
-    # =====================================================
-    # REPLACE FLIPPING MESSAGE
-    # =====================================================
+    # -----------------------------------------------------
+    # EDIT ORIGINAL MESSAGE
+    # -----------------------------------------------------
 
     await flipping_message.edit(
         content="",
-        embed=embed,
-        attachments=[result_file]
+        embed=embed
     )
 
 @bot.command()
