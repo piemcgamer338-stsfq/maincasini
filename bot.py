@@ -145,15 +145,19 @@ class HelpView(OwnerView):
 
 # ============================================================
 # GIFT CARD STORE
+# Paid + Fixed Rewards
 # ============================================================
 
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+from PIL import Image, ImageDraw, ImageFont
+
+import discord
 
 
-# ------------------------------------------------------------
-# Gift Card Pack Configuration
-# ------------------------------------------------------------
+# ============================================================
+# GIFT CARD PACK CONFIGURATION
+# ============================================================
 
 GC_PACKS = {
     "gc_1": {
@@ -162,12 +166,14 @@ GC_PACKS = {
         "reward": 200.0,
         "reward_usd": 1.00,
     },
+
     "gc_5": {
         "label": "$5 Gift Card Pack",
         "cost": 1000.0,
         "reward": 1000.0,
         "reward_usd": 5.00,
     },
+
     "gc_10": {
         "label": "$10 Gift Card Pack",
         "cost": 2000.0,
@@ -177,12 +183,11 @@ GC_PACKS = {
 }
 
 
-# ------------------------------------------------------------
-# Font Helper
-# ------------------------------------------------------------
+# ============================================================
+# FONT HELPER
+# ============================================================
 
 def gc_font(size, bold=False):
-    paths = []
 
     if bold:
         paths = [
@@ -199,16 +204,24 @@ def gc_font(size, bold=False):
         try:
             return ImageFont.truetype(path, size)
         except Exception:
-            pass
+            continue
 
     return ImageFont.load_default()
 
 
-# ------------------------------------------------------------
-# Rounded Rectangle Helper
-# ------------------------------------------------------------
+# ============================================================
+# ROUNDED RECTANGLE HELPER
+# ============================================================
 
-def gc_round_rect(draw, xy, radius, fill, outline=None, width=1):
+def gc_round_rect(
+    draw,
+    xy,
+    radius,
+    fill,
+    outline=None,
+    width=1
+):
+
     draw.rounded_rectangle(
         xy,
         radius=radius,
@@ -218,26 +231,24 @@ def gc_round_rect(draw, xy, radius, fill, outline=None, width=1):
     )
 
 
-# ------------------------------------------------------------
-# Reward Card Image Generator
-# ------------------------------------------------------------
+# ============================================================
+# GIFT CARD REWARD IMAGE
+# ============================================================
 
 def create_gc_reward_card(reward_usd: float):
-    """
-    Creates a rectangular gift-card reveal image.
-
-    Example:
-        create_gc_reward_card(0)
-        create_gc_reward_card(1)
-        create_gc_reward_card(5)
-        create_gc_reward_card(10)
-    """
 
     WIDTH = 1000
     HEIGHT = 500
 
-    # Base image
-    image = Image.new("RGB", (WIDTH, HEIGHT), (10, 14, 24))
+    # --------------------------------------------------------
+    # Base
+    # --------------------------------------------------------
+
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        (9, 13, 23)
+    )
 
     draw = ImageDraw.Draw(image)
 
@@ -246,11 +257,12 @@ def create_gc_reward_card(reward_usd: float):
     # --------------------------------------------------------
 
     for y in range(HEIGHT):
+
         ratio = y / HEIGHT
 
-        r = int(10 + (20 * ratio))
-        g = int(14 + (18 * ratio))
-        b = int(24 + (25 * ratio))
+        r = int(9 + (18 * ratio))
+        g = int(13 + (17 * ratio))
+        b = int(23 + (25 * ratio))
 
         draw.line(
             [(0, y), (WIDTH, y)],
@@ -258,13 +270,17 @@ def create_gc_reward_card(reward_usd: float):
         )
 
     # --------------------------------------------------------
-    # Subtle diagonal lines
+    # Futuristic diagonal lines
     # --------------------------------------------------------
 
     for x in range(-HEIGHT, WIDTH, 80):
+
         draw.line(
-            [(x, HEIGHT), (x + HEIGHT, 0)],
-            fill=(30, 38, 55),
+            [
+                (x, HEIGHT),
+                (x + HEIGHT, 0)
+            ],
+            fill=(29, 37, 54),
             width=2
         )
 
@@ -272,17 +288,22 @@ def create_gc_reward_card(reward_usd: float):
     # Outer card
     # --------------------------------------------------------
 
-    card_x1 = 70
-    card_y1 = 65
-    card_x2 = WIDTH - 70
-    card_y2 = HEIGHT - 65
+    card_x1 = 60
+    card_y1 = 50
+    card_x2 = WIDTH - 60
+    card_y2 = HEIGHT - 50
 
     gc_round_rect(
         draw,
-        (card_x1, card_y1, card_x2, card_y2),
-        35,
-        fill=(18, 24, 38),
-        outline=(70, 80, 105),
+        (
+            card_x1,
+            card_y1,
+            card_x2,
+            card_y2
+        ),
+        38,
+        fill=(16, 22, 35),
+        outline=(68, 79, 103),
         width=3
     )
 
@@ -290,19 +311,17 @@ def create_gc_reward_card(reward_usd: float):
     # Inner card
     # --------------------------------------------------------
 
-    inner = (
-        card_x1 + 12,
-        card_y1 + 12,
-        card_x2 - 12,
-        card_y2 - 12
-    )
-
     gc_round_rect(
         draw,
-        inner,
-        28,
-        fill=(22, 29, 45),
-        outline=(38, 48, 70),
+        (
+            card_x1 + 12,
+            card_y1 + 12,
+            card_x2 - 12,
+            card_y2 - 12
+        ),
+        30,
+        fill=(21, 28, 43),
+        outline=(38, 48, 69),
         width=2
     )
 
@@ -310,46 +329,63 @@ def create_gc_reward_card(reward_usd: float):
     # Header
     # --------------------------------------------------------
 
-    title_font = gc_font(30, True)
-
-    draw.text(
-        (105, 95),
-        "GIFT CARD REVEAL",
-        font=title_font,
-        fill=(225, 231, 242)
+    title_font = gc_font(
+        30,
+        True
     )
 
-    # Small mystery label
-    small_font = gc_font(20, False)
-
     draw.text(
-        (105, 135),
-        "Your card contains",
-        font=small_font,
-        fill=(135, 148, 170)
+        (100, 82),
+        "GIFT CARD REVEAL",
+        font=title_font,
+        fill=(230, 234, 242)
     )
 
     # --------------------------------------------------------
-    # Reward area
+    # Subheader
+    # --------------------------------------------------------
+
+    small_font = gc_font(
+        19,
+        False
+    )
+
+    draw.text(
+        (100, 123),
+        "Your card contains",
+        font=small_font,
+        fill=(133, 146, 168)
+    )
+
+    # --------------------------------------------------------
+    # Reward box
     # --------------------------------------------------------
 
     reward_box = (
-        105,
-        175,
-        WIDTH - 105,
-        385
+        100,
+        165,
+        WIDTH - 100,
+        380
     )
 
     if reward_usd <= 0:
+
         box_fill = (31, 32, 39)
-        box_outline = (85, 88, 100)
+        box_outline = (84, 88, 100)
         reward_color = (170, 174, 185)
+
         reward_text = "$0"
+
     else:
-        box_fill = (28, 35, 42)
-        box_outline = (74, 118, 92)
+
+        box_fill = (27, 35, 42)
+        box_outline = (72, 118, 91)
         reward_color = (92, 232, 145)
-        reward_text = f"${reward_usd:,.2f}".replace(".00", "")
+
+        if reward_usd == int(reward_usd):
+            reward_text = f"${int(reward_usd)}"
+        else:
+            reward_text = f"${reward_usd:,.2f}"
 
     gc_round_rect(
         draw,
@@ -361,10 +397,13 @@ def create_gc_reward_card(reward_usd: float):
     )
 
     # --------------------------------------------------------
-    # Center reward text
+    # Reward amount
     # --------------------------------------------------------
 
-    reward_font = gc_font(105, True)
+    reward_font = gc_font(
+        105,
+        True
+    )
 
     bbox = draw.textbbox(
         (0, 0),
@@ -373,23 +412,31 @@ def create_gc_reward_card(reward_usd: float):
     )
 
     text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
 
-    text_x = (WIDTH - text_width) // 2
-    text_y = 215
+    text_x = (
+        WIDTH - text_width
+    ) // 2
+
+    text_y = 205
 
     draw.text(
-        (text_x, text_y),
+        (
+            text_x,
+            text_y
+        ),
         reward_text,
         font=reward_font,
         fill=reward_color
     )
 
     # --------------------------------------------------------
-    # Bottom text
+    # Bottom label
     # --------------------------------------------------------
 
-    bottom_font = gc_font(18, False)
+    bottom_font = gc_font(
+        18,
+        False
+    )
 
     bottom_text = "Gift Card Pack"
 
@@ -399,18 +446,22 @@ def create_gc_reward_card(reward_usd: float):
         font=bottom_font
     )
 
+    bottom_width = (
+        bbox[2] - bbox[0]
+    )
+
     draw.text(
         (
-            (WIDTH - (bbox[2] - bbox[0])) // 2,
-            425
+            (WIDTH - bottom_width) // 2,
+            417
         ),
         bottom_text,
         font=bottom_font,
-        fill=(110, 120, 140)
+        fill=(108, 119, 139)
     )
 
     # --------------------------------------------------------
-    # Convert to Discord file
+    # Convert image to memory
     # --------------------------------------------------------
 
     buffer = BytesIO()
@@ -426,9 +477,9 @@ def create_gc_reward_card(reward_usd: float):
     return buffer
 
 
-# ------------------------------------------------------------
-# Gift Card Dropdown
-# ------------------------------------------------------------
+# ============================================================
+# GIFT CARD SELECT MENU
+# ============================================================
 
 class GiftCardSelect(discord.ui.Select):
 
@@ -443,12 +494,14 @@ class GiftCardSelect(discord.ui.Select):
                 value="gc_1",
                 emoji="🎁"
             ),
+
             discord.SelectOption(
                 label="$5",
                 description="Purchase a $5 Gift Card Pack",
                 value="gc_5",
                 emoji="🎁"
             ),
+
             discord.SelectOption(
                 label="$10",
                 description="Purchase a $10 Gift Card Pack",
@@ -464,54 +517,93 @@ class GiftCardSelect(discord.ui.Select):
             options=options
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    # ========================================================
+    # DROPDOWN CALLBACK
+    # ========================================================
+
+    async def callback(
+        self,
+        interaction: discord.Interaction
+    ):
 
         # ----------------------------------------------------
-        # Owner check
+        # User ownership check
         # ----------------------------------------------------
 
         if interaction.user.id != self.owner_id:
+
             await interaction.response.send_message(
                 "This gift card menu belongs to someone else.",
                 ephemeral=True
             )
+
             return
 
+        # ----------------------------------------------------
+        # Get selected pack
+        # ----------------------------------------------------
+
         pack_id = self.values[0]
-        pack = GC_PACKS.get(pack_id)
+
+        pack = GC_PACKS.get(
+            pack_id
+        )
 
         if not pack:
+
             await interaction.response.send_message(
                 "Invalid gift card pack.",
                 ephemeral=True
             )
+
             return
+
+        # ----------------------------------------------------
+        # Get current balance
+        # ----------------------------------------------------
+
+        row = await bot.db.user(
+            interaction.user.id
+        )
+
+        if not row:
+
+            await interaction.response.send_message(
+                "Your account could not be found.",
+                ephemeral=True
+            )
+
+            return
+
+        current_balance = float(
+            row["balance"]
+        )
 
         # ----------------------------------------------------
         # Check balance
         # ----------------------------------------------------
 
-        row = await bot.db.user(interaction.user.id)
-
-        current_balance = float(row["balance"])
-
         if current_balance < pack["cost"]:
+
             await interaction.response.send_message(
                 embed=brand(
                     "Not Enough Points",
                     (
                         f"You need **{money(pack['cost'])} points** "
-                        f"(${pack['cost'] / 200:.2f}) to purchase this pack.\n\n"
-                        f"Your balance: **{money(current_balance)} points**"
+                        f"(${pack['reward_usd']:.2f}) to purchase "
+                        f"this pack.\n\n"
+                        f"Your balance: "
+                        f"**{money(current_balance)} points**"
                     ),
                     0xED4245
                 ),
                 ephemeral=True
             )
+
             return
 
         # ----------------------------------------------------
-        # Deduct pack cost
+        # Deduct purchase
         # ----------------------------------------------------
 
         success = await bot.db.change_balance(
@@ -522,29 +614,60 @@ class GiftCardSelect(discord.ui.Select):
         )
 
         if not success:
+
             await interaction.response.send_message(
                 embed=brand(
                     "Purchase Failed",
-                    "Your balance could not be updated. Please try again.",
+                    (
+                        "Your balance could not be updated. "
+                        "Please try again."
+                    ),
                     0xED4245
                 ),
                 ephemeral=True
             )
+
             return
 
         # ----------------------------------------------------
-        # Credit reward
+        # Add fixed reward
         # ----------------------------------------------------
 
-        await bot.db.change_balance(
+        reward_success = await bot.db.change_balance(
             interaction.user.id,
             pack["reward"],
             "gc_reward",
             pack_id
         )
 
+        if not reward_success:
+
+            # Attempt to refund the purchase if the reward
+            # credit fails.
+
+            await bot.db.change_balance(
+                interaction.user.id,
+                pack["cost"],
+                "gc_refund",
+                pack_id
+            )
+
+            await interaction.response.send_message(
+                embed=brand(
+                    "Purchase Failed",
+                    (
+                        "The reward could not be credited, "
+                        "so your points were refunded."
+                    ),
+                    0xED4245
+                ),
+                ephemeral=True
+            )
+
+            return
+
         # ----------------------------------------------------
-        # Create reward image
+        # Generate reward card
         # ----------------------------------------------------
 
         image_buffer = create_gc_reward_card(
@@ -557,41 +680,24 @@ class GiftCardSelect(discord.ui.Select):
         )
 
         # ----------------------------------------------------
-        # Result message
+        # Result
         # ----------------------------------------------------
 
-        if pack["reward"] <= 0:
+        result_title = "🍀 Lucky!"
 
-            result_title = "🎁 Pack Was Empty!"
-
-            result_description = (
-                "Better luck next time! "
-                "The card had no value ($0.00).\n\n"
-                f"• Cost: **{money(pack['cost'])} points** "
-                f"(${pack['cost'] / 200:.2f})"
-            )
-
-            result_colour = 0x6B7280
-
-        else:
-
-            result_title = "🍀 Lucky!"
-
-            result_description = (
-                f"Congratulations! Your card contained "
-                f"**${pack['reward_usd']:,.2f}**.\n\n"
-                f"• Reward: **{money(pack['reward'])} points** "
-                f"(${pack['reward_usd']:,.2f})\n"
-                f"• Cost: **{money(pack['cost'])} points** "
-                f"(${pack['cost'] / 200:.2f})"
-            )
-
-            result_colour = 0x57F287
+        result_description = (
+            f"Congratulations! Your card contained "
+            f"**${pack['reward_usd']:,.2f}**.\n\n"
+            f"• Reward: **{money(pack['reward'])} points** "
+            f"(${pack['reward_usd']:,.2f})\n"
+            f"• Cost: **{money(pack['cost'])} points** "
+            f"(${pack['cost'] / 200:.2f})"
+        )
 
         result_embed = brand(
             result_title,
             result_description,
-            result_colour
+            0x57F287
         )
 
         result_embed.set_image(
@@ -602,6 +708,10 @@ class GiftCardSelect(discord.ui.Select):
             text="Gift Cards Store"
         )
 
+        # ----------------------------------------------------
+        # Replace store message with result
+        # ----------------------------------------------------
+
         await interaction.response.edit_message(
             embed=result_embed,
             view=None,
@@ -611,50 +721,76 @@ class GiftCardSelect(discord.ui.Select):
         self.view.stop()
 
 
-# ------------------------------------------------------------
-# Gift Card View
-# ------------------------------------------------------------
+# ============================================================
+# GIFT CARD VIEW
+# ============================================================
 
 class GiftCardView(discord.ui.View):
 
     def __init__(self, owner_id):
 
-        super().__init__(timeout=60)
+        super().__init__(
+            timeout=60
+        )
 
         self.owner_id = owner_id
+
         self.message = None
 
         self.add_item(
-            GiftCardSelect(owner_id)
+            GiftCardSelect(
+                owner_id
+            )
         )
+
+    # ========================================================
+    # TIMEOUT
+    # ========================================================
 
     async def on_timeout(self):
 
         for item in self.children:
+
             item.disabled = True
 
         if self.message:
 
             try:
+
                 await self.message.edit(
                     view=self
                 )
+
             except discord.HTTPException:
+
                 pass
 
 
-# ------------------------------------------------------------
-# .gc COMMAND
-# ------------------------------------------------------------
+# ============================================================
+# .GC COMMAND
+# ============================================================
 
-@bot.command(name="gc")
+@bot.command(
+    name="gc"
+)
 async def gc(ctx):
+
+    # --------------------------------------------------------
+    # Store embed
+    # --------------------------------------------------------
 
     embed = brand(
         "Gift Cards Store",
-        "Select a pack tier from the dropdown menu below to get started!",
+        (
+            "Select a pack tier from the dropdown menu "
+            "below to get started!"
+        ),
         0x3498DB
     )
+
+    # --------------------------------------------------------
+    # $1
+    # --------------------------------------------------------
 
     embed.add_field(
         name="$1 Gift Card Pack",
@@ -663,10 +799,15 @@ async def gc(ctx):
             "**How It Works:**\n"
             "• Purchase a pack using points.\n"
             "• Reveal your gift card.\n"
-            "• The reward is automatically credited to your balance."
+            "• Your reward is automatically credited "
+            "to your balance."
         ),
         inline=False
     )
+
+    # --------------------------------------------------------
+    # $5
+    # --------------------------------------------------------
 
     embed.add_field(
         name="$5 Gift Card Pack",
@@ -675,10 +816,15 @@ async def gc(ctx):
             "**How It Works:**\n"
             "• Purchase a pack using points.\n"
             "• Reveal your gift card.\n"
-            "• The reward is automatically credited to your balance."
+            "• Your reward is automatically credited "
+            "to your balance."
         ),
         inline=False
     )
+
+    # --------------------------------------------------------
+    # $10
+    # --------------------------------------------------------
 
     embed.add_field(
         name="$10 Gift Card Pack",
@@ -687,12 +833,19 @@ async def gc(ctx):
             "**How It Works:**\n"
             "• Purchase a pack using points.\n"
             "• Reveal your gift card.\n"
-            "• The reward is automatically credited to your balance."
+            "• Your reward is automatically credited "
+            "to your balance."
         ),
         inline=False
     )
 
-    view = GiftCardView(ctx.author.id)
+    # --------------------------------------------------------
+    # Dropdown
+    # --------------------------------------------------------
+
+    view = GiftCardView(
+        ctx.author.id
+    )
 
     message = await ctx.send(
         embed=embed,
@@ -700,7 +853,6 @@ async def gc(ctx):
     )
 
     view.message = message
-
 
 import asyncio
 import random
