@@ -1246,8 +1246,6 @@ await message.edit(
 
 await view.wait()
 
-    await view.wait()
-
 @bot.command()
 async def help(ctx, command: str = None):
     if command:
