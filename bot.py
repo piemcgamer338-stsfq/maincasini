@@ -84,17 +84,6 @@ def _font(size=42, bold=False):
     return ImageFont.load_default()
 
 
-def card_face_image(card: str, filename="hilo_card.png") -> discord.File:
-    canvas = Image.new("RGB", (900, 520), "#101522")
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((180, 35, 720, 485), radius=32, fill="#fafafa", outline="#d8b45c", width=8)
-    rank, suit = card[:-1], card[-1]
-    ink = "#d62828" if suit in ("♥", "♦") else "#151515"
-    draw.text((235, 80), rank, fill=ink, font=_font(100, True))
-    draw.text((250, 205), suit, fill=ink, font=_font(170, True))
-    draw.text((560, 350), rank, fill=ink, font=_font(100, True))
-    draw.text((45, 20), "HILO", fill="#ffffff", font=_font(42, True))
-    return image_file(canvas, filename)
 
 
 def limbo_image(crash: float, target: float, won: bool) -> discord.File:
@@ -1197,37 +1186,7 @@ class MarketView(OwnerView):
     async def down(self, interaction, button): await self.resolve(interaction,"down")
 
 
-class HiloView(OwnerView):
-    def __init__(self, owner, bet):
-        super().__init__(owner.id, timeout=60); self.bet=bet; self.current=random.randint(2,14); self.rounds=0; self.finished=False
-    def rank(self, value): return {11:"J",12:"Q",13:"K",14:"A"}.get(value,str(value))
-    def game_embed(self):
-        embed = brand("HiLo", f"**Current Card:** {self.rank(self.current)}\n**Next Card:** ??\n\nHigher or Lower? • Multiplier: **{1 + self.rounds*.14:.2f}x**")
-        embed.set_image(url="attachment://hilo_card.png")
-        return embed
-    async def guess(self, interaction, high):
-        if self.finished: return
-        next_card=random.randint(2,14); won=(next_card>self.current) if high else (next_card<self.current)
-        if not won:
-            self.finished=True
-            for item in self.children: item.disabled=True
-            await bot.db.record_game(self.owner_id,self.bet,0,"hilo")
-            embed = brand("HiLo — Lost", f"Current: **{self.rank(self.current)}** • Next: **{self.rank(next_card)}**\nYou lost **{money(self.bet)} points**.", 0xED4245)
-            embed.set_image(url="attachment://hilo_card.png")
-            await interaction.response.edit_message(embed=embed, attachments=[card_face_image(self.rank(next_card)+"♠")], view=self); return
-        self.rounds+=1; self.current=next_card
-        if self.rounds>=8:
-            self.finished=True; payout=round(self.bet*(1+self.rounds*.14),4)
-            for item in self.children: item.disabled=True
-            await bot.db.record_game(self.owner_id,self.bet,payout,"hilo")
-            embed = brand("HiLo — Won", f"{config.E['win']} You won **{money(payout)} points**.", 0x57F287)
-            embed.set_image(url="attachment://hilo_card.png")
-            await interaction.response.edit_message(embed=embed, attachments=[card_face_image(self.rank(next_card)+"♠")], view=self); return
-        await interaction.response.edit_message(embed=self.game_embed(), attachments=[card_face_image(self.rank(self.current)+"♠")], view=self)
-    @discord.ui.button(label="Higher", style=discord.ButtonStyle.success)
-    async def higher(self, interaction, button): await self.guess(interaction,True)
-    @discord.ui.button(label="Lower", style=discord.ButtonStyle.primary)
-    async def lower(self, interaction, button): await self.guess(interaction,False)
+
 
 @bot.command(aliases=["hb", "housebal"])
 async def housebalance(ctx):
@@ -1741,72 +1700,84 @@ import discord
 # COINFLIP IMAGE GENERATOR
 # =========================================================
 
-def get_cf_font(size, bold=False):
-    paths = []
+import io
+import random
+import asyncio
+from PIL import Image, ImageDraw, ImageFont
+import discord
 
+
+def cf_font(size, bold=False):
     if bold:
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-            "arialbd.ttf",
+            "arialbd.ttf"
         ]
     else:
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            "arial.ttf",
+            "arial.ttf"
         ]
 
     for path in paths:
         try:
             return ImageFont.truetype(path, size)
         except:
-            pass
+            continue
 
     return ImageFont.load_default()
 
 
-def draw_centered(draw, text, y, font, fill):
-    bbox = draw.textbbox((0, 0), text, font=font)
-    width = bbox[2] - bbox[0]
+def cf_center_text(draw, text, y, font, fill, width=900):
+    bbox = draw.textbbox(
+        (0, 0),
+        text,
+        font=font
+    )
 
-    x = (900 - width) // 2
+    text_width = bbox[2] - bbox[0]
 
     draw.text(
-        (x, y),
+        (
+            (width - text_width) // 2,
+            y
+        ),
         text,
         font=font,
         fill=fill
     )
 
 
-def create_coinflip_image(username, pick, result, payout):
-    """
-    Creates a fresh coinflip result image every game.
-    """
-
+def create_coinflip_image(
+    username,
+    pick,
+    result,
+    payout
+):
     WIDTH = 900
-    HEIGHT = 900
-
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        (20, 22, 38)
-    )
-
-    draw = ImageDraw.Draw(image)
+    HEIGHT = 520
 
     # =====================================================
     # BACKGROUND
     # =====================================================
 
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        "#101522"
+    )
+
+    draw = ImageDraw.Draw(image)
+
     # Dark gradient
     for y in range(HEIGHT):
         ratio = y / HEIGHT
 
-        r = int(15 + ratio * 8)
-        g = int(17 + ratio * 8)
-        b = int(31 + ratio * 15)
+        r = int(15 + ratio * 7)
+        g = int(17 + ratio * 7)
+        b = int(30 + ratio * 12)
 
         draw.line(
             [(0, y), (WIDTH, y)],
@@ -1814,10 +1785,13 @@ def create_coinflip_image(username, pick, result, payout):
         )
 
     # Futuristic diagonal lines
-    for x in range(-HEIGHT, WIDTH, 45):
+    for x in range(-HEIGHT, WIDTH, 40):
         draw.line(
-            [(x, 0), (x + HEIGHT, HEIGHT)],
-            fill=(28, 31, 50),
+            [
+                (x, 0),
+                (x + HEIGHT, HEIGHT)
+            ],
+            fill="#1c2032",
             width=2
         )
 
@@ -1825,100 +1799,98 @@ def create_coinflip_image(username, pick, result, payout):
     # FONTS
     # =====================================================
 
-    title_font = get_cf_font(38, True)
-    coin_font = get_cf_font(100, True)
-    result_font = get_cf_font(52, True)
-    small_font = get_cf_font(30, False)
+    top_font = cf_font(32, True)
+    result_font = cf_font(43, True)
+    bottom_font = cf_font(25, False)
 
     # =====================================================
     # TOP TEXT
     # =====================================================
 
-    top_text = f"{username} bet on {pick.title()}"
+    top_text = (
+        f"{username} bet on {pick.title()}"
+    )
 
-    draw_centered(
+    cf_center_text(
         draw,
         top_text,
-        65,
-        title_font,
-        (245, 245, 250)
+        30,
+        top_font,
+        "#f5f5f7"
     )
 
     # =====================================================
     # COIN SHADOW
     # =====================================================
 
-    shadow_x = 450
-    shadow_y = 450
-
     draw.ellipse(
         (
-            shadow_x - 180,
-            shadow_y - 180,
-            shadow_x + 180,
-            shadow_y + 180
-        ),
-        fill=(8, 9, 17)
-    )
-
-    # =====================================================
-    # GOLD COIN OUTER RIM
-    # =====================================================
-
-    draw.ellipse(
-        (
-            255,
-            210,
+            295,
+            145,
             645,
-            600
+            490
         ),
-        fill=(245, 185, 55)
+        fill="#080a12"
     )
 
-    # Outer highlight
+    # =====================================================
+    # COIN OUTER RIM
+    # =====================================================
+
     draw.ellipse(
         (
-            265,
-            220,
-            635,
-            590
+            270,
+            105,
+            630,
+            465
         ),
-        outline=(255, 222, 120),
-        width=12
+        fill="#e7a928"
+    )
+
+    # Bright outer ring
+    draw.ellipse(
+        (
+            280,
+            115,
+            620,
+            455
+        ),
+        outline="#ffd85c",
+        width=13
     )
 
     # Dark gold edge
     draw.ellipse(
         (
-            285,
-            240,
-            615,
-            570
-        ),
-        fill=(185, 115, 25)
-    )
-
-    # Inner coin
-    draw.ellipse(
-        (
             300,
-            255,
+            135,
             600,
-            555
+            435
         ),
-        fill=(232, 164, 48)
+        fill="#bd7816"
     )
 
-    # Inner highlight
+    # Main coin face
     draw.ellipse(
         (
             315,
-            270,
+            150,
             585,
-            540
+            420
         ),
-        outline=(255, 201, 90),
-        width=7
+        fill="#eca92d"
+    )
+
+    # Inner gold ring
+    draw.ellipse(
+        (
+            328,
+            163,
+            572,
+            407
+        ),
+        outline="#ffd45c",
+        width=8
     )
 
     # =====================================================
@@ -1926,16 +1898,21 @@ def create_coinflip_image(username, pick, result, payout):
     # =====================================================
 
     if result.lower() == "heads":
+
+        # Large H for heads
         symbol = "H"
+        symbol_font = cf_font(105, True)
 
     else:
-        # Curved tails-like symbol
+
+        # Stylized tails symbol
         symbol = "T"
+        symbol_font = cf_font(100, True)
 
     bbox = draw.textbbox(
         (0, 0),
         symbol,
-        font=coin_font
+        font=symbol_font
     )
 
     symbol_width = bbox[2] - bbox[0]
@@ -1944,11 +1921,11 @@ def create_coinflip_image(username, pick, result, payout):
     draw.text(
         (
             (WIDTH - symbol_width) // 2,
-            330
+            250 - symbol_height // 2
         ),
         symbol,
-        font=coin_font,
-        fill=(150, 86, 16)
+        font=symbol_font,
+        fill="#a8630d"
     )
 
     # =====================================================
@@ -1958,33 +1935,33 @@ def create_coinflip_image(username, pick, result, payout):
     won = payout > 0
 
     if won:
-        result_color = (65, 205, 82)
+        result_color = "#4fd45c"
         result_text = f"Landed on {result.upper()}"
         sub_text = f"You won {money(payout)} points"
 
     else:
-        result_color = (235, 70, 70)
+        result_color = "#ed4b4b"
         result_text = f"Landed on {result.upper()}"
-        sub_text = "You lost the bet"
+        sub_text = f"You lost {money(pick_amount_global)} points"
 
-    draw_centered(
+    cf_center_text(
         draw,
         result_text,
-        650,
+        430,
         result_font,
         result_color
     )
 
-    draw_centered(
+    cf_center_text(
         draw,
         sub_text,
-        715,
-        small_font,
-        (185, 185, 195)
+        478,
+        bottom_font,
+        "#c0c0c8"
     )
 
     # =====================================================
-    # EXPORT TO MEMORY
+    # RETURN DISCORD FILE
     # =====================================================
 
     output = io.BytesIO()
@@ -1996,19 +1973,26 @@ def create_coinflip_image(username, pick, result, payout):
 
     output.seek(0)
 
-    return output
+    return discord.File(
+        output,
+        filename="coinflip_result.png"
+    )
 
 
 # =========================================================
 # COINFLIP COMMAND
 # =========================================================
 
-@bot.command(aliases=["cf"])
+@bot.command(
+    name="coinflip",
+    aliases=["cf"]
+)
 async def coinflip(
     ctx,
     bet: str,
     choice: str = "r"
 ):
+
     if not await bot.game_allowed(ctx):
         return
 
@@ -2024,7 +2008,9 @@ async def coinflip(
         return
 
     if amount <= 0:
-        await ctx.send("Bet must be greater than 0.")
+        await ctx.send(
+            "Bet must be greater than zero."
+        )
         return
 
     # =====================================================
@@ -2047,7 +2033,7 @@ async def coinflip(
         return
 
     # =====================================================
-    # REMOVE BALANCE
+    # TAKE BET
     # =====================================================
 
     if not await bot.db.change_balance(
@@ -2061,29 +2047,32 @@ async def coinflip(
         return
 
     # =====================================================
-    # DETERMINE PLAYER PICK
+    # PLAYER PICK
     # =====================================================
 
     if choice in ("r", "random"):
+
         pick = random.choice([
             "heads",
             "tails"
         ])
 
     elif choice in ("h", "heads"):
+
         pick = "heads"
 
     else:
+
         pick = "tails"
 
     # =====================================================
-    # 2 SECOND FLIP
+    # FLIPPING MESSAGE
     # =====================================================
 
     flipping_embed = discord.Embed(
         title="🪙 Coinflip",
         description=(
-            f"{ctx.author.mention} flipped a coin...\n\n"
+            f"{ctx.author.mention} is flipping the coin...\n\n"
             f"Bet: **{money(amount)} points**\n"
             f"Choice: **{pick.title()}**"
         ),
@@ -2093,6 +2082,10 @@ async def coinflip(
     flipping_message = await ctx.send(
         embed=flipping_embed
     )
+
+    # =====================================================
+    # 2 SECOND DELAY
+    # =====================================================
 
     await asyncio.sleep(2)
 
@@ -2105,17 +2098,23 @@ async def coinflip(
         "tails"
     ])
 
-    payout = (
-        round(amount * 1.92, 4)
-        if pick == result
-        else 0
-    )
+    if pick == result:
+
+        payout = round(
+            amount * 1.92,
+            4
+        )
+
+    else:
+
+        payout = 0
 
     # =====================================================
     # PAY WIN
     # =====================================================
 
     if payout > 0:
+
         await bot.db.change_balance(
             ctx.author.id,
             payout,
@@ -2134,19 +2133,18 @@ async def coinflip(
     )
 
     # =====================================================
-    # GENERATE IMAGE
+    # CREATE RESULT IMAGE
     # =====================================================
 
-    image_buffer = create_coinflip_image(
+    # Used by the image generator for the loss text.
+    global pick_amount_global
+    pick_amount_global = amount
+
+    result_file = create_coinflip_image(
         username=ctx.author.display_name,
         pick=pick,
         result=result,
         payout=payout
-    )
-
-    image_file = discord.File(
-        image_buffer,
-        filename="coinflip_result.png"
     )
 
     # =====================================================
@@ -2184,13 +2182,13 @@ async def coinflip(
     )
 
     # =====================================================
-    # SEND RESULT
+    # REPLACE FLIPPING MESSAGE
     # =====================================================
 
     await flipping_message.edit(
         content="",
         embed=embed,
-        attachments=[image_file]
+        attachments=[result_file]
     )
 
 @bot.command()
@@ -2544,14 +2542,476 @@ async def limbo(ctx, bet: str, target: float):
     crash=round(1/(1-random.random()*.99),2); payout=round(amount*target*.98,4) if crash>=target else 0
     await bot.db.record_game(ctx.author.id,amount,payout,"limbo"); await ctx.send(embed=brand("Limbo — Won" if payout else "Limbo — Lost",f"Crashed at **{crash:.2f}x** • Target: **{target:.2f}x**\n{'Won **'+money(payout)+' points**.' if payout else 'Your bet did not reach the target.'}",0x57F287 if payout else 0xED4245))
 
+# =========================================================
+# HILO CARD IMAGE
+# =========================================================
+
+def card_face_image(card: str, filename="hilo_card.png") -> discord.File:
+    # Large canvas
+    canvas = Image.new(
+        "RGB",
+        (900, 520),
+        "#101522"
+    )
+
+    draw = ImageDraw.Draw(canvas)
+
+    # -----------------------------------------------------
+    # CARD
+    # -----------------------------------------------------
+
+    # Almost full-size playing card
+    card_left = 90
+    card_top = 25
+    card_right = 810
+    card_bottom = 495
+
+    draw.rounded_rectangle(
+        (
+            card_left,
+            card_top,
+            card_right,
+            card_bottom
+        ),
+        radius=42,
+        fill="#ffffff",
+        outline="#d8b45c",
+        width=10
+    )
+
+    # -----------------------------------------------------
+    # CARD DATA
+    # -----------------------------------------------------
+
+    rank = card[:-1]
+    suit = card[-1]
+
+    # Red suits
+    if suit in ("♥", "♦"):
+        ink = "#d62828"
+    else:
+        ink = "#111111"
+
+    # -----------------------------------------------------
+    # TOP LEFT
+    # -----------------------------------------------------
+
+    draw.text(
+        (135, 55),
+        rank,
+        fill=ink,
+        font=_font(115, True)
+    )
+
+    draw.text(
+        (145, 145),
+        suit,
+        fill=ink,
+        font=_font(125, True)
+    )
+
+    # -----------------------------------------------------
+    # CENTER SUIT
+    # -----------------------------------------------------
+
+    center_font = _font(190, True)
+
+    bbox = draw.textbbox(
+        (0, 0),
+        suit,
+        font=center_font
+    )
+
+    suit_width = bbox[2] - bbox[0]
+    suit_height = bbox[3] - bbox[1]
+
+    draw.text(
+        (
+            450 - suit_width // 2,
+            190 - suit_height // 2
+        ),
+        suit,
+        fill=ink,
+        font=center_font
+    )
+
+    # -----------------------------------------------------
+    # BOTTOM RIGHT
+    # -----------------------------------------------------
+
+    bottom_rank_font = _font(115, True)
+    bottom_suit_font = _font(125, True)
+
+    # Rank
+    bbox = draw.textbbox(
+        (0, 0),
+        rank,
+        font=bottom_rank_font
+    )
+
+    rank_width = bbox[2] - bbox[0]
+
+    draw.text(
+        (
+            765 - rank_width,
+            330
+        ),
+        rank,
+        fill=ink,
+        font=bottom_rank_font
+    )
+
+    # Suit
+    bbox = draw.textbbox(
+        (0, 0),
+        suit,
+        font=bottom_suit_font
+    )
+
+    suit_width = bbox[2] - bbox[0]
+
+    draw.text(
+        (
+            765 - suit_width,
+            400
+        ),
+        suit,
+        fill=ink,
+        font=bottom_suit_font
+    )
+
+    # -----------------------------------------------------
+    # EXPORT
+    # -----------------------------------------------------
+
+    return image_file(
+        canvas,
+        filename
+    )
+
+
+# =========================================================
+# HILO VIEW
+# =========================================================
+
+class HiloView(OwnerView):
+
+    def __init__(self, owner, bet):
+        super().__init__(
+            owner.id,
+            timeout=60
+        )
+
+        self.bet = bet
+        self.current = random.randint(2, 14)
+        self.rounds = 0
+        self.finished = False
+
+    # -----------------------------------------------------
+    # CARD RANK
+    # -----------------------------------------------------
+
+    def rank(self, value):
+        return {
+            11: "J",
+            12: "Q",
+            13: "K",
+            14: "A"
+        }.get(
+            value,
+            str(value)
+        )
+
+    # -----------------------------------------------------
+    # GAME EMBED
+    # -----------------------------------------------------
+
+    def game_embed(self):
+
+        multiplier = 1 + self.rounds * 0.14
+
+        embed = brand(
+            "HiLo",
+            (
+                f"**Current Card:** "
+                f"{self.rank(self.current)}\n"
+
+                f"**Next Card:** ??\n\n"
+
+                f"Higher or Lower? • "
+                f"Multiplier: **{multiplier:.2f}x**"
+            )
+        )
+
+        embed.set_image(
+            url="attachment://hilo_card.png"
+        )
+
+        return embed
+
+    # -----------------------------------------------------
+    # GUESS
+    # -----------------------------------------------------
+
+    async def guess(
+        self,
+        interaction,
+        high
+    ):
+
+        if self.finished:
+            return
+
+        next_card = random.randint(
+            2,
+            14
+        )
+
+        # Higher
+        if high:
+            won = next_card > self.current
+
+        # Lower
+        else:
+            won = next_card < self.current
+
+        # =================================================
+        # LOST
+        # =================================================
+
+        if not won:
+
+            self.finished = True
+
+            for item in self.children:
+                item.disabled = True
+
+            await bot.db.record_game(
+                self.owner_id,
+                self.bet,
+                0,
+                "hilo"
+            )
+
+            embed = brand(
+                "HiLo — Lost",
+                (
+                    f"Current: **{self.rank(self.current)}**\n"
+                    f"Next: **{self.rank(next_card)}**\n\n"
+                    f"You lost **{money(self.bet)} points**."
+                ),
+                0xED4245
+            )
+
+            embed.set_image(
+                url="attachment://hilo_card.png"
+            )
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[
+                    card_face_image(
+                        self.rank(next_card) + "♠"
+                    )
+                ],
+                view=self
+            )
+
+            return
+
+        # =================================================
+        # WON ROUND
+        # =================================================
+
+        self.rounds += 1
+        self.current = next_card
+
+        # =================================================
+        # COMPLETED GAME
+        # =================================================
+
+        if self.rounds >= 8:
+
+            self.finished = True
+
+            payout = round(
+                self.bet * (
+                    1 + self.rounds * 0.14
+                ),
+                4
+            )
+
+            for item in self.children:
+                item.disabled = True
+
+            await bot.db.change_balance(
+                self.owner_id,
+                payout,
+                "hilo_win"
+            )
+
+            await bot.db.record_game(
+                self.owner_id,
+                self.bet,
+                payout,
+                "hilo"
+            )
+
+            embed = brand(
+                "HiLo — Won",
+                (
+                    f"{config.E['win']} "
+                    f"You won **{money(payout)} points**."
+                ),
+                0x57F287
+            )
+
+            embed.set_image(
+                url="attachment://hilo_card.png"
+            )
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[
+                    card_face_image(
+                        self.rank(next_card) + "♠"
+                    )
+                ],
+                view=self
+            )
+
+            return
+
+        # =================================================
+        # CONTINUE
+        # =================================================
+
+        await interaction.response.edit_message(
+            embed=self.game_embed(),
+            attachments=[
+                card_face_image(
+                    self.rank(self.current) + "♠"
+                )
+            ],
+            view=self
+        )
+
+    # -----------------------------------------------------
+    # HIGHER BUTTON
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Higher",
+        style=discord.ButtonStyle.success
+    )
+    async def higher(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.guess(
+            interaction,
+            True
+        )
+
+    # -----------------------------------------------------
+    # LOWER BUTTON
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Lower",
+        style=discord.ButtonStyle.primary
+    )
+    async def lower(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.guess(
+            interaction,
+            False
+        )
+
+
+# =========================================================
+# HILO COMMAND
+# =========================================================
+
 @bot.command()
-async def hilo(ctx, bet: str):
-    if not await bot.game_allowed(ctx): return
-    try: amount=parse_amount(bet)
-    except ValueError as error: await ctx.send(str(error)); return
-    if not await bot.db.change_balance(ctx.author.id,-amount,"hilo_bet"): await ctx.send("Insufficient balance."); return
-    view=HiloView(ctx.author,amount)
-    await ctx.send(embed=view.game_embed(), file=card_face_image(view.rank(view.current)+"♠"), view=view)
+async def hilo(
+    ctx,
+    bet: str
+):
+
+    if not await bot.game_allowed(ctx):
+        return
+
+    # -----------------------------------------------------
+    # PARSE BET
+    # -----------------------------------------------------
+
+    try:
+
+        amount = parse_amount(bet)
+
+    except ValueError as error:
+
+        await ctx.send(
+            str(error)
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CHECK BET
+    # -----------------------------------------------------
+
+    if amount <= 0:
+
+        await ctx.send(
+            "Bet must be greater than zero."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # REMOVE BALANCE
+    # -----------------------------------------------------
+
+    if not await bot.db.change_balance(
+        ctx.author.id,
+        -amount,
+        "hilo_bet"
+    ):
+
+        await ctx.send(
+            "Insufficient balance."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CREATE GAME
+    # -----------------------------------------------------
+
+    view = HiloView(
+        ctx.author,
+        amount
+    )
+
+    # -----------------------------------------------------
+    # SEND GAME
+    # -----------------------------------------------------
+
+    await ctx.send(
+        embed=view.game_embed(),
+        file=card_face_image(
+            view.rank(view.current) + "♠"
+        ),
+        view=view
+    )
 
 @bot.command()
 async def market(ctx, bet: str):
