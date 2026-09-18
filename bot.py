@@ -148,7 +148,626 @@ import random
 import discord
 from discord.ext import commands
 
+# =========================================================
+# MARKET GAME
+# =========================================================
 
+MARKET_PAYOUT = 1.92
+
+
+def create_market_chart(direction=None):
+    width = 900
+    height = 430
+
+    img = Image.new(
+        "RGB",
+        (width, height),
+        (10, 12, 17)
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    # -----------------------------------------------------
+    # Background grid
+    # -----------------------------------------------------
+
+    grid_color = (25, 29, 36)
+
+    for x in range(40, width, 55):
+        draw.line(
+            [(x, 25), (x, height - 25)],
+            fill=grid_color,
+            width=1
+        )
+
+    for y in range(35, height, 50):
+        draw.line(
+            [(25, y), (width - 25, y)],
+            fill=grid_color,
+            width=1
+        )
+
+    # -----------------------------------------------------
+    # Generate old market movement
+    # -----------------------------------------------------
+
+    points = []
+
+    x_start = 45
+    x_end = 600
+
+    y = height // 2
+
+    for i in range(22):
+
+        x = x_start + (
+            (x_end - x_start)
+            * i / 21
+        )
+
+        y += random.randint(-28, 28)
+
+        y = max(
+            55,
+            min(height - 55, y)
+        )
+
+        points.append(
+            (int(x), int(y))
+        )
+
+    # -----------------------------------------------------
+    # Grey historical line
+    # -----------------------------------------------------
+
+    for i in range(len(points) - 1):
+
+        draw.line(
+            [
+                points[i],
+                points[i + 1]
+            ],
+            fill=(70, 78, 90),
+            width=8
+        )
+
+    for i in range(len(points) - 1):
+
+        draw.line(
+            [
+                points[i],
+                points[i + 1]
+            ],
+            fill=(145, 150, 160),
+            width=4
+        )
+
+    # -----------------------------------------------------
+    # Question mark before prediction
+    # -----------------------------------------------------
+
+    last_x, last_y = points[-1]
+
+    if direction is None:
+
+        draw.text(
+            (
+                last_x + 15,
+                last_y - 30
+            ),
+            "?",
+            fill=(235, 235, 240)
+        )
+
+    # -----------------------------------------------------
+    # Reveal market direction
+    # -----------------------------------------------------
+
+    if direction is not None:
+
+        continuation = []
+
+        current_y = last_y
+
+        for i in range(13):
+
+            x = last_x + (
+                (width - 65 - last_x)
+                * (i + 1) / 13
+            )
+
+            if direction == "UP":
+                current_y -= random.randint(10, 25)
+
+            else:
+                current_y += random.randint(10, 25)
+
+            current_y = max(
+                35,
+                min(height - 35, current_y)
+            )
+
+            continuation.append(
+                (
+                    int(x),
+                    int(current_y)
+                )
+            )
+
+        result_points = [
+            points[-1]
+        ] + continuation
+
+        if direction == "UP":
+
+            line_color = (
+                0,
+                230,
+                118
+            )
+
+        else:
+
+            line_color = (
+                255,
+                55,
+                55
+            )
+
+        # Soft line glow
+        for i in range(
+            len(result_points) - 1
+        ):
+
+            draw.line(
+                [
+                    result_points[i],
+                    result_points[i + 1]
+                ],
+                fill=(
+                    line_color[0] // 3,
+                    line_color[1] // 3,
+                    line_color[2] // 3
+                ),
+                width=10
+            )
+
+        # Main colored line
+        for i in range(
+            len(result_points) - 1
+        ):
+
+            draw.line(
+                [
+                    result_points[i],
+                    result_points[i + 1]
+                ],
+                fill=line_color,
+                width=5
+            )
+
+        # Final point
+        final_x, final_y = result_points[-1]
+
+        draw.ellipse(
+            [
+                final_x - 6,
+                final_y - 6,
+                final_x + 6,
+                final_y + 6
+            ],
+            fill=line_color
+        )
+
+    # -----------------------------------------------------
+    # Convert to Discord file
+    # -----------------------------------------------------
+
+    output = io.BytesIO()
+
+    img.save(
+        output,
+        format="PNG"
+    )
+
+    output.seek(0)
+
+    return output
+
+
+class MarketView(discord.ui.View):
+
+    def __init__(
+        self,
+        ctx,
+        bet,
+        direction,
+        timeout=30
+    ):
+        super().__init__(timeout=timeout)
+
+        self.ctx = ctx
+        self.bet = bet
+        self.direction = direction
+        self.message = None
+        self.finished = False
+
+    # -----------------------------------------------------
+    # Only original player can use buttons
+    # -----------------------------------------------------
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        if interaction.user.id != self.ctx.author.id:
+
+            await interaction.response.send_message(
+                "This market game belongs to someone else.",
+                ephemeral=True
+            )
+
+            return False
+
+        return True
+
+    # -----------------------------------------------------
+    # Resolve game
+    # -----------------------------------------------------
+
+    async def resolve(
+        self,
+        interaction,
+        prediction
+    ):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        # Disable both buttons
+        for child in self.children:
+            child.disabled = True
+
+        won = prediction == self.direction
+
+        if won:
+
+            payout = self.bet * MARKET_PAYOUT
+
+            success = await bot.db.change_balance(
+                self.ctx.author.id,
+                payout,
+                "Market win"
+            )
+
+            if not success:
+
+                await interaction.response.send_message(
+                    "There was an error paying your winnings.",
+                    ephemeral=True
+                )
+
+                return
+
+            try:
+
+                await bot.db.record_game(
+                    self.ctx.author.id,
+                    self.bet,
+                    payout,
+                    "market"
+                )
+
+            except Exception as error:
+
+                print(
+                    f"MARKET RECORD ERROR: {error}"
+                )
+
+        else:
+
+            payout = 0
+
+            try:
+
+                await bot.db.record_game(
+                    self.ctx.author.id,
+                    self.bet,
+                    0,
+                    "market"
+                )
+
+            except Exception as error:
+
+                print(
+                    f"MARKET RECORD ERROR: {error}"
+                )
+
+        # -------------------------------------------------
+        # Generate revealed chart
+        # -------------------------------------------------
+
+        chart = create_market_chart(
+            self.direction
+        )
+
+        file = discord.File(
+            chart,
+            filename="market.png"
+        )
+
+        # -------------------------------------------------
+        # Result embed
+        # -------------------------------------------------
+
+        if won:
+
+            embed = brand(
+                "📈 Market — WIN",
+                (
+                    f"Your prediction: **{prediction}**\n"
+                    f"Market result: **{self.direction}**\n\n"
+                    f"💰 **Payout:** "
+                    f"{payout:,.2f} points\n"
+                    f"📊 **Multiplier:** 1.92x"
+                ),
+                0x00E676
+            )
+
+        else:
+
+            embed = brand(
+                "📉 Market — LOSS",
+                (
+                    f"Your prediction: **{prediction}**\n"
+                    f"Market result: **{self.direction}**\n\n"
+                    f"💸 **Lost:** "
+                    f"{self.bet:,.2f} points"
+                ),
+                0xED4245
+            )
+
+        embed.set_image(
+            url="attachment://market.png"
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            attachments=[file],
+            view=self
+        )
+
+        self.stop()
+
+    # -----------------------------------------------------
+    # UP button
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="UP",
+        style=discord.ButtonStyle.success,
+        emoji="📈"
+    )
+    async def up(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await self.resolve(
+            interaction,
+            "UP"
+        )
+
+    # -----------------------------------------------------
+    # DOWN button
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="DOWN",
+        style=discord.ButtonStyle.danger,
+        emoji="📉"
+    )
+    async def down(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await self.resolve(
+            interaction,
+            "DOWN"
+        )
+
+
+# =========================================================
+# MARKET COMMAND
+# =========================================================
+
+@bot.command()
+async def market(ctx, amount=None):
+
+    # -----------------------------------------------------
+    # Check allowed game channel
+    # -----------------------------------------------------
+
+    if not bot.game_allowed(ctx):
+        return
+
+    # -----------------------------------------------------
+    # Check amount
+    # -----------------------------------------------------
+
+    if amount is None:
+
+        await ctx.send(
+            embed=brand(
+                "📊 Market",
+                "Usage: `.market [points]`",
+                0xED4245
+            )
+        )
+
+        return
+
+    try:
+
+        bet = parse_amount(amount)
+
+    except Exception:
+
+        await ctx.send(
+            embed=brand(
+                "📊 Market",
+                "Please enter a valid amount.",
+                0xED4245
+            )
+        )
+
+        return
+
+    if bet <= 0:
+
+        await ctx.send(
+            embed=brand(
+                "📊 Market",
+                "The amount must be greater than 0.",
+                0xED4245
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Deduct bet
+    # -----------------------------------------------------
+
+    success = await bot.db.change_balance(
+        ctx.author.id,
+        -bet,
+        "Market bet"
+    )
+
+    if not success:
+
+        await ctx.send(
+            embed=brand(
+                "📊 Market",
+                "You don't have enough points.",
+                0xED4245
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Secret result
+    # -----------------------------------------------------
+
+    direction = random.choice(
+        ["UP", "DOWN"]
+    )
+
+    # -----------------------------------------------------
+    # Wait 2 seconds
+    # -----------------------------------------------------
+
+    await asyncio.sleep(2)
+
+    # -----------------------------------------------------
+    # Create initial chart
+    # Grey line + ?
+    # -----------------------------------------------------
+
+    chart = create_market_chart()
+
+    file = discord.File(
+        chart,
+        filename="market.png"
+    )
+
+    # -----------------------------------------------------
+    # Initial embed
+    # -----------------------------------------------------
+
+    embed = brand(
+        "📊 Market Prediction",
+        (
+            f"**Bet:** {bet:,.2f} points\n"
+            f"**Payout:** "
+            f"{bet * MARKET_PAYOUT:,.2f} points\n\n"
+            "**Will the market go UP or DOWN?**"
+        ),
+        0x5865F2
+    )
+
+    embed.set_image(
+        url="attachment://market.png"
+    )
+
+    # -----------------------------------------------------
+    # Send image
+    # -----------------------------------------------------
+
+    message = await ctx.send(
+        embed=embed,
+        file=file
+    )
+
+    # -----------------------------------------------------
+    # Buttons
+    # -----------------------------------------------------
+
+    view = MarketView(
+        ctx,
+        bet,
+        direction
+    )
+
+    view.message = message
+
+    await message.edit(
+        view=view
+    )
+
+    # -----------------------------------------------------
+    # Wait for prediction
+    # -----------------------------------------------------
+
+    await view.wait()
+
+    # -----------------------------------------------------
+    # Timeout
+    # -----------------------------------------------------
+
+    if not view.finished:
+
+        await bot.db.change_balance(
+            ctx.author.id,
+            bet,
+            "Market timeout refund"
+        )
+
+        for child in view.children:
+            child.disabled = True
+
+        timeout_embed = brand(
+            "📊 Market — Timed Out",
+            (
+                "You didn't choose UP or DOWN in time.\n\n"
+                f"💰 **Refund:** "
+                f"{bet:,.2f} points"
+            ),
+            0xED4245
+        )
+
+        await message.edit(
+            embed=timeout_embed,
+            view=view
+        )
 
 import random
 import discord
@@ -1194,57 +1813,6 @@ import random
 import asyncio
 from PIL import Image, ImageDraw
 
-
-# Generate the hidden result
-direction = random.choice(
-    ["UP", "DOWN"]
-)
-
-# Create the grey/question-mark chart
-chart = create_market_chart()
-
-file = discord.File(
-    chart,
-    filename="market.png"
-)
-
-embed = brand(
-    "📊 Market Prediction",
-    (
-        f"**Bet:** {bet:,.2f} points\n"
-        f"**Payout:** {bet * 1.92:,.2f} points\n\n"
-        "**Will the market go UP or DOWN?**"
-    ),
-    0x5865F2
-)
-
-embed.set_image(
-    url="attachment://market.png"
-)
-
-# SEND THE IMAGE HERE
-message = await ctx.send(
-    embed=embed,
-    file=file
-)
-
-# Wait 2 seconds
-await asyncio.sleep(2)
-
-# Add buttons
-view = MarketView(
-    ctx,
-    bet,
-    direction
-)
-
-view.message = message
-
-await message.edit(
-    view=view
-)
-
-await view.wait()
 
 @bot.command()
 async def help(ctx, command: str = None):
