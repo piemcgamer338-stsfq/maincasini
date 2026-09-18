@@ -86,35 +86,7 @@ def _font(size=42, bold=False):
 
 
 
-def limbo_image(crash: float, target: float, won: bool) -> discord.File:
-    canvas = Image.new("RGB", (1200, 620), "#0b1020")
-    draw = ImageDraw.Draw(canvas)
-    for x in range(0, 1200, 80):
-        draw.line((x, 0, x, 620), fill="#1c2940", width=2)
-    for y in range(0, 620, 80):
-        draw.line((0, y, 1200, y), fill="#1c2940", width=2)
-    title = "LIMBO — WIN" if won else "LIMBO — LOST"
-    draw.text((55, 45), title, fill="#57f287" if won else "#ed4245", font=_font(66, True))
-    draw.text((55, 190), f"{crash:.2f}x", fill="#ffffff", font=_font(150, True))
-    draw.text((60, 385), f"Target: {target:.2f}x", fill="#d9e2f2", font=_font(54, True))
-    draw.text((60, 475), "The round has ended", fill="#9fb0c8", font=_font(38))
-    return image_file(canvas, "limbo.png")
 
-
-def market_image(result: str) -> discord.File:
-    canvas = Image.new("RGB", (1000, 500), "#111318")
-    draw = ImageDraw.Draw(canvas)
-    font = _font(34, True)
-    for x in range(40, 1000, 80): draw.line((x, 35, x, 450), fill="#252a33")
-    for y in range(50, 460, 70): draw.line((35, y, 965, y), fill="#252a33")
-    points=[]; value=330
-    direction = -1 if result == "up" else 1
-    for x in range(50, 940, 55):
-        value += direction * random.randint(8, 27) + random.randint(-12, 12)
-        value=max(60,min(430,value)); points.append((x,value))
-    draw.line(points, fill="#57f287" if result == "up" else "#ed4245", width=6)
-    draw.text((45, 18), f"MARKET CLOSED {result.upper()}", fill="#ffffff", font=font)
-    return image_file(canvas, "market.png")
 
 
 class CasinoBot(commands.Bot):
@@ -153,7 +125,7 @@ class OwnerView(discord.ui.View):
 
 
 HELP = {
-    "Games": "`.mines <bet> [mines]` — Find diamonds and cash out\n`.bj <bet>` / `.blackjack <bet>` — House blackjack\n`.cf <bet> [h/t/r]` — Coinflip\n`.hilo <bet>` — Higher or lower\n`.limbo <bet> <multiplier>` — Beat the crash point\n`.market <bet>` — Pick up or down",
+    "Games": "`.mines <bet> [mines]` — Find diamonds and cash out\n`.bj <bet>` / `.blackjack <bet>` — House blackjack\n`.cf <bet> [h/t/r]` — Coinflip\n`.hilo <bet>` — Higher or lower\n`.market <bet>` — Pick up or down",
     "General": "`.whois [user]` — Detailed user information\n`.stats [user]` — Player statistics\n`.thread create|add|remove|delete` — Personal thread\n`.leaderboard` / `.lb` — Top gamblers\n`.help [command]` — Command help\n`.daily` — Claim 1 point every 24 hours\n`.rain <amount>` — Start a rain\n`.sos <amount>` — Split or steal event",
     "Balance": "`.deposit` — LTC, SOL, or USDT deposits\n`.withdraw` — Request a withdrawal\n`.price <points>` — Convert points to USD\n`.ai <question>` — Ask the configured AI\n`.tip <user> <points>` — Send points\n`.vault deposit|withdraw <points>` — Personal vault\n`.balance [user]` / `.b` — Check balance\n`.claim <code>` — Claim a code\n`.rb`, `.weekly`, `.monthly` — Bonuses",
 }
@@ -1170,55 +1142,626 @@ class BlackjackView(OwnerView):
     async def split(self, interaction, button): await interaction.response.send_message("Split will be enabled in the next blackjack update.",ephemeral=True)
 
 
-class MarketView(OwnerView):
-    def __init__(self, owner, bet): super().__init__(owner.id, timeout=45); self.bet=bet; self.finished=False
-    async def resolve(self, interaction, pick):
-        if self.finished: return
-        self.finished=True; result=random.choice(["up","down"]); payout=round(self.bet*1.97,4) if pick==result else 0
-        await bot.db.record_game(self.owner_id,self.bet,payout,"market")
-        for item in self.children: item.disabled=True
-        embed=brand("Market — Won" if payout else "Market — Lost",f"You chose **{pick.upper()}**. Market closed **{result.upper()}**.\n{'You won **'+money(payout)+' points**.' if payout else 'You lost **'+money(self.bet)+' points**.'}",0x57F287 if payout else 0xED4245)
-        embed.set_image(url="attachment://market.png")
-        await interaction.response.edit_message(embed=embed,attachments=[market_image(result)],view=self)
-    @discord.ui.button(label="Up", style=discord.ButtonStyle.success, emoji=config.E["graph"])
-    async def up(self, interaction, button): await self.resolve(interaction,"up")
-    @discord.ui.button(label="Down", style=discord.ButtonStyle.danger)
-    async def down(self, interaction, button): await self.resolve(interaction,"down")
 
 
 
 
 @bot.command(aliases=["hb", "housebal"])
 async def housebalance(ctx):
+    try:
+        row = await bot.db.pool.fetchrow(
+            "SELECT balance FROM house LIMIT 1"
+        )
+
+        if not row:
+            await ctx.send(
+                embed=brand(
+                    "House Balance",
+                    "House balance is not configured yet.",
+                    0xED4245,
+                )
+            )
+            return
+
+        house_balance = float(row["balance"])
+
+        await ctx.send(
+            embed=brand(
+                f"{config.CASINO_NAME} House Balance",
+                (
+                    f"<:usd:1550062382469087274> "
+                    f"**Total liquidity: ${house_balance:,.2f}**\n\n"
+                    "Note: house balance can be refilled or money can be "
+                    "added by Owners anytime."
+                ),
+                0x00E676,
+            )
+        )
+
+    except Exception as error:
+        print(f"HOUSEBAL ERROR: {error}")
+
+        await ctx.send(
+            embed=brand(
+                "House Balance",
+                "Something went wrong while checking the house balance.",
+                0xED4245,
+            )
+        )
+
+import io
+import random
+import asyncio
+from PIL import Image, ImageDraw
+
+
+# =========================================================
+# MARKET GAME
+# =========================================================
+
+MARKET_PAYOUT = 1.92
+
+
+def create_market_chart(direction=None):
+    """
+    Creates the market chart image.
+
+    Grey = market movement before prediction.
+    Green = market goes UP.
+    Red = market goes DOWN.
+
+    No text is drawn onto the image.
+    """
+
+    width = 900
+    height = 430
+
+    img = Image.new("RGB", (width, height), (10, 12, 17))
+    draw = ImageDraw.Draw(img)
+
+    # -----------------------------------------------------
+    # Subtle grid
+    # -----------------------------------------------------
+
+    grid_color = (25, 29, 36)
+
+    for x in range(40, width, 55):
+        draw.line(
+            [(x, 25), (x, height - 25)],
+            fill=grid_color,
+            width=1
+        )
+
+    for y in range(35, height, 50):
+        draw.line(
+            [(25, y), (width - 25, y)],
+            fill=grid_color,
+            width=1
+        )
+
+    # -----------------------------------------------------
+    # Generate historical market movement
+    # -----------------------------------------------------
+
+    points = []
+
+    x_start = 45
+    x_end = 580
+
+    y = height // 2
+
+    steps = 20
+
+    for i in range(steps):
+        x = x_start + (
+            (x_end - x_start) * i / (steps - 1)
+        )
+
+        # Random market movement
+        y += random.randint(-32, 32)
+
+        # Keep inside chart
+        y = max(55, min(height - 55, y))
+
+        points.append((int(x), int(y)))
+
+    # -----------------------------------------------------
+    # Grey historical line
+    # -----------------------------------------------------
+
+    for i in range(len(points) - 1):
+        draw.line(
+            [points[i], points[i + 1]],
+            fill=(125, 135, 150),
+            width=5
+        )
+
+    # Small grey glow/under-line
+    for i in range(len(points) - 1):
+        draw.line(
+            [points[i], points[i + 1]],
+            fill=(70, 78, 90),
+            width=8
+        )
+
+    # Draw grey line again so it stays sharp
+    for i in range(len(points) - 1):
+        draw.line(
+            [points[i], points[i + 1]],
+            fill=(125, 135, 150),
+            width=4
+        )
+
+    # -----------------------------------------------------
+    # If direction isn't supplied, only show grey line
+    # -----------------------------------------------------
+
+    if direction is None:
+        output = io.BytesIO()
+        img.save(output, format="PNG")
+        output.seek(0)
+        return output
+
+    # -----------------------------------------------------
+    # Colored continuation
+    # -----------------------------------------------------
+
+    last_x, last_y = points[-1]
+
+    continuation = []
+
+    current_y = last_y
+
+    continuation_steps = 13
+
+    for i in range(continuation_steps):
+        x = last_x + (
+            (width - 65 - last_x)
+            * (i + 1)
+            / continuation_steps
+        )
+
+        if direction == "UP":
+            # Overall upward movement
+            change = random.randint(-18, 8)
+
+            # Stronger upward tendency
+            current_y -= random.randint(8, 24)
+
+        else:
+            # Overall downward movement
+            change = random.randint(-8, 18)
+
+            # Stronger downward tendency
+            current_y += random.randint(8, 24)
+
+        current_y += change // 4
+
+        current_y = max(
+            35,
+            min(height - 35, current_y)
+        )
+
+        continuation.append(
+            (int(x), int(current_y))
+        )
+
+    # Connect from the exact end of grey line
+    colored_points = [points[-1]] + continuation
+
+    if direction == "UP":
+        line_color = (0, 230, 118)
+    else:
+        line_color = (255, 65, 65)
+
+    # Subtle glow
+    for i in range(len(colored_points) - 1):
+        draw.line(
+            [
+                colored_points[i],
+                colored_points[i + 1]
+            ],
+            fill=(
+                line_color[0] // 3,
+                line_color[1] // 3,
+                line_color[2] // 3
+            ),
+            width=10
+        )
+
+    # Main colored line
+    for i in range(len(colored_points) - 1):
+        draw.line(
+            [
+                colored_points[i],
+                colored_points[i + 1]
+            ],
+            fill=line_color,
+            width=5
+        )
+
+    # Final market point
+    final_x, final_y = colored_points[-1]
+
+    draw.ellipse(
+        [
+            final_x - 6,
+            final_y - 6,
+            final_x + 6,
+            final_y + 6
+        ],
+        fill=line_color
+    )
+
+    output = io.BytesIO()
+    img.save(output, format="PNG")
+    output.seek(0)
+
+    return output
+
+
+class MarketView(discord.ui.View):
+
+    def __init__(
+        self,
+        ctx,
+        bet,
+        direction,
+        timeout=30
+    ):
+        super().__init__(timeout=timeout)
+
+        self.ctx = ctx
+        self.bet = bet
+        self.direction = direction
+        self.message = None
+        self.finished = False
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "This market game belongs to someone else.",
+                ephemeral=True
+            )
+            return False
+
+        return True
+
+    async def resolve(
+        self,
+        interaction,
+        prediction
+    ):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        # Disable buttons
+        for child in self.children:
+            child.disabled = True
+
+        won = prediction == self.direction
+
+        if won:
+            payout = self.bet * MARKET_PAYOUT
+
+            success = await bot.db.change_balance(
+                self.ctx.author.id,
+                payout,
+                "Market win"
+            )
+
+            if success:
+                try:
+                    await bot.db.record_game(
+                        self.ctx.author.id,
+                        self.bet,
+                        payout,
+                        "market"
+                    )
+                except Exception as error:
+                    print(
+                        f"MARKET RECORD ERROR: {error}"
+                    )
+
+        else:
+            payout = 0
+
+            try:
+                await bot.db.record_game(
+                    self.ctx.author.id,
+                    self.bet,
+                    0,
+                    "market"
+                )
+            except Exception as error:
+                print(
+                    f"MARKET RECORD ERROR: {error}"
+                )
+
+        # Generate final chart
+        chart = create_market_chart(
+            self.direction
+        )
+
+        file = discord.File(
+            chart,
+            filename="market.png"
+        )
+
+        if won:
+            title = "📈 Market Prediction — Won!"
+            color = 0x00E676
+
+            description = (
+                f"Your prediction was **{prediction}**.\n"
+                f"Market went **{self.direction}**.\n\n"
+                f"💰 **Payout:** "
+                f"{payout:,.2f} points "
+                f"(**1.92x**)"
+            )
+
+        else:
+            title = "📉 Market Prediction — Lost"
+            color = 0xED4245
+
+            description = (
+                f"Your prediction was **{prediction}**.\n"
+                f"Market went **{self.direction}**.\n\n"
+                f"💸 **Lost:** "
+                f"{self.bet:,.2f} points"
+            )
+
+        embed = brand(
+            title,
+            description,
+            color
+        )
+
+        embed.set_image(
+            url="attachment://market.png"
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            attachments=[file],
+            view=self
+        )
+
+        self.stop()
+
+    @discord.ui.button(
+        label="UP",
+        style=discord.ButtonStyle.success,
+        emoji="📈"
+    )
+    async def up(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await self.resolve(
+            interaction,
+            "UP"
+        )
+
+    @discord.ui.button(
+        label="DOWN",
+        style=discord.ButtonStyle.danger,
+        emoji="📉"
+    )
+    async def down(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await self.resolve(
+            interaction,
+            "DOWN"
+        )
+
+
+@bot.command()
+async def market(ctx, amount: str = None):
+
+    # -----------------------------------------------------
+    # Game channel check
+    # -----------------------------------------------------
+
+    if not bot.game_allowed(ctx):
+        return
+
+    # -----------------------------------------------------
+    # Amount check
+    # -----------------------------------------------------
+
+    if amount is None:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Usage: `.market [points]`",
+                0xED4245
+            )
+        )
+        return
+
+    try:
+        bet = parse_amount(amount)
+
+    except Exception:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Please enter a valid amount.",
+                0xED4245
+            )
+        )
+        return
+
+    if bet <= 0:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "The amount must be greater than 0.",
+                0xED4245
+            )
+        )
+        return
+
+    # -----------------------------------------------------
+    # Check balance
+    # -----------------------------------------------------
+
     row = await bot.db.pool.fetchrow(
-        "SELECT balance FROM house LIMIT 1"
+        """
+        SELECT balance
+        FROM users
+        WHERE user_id = $1
+        """,
+        ctx.author.id
     )
 
     if not row:
         await ctx.send(
             embed=brand(
-                "House Balance",
-                "House balance is not configured yet.",
-                0xED4245,
+                "Market",
+                "You don't have an account yet.",
+                0xED4245
             )
         )
         return
 
-    house_balance = float(row["balance"])
+    balance = float(row["balance"])
 
-    await ctx.send(
-        embed=brand(
-            f"{config.CASINO_NAME} House Balance",
-            (
-                f"<:usd:1550062382469087274> "
-                f"**Total liquidity: ${house_balance:,.2f}**\n\n"
-                "Note: house balance can be refilled or money can be "
-                "added by Owners anytime."
-            ),
-            0x00E676,
+    if balance < bet:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                (
+                    f"You need **{bet:,.2f} points** "
+                    f"but only have **{balance:,.2f} points**."
+                ),
+                0xED4245
+            )
         )
+        return
+
+    # -----------------------------------------------------
+    # Deduct bet
+    # -----------------------------------------------------
+
+    success = await bot.db.change_balance(
+        ctx.author.id,
+        -bet,
+        "Market bet"
     )
-    
+
+    if not success:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Something went wrong placing your bet.",
+                0xED4245
+            )
+        )
+        return
+
+    # -----------------------------------------------------
+    # Generate hidden result BEFORE waiting
+    # -----------------------------------------------------
+
+    direction = random.choice(
+        ["UP", "DOWN"]
+    )
+
+    # Generate grey chart
+    chart = create_market_chart()
+
+    file = discord.File(
+        chart,
+        filename="market.png"
+    )
+
+    embed = brand(
+        "📊 Market Prediction",
+        (
+            f"**Bet:** {bet:,.2f} points\n"
+            f"**Payout:** {bet * MARKET_PAYOUT:,.2f} points\n\n"
+            "**Will the market go UP or DOWN?**"
+        ),
+        0x5865F2
+    )
+
+    embed.set_image(
+        url="attachment://market.png"
+    )
+
+    # -----------------------------------------------------
+    # Wait 3 seconds
+    # -----------------------------------------------------
+
+    message = await ctx.send(
+        embed=embed
+    )
+
+    await asyncio.sleep(3)
+
+    # -----------------------------------------------------
+    # Add buttons after 3 seconds
+    # -----------------------------------------------------
+
+    view = MarketView(
+        ctx,
+        bet,
+        direction
+    )
+
+    view.message = message
+
+    await message.edit(
+        view=view
+    )
+
+    await view.wait()
+
+    # -----------------------------------------------------
+    # Timeout
+    # -----------------------------------------------------
+
+    if not view.finished:
+
+        # Refund if player doesn't choose
+        await bot.db.change_balance(
+            ctx.author.id,
+            bet,
+            "Market timeout refund"
+        )
+
+        for child in view.children:
+            child.disabled = True
+
+        timeout_embed = brand(
+            "📊 Market Prediction — Timed Out",
+            (
+                f"You didn't make a prediction in time.\n\n"
+                f"**Refund:** {bet:,.2f} points"
+            ),
+            0xED4245
+        )
+
+        await message.edit(
+            embed=timeout_embed,
+            view=view
+        )
+        
 @bot.command()
 async def help(ctx, command: str = None):
     if command:
@@ -2246,161 +2789,65 @@ async def mines(ctx, bet: str, mine_count: int = 3):
 
     bot.active_mines[message.id] = view
 
-@bot.command()
-async def limbo(ctx, bet: str, target: float):
-    if not await bot.game_allowed(ctx): return
-    try: amount=parse_amount(bet)
-    except ValueError as error: await ctx.send(str(error)); return
-    if not 1.01<=target<=1000: await ctx.send("Multiplier must be between 1.01x and 1000x."); return
-    if not await bot.db.change_balance(ctx.author.id,-amount,"limbo_bet"): await ctx.send("Insufficient balance."); return
-    crash=round(1/(1-random.random()*.99),2); payout=round(amount*target*.98,4) if crash>=target else 0
-    await bot.db.record_game(ctx.author.id,amount,payout,"limbo"); await ctx.send(embed=brand("Limbo — Won" if payout else "Limbo — Lost",f"Crashed at **{crash:.2f}x** • Target: **{target:.2f}x**\n{'Won **'+money(payout)+' points**.' if payout else 'Your bet did not reach the target.'}",0x57F287 if payout else 0xED4245))
 
 # =========================================================
-# HILO CARD IMAGE
+# HILO CARD SETTINGS
 # =========================================================
 
-def card_face_image(card: str, filename="hilo_card.png") -> discord.File:
-    # Large canvas
-    canvas = Image.new(
-        "RGB",
-        (900, 520),
-        "#101522"
-    )
+import os
+import random
+import discord
 
-    draw = ImageDraw.Draw(canvas)
 
-    # -----------------------------------------------------
-    # CARD
-    # -----------------------------------------------------
+HILO_CARD_FOLDER = "."
 
-    # Almost full-size playing card
-    card_left = 90
-    card_top = 25
-    card_right = 810
-    card_bottom = 495
 
-    draw.rounded_rectangle(
-        (
-            card_left,
-            card_top,
-            card_right,
-            card_bottom
-        ),
-        radius=42,
-        fill="#ffffff",
-        outline="#d8b45c",
-        width=10
-    )
+HILO_SUITS = [
+    "clubs",
+    "diamonds",
+    "hearts",
+    "spades"
+]
 
-    # -----------------------------------------------------
-    # CARD DATA
-    # -----------------------------------------------------
 
-    rank = card[:-1]
-    suit = card[-1]
+HILO_RANKS = {
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "6",
+    7: "7",
+    8: "8",
+    9: "9",
+    10: "10",
+    11: "jack",
+    12: "queen",
+    13: "king",
+    14: "ace"
+}
 
-    # Red suits
-    if suit in ("♥", "♦"):
-        ink = "#d62828"
-    else:
-        ink = "#111111"
 
-    # -----------------------------------------------------
-    # TOP LEFT
-    # -----------------------------------------------------
+# =========================================================
+# GET CARD PNG
+# =========================================================
 
-    draw.text(
-        (135, 55),
-        rank,
-        fill=ink,
-        font=_font(115, True)
-    )
+def hilo_card_file(rank, suit):
 
-    draw.text(
-        (145, 145),
-        suit,
-        fill=ink,
-        font=_font(125, True)
-    )
+    filename = f"{HILO_RANKS[rank]}_of_{suit}.png"
 
-    # -----------------------------------------------------
-    # CENTER SUIT
-    # -----------------------------------------------------
-
-    center_font = _font(190, True)
-
-    bbox = draw.textbbox(
-        (0, 0),
-        suit,
-        font=center_font
-    )
-
-    suit_width = bbox[2] - bbox[0]
-    suit_height = bbox[3] - bbox[1]
-
-    draw.text(
-        (
-            450 - suit_width // 2,
-            190 - suit_height // 2
-        ),
-        suit,
-        fill=ink,
-        font=center_font
-    )
-
-    # -----------------------------------------------------
-    # BOTTOM RIGHT
-    # -----------------------------------------------------
-
-    bottom_rank_font = _font(115, True)
-    bottom_suit_font = _font(125, True)
-
-    # Rank
-    bbox = draw.textbbox(
-        (0, 0),
-        rank,
-        font=bottom_rank_font
-    )
-
-    rank_width = bbox[2] - bbox[0]
-
-    draw.text(
-        (
-            765 - rank_width,
-            330
-        ),
-        rank,
-        fill=ink,
-        font=bottom_rank_font
-    )
-
-    # Suit
-    bbox = draw.textbbox(
-        (0, 0),
-        suit,
-        font=bottom_suit_font
-    )
-
-    suit_width = bbox[2] - bbox[0]
-
-    draw.text(
-        (
-            765 - suit_width,
-            400
-        ),
-        suit,
-        fill=ink,
-        font=bottom_suit_font
-    )
-
-    # -----------------------------------------------------
-    # EXPORT
-    # -----------------------------------------------------
-
-    return image_file(
-        canvas,
+    path = os.path.join(
+        HILO_CARD_FOLDER,
         filename
+    )
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Card image not found: {filename}"
+        )
+
+    return discord.File(
+        path,
+        filename="hilo_card.png"
     )
 
 
@@ -2411,29 +2858,51 @@ def card_face_image(card: str, filename="hilo_card.png") -> discord.File:
 class HiloView(OwnerView):
 
     def __init__(self, owner, bet):
+
         super().__init__(
             owner.id,
             timeout=60
         )
 
         self.bet = bet
-        self.current = random.randint(2, 14)
+
+        self.current_rank = random.randint(
+            2,
+            14
+        )
+
+        self.current_suit = random.choice(
+            HILO_SUITS
+        )
+
         self.rounds = 0
         self.finished = False
 
     # -----------------------------------------------------
-    # CARD RANK
+    # RANK NAME
     # -----------------------------------------------------
 
-    def rank(self, value):
+    def rank_name(self, value):
+
         return {
-            11: "J",
-            12: "Q",
-            13: "K",
-            14: "A"
+            11: "Jack",
+            12: "Queen",
+            13: "King",
+            14: "Ace"
         }.get(
             value,
             str(value)
+        )
+
+    # -----------------------------------------------------
+    # CURRENT CARD
+    # -----------------------------------------------------
+
+    def current_card_file(self):
+
+        return hilo_card_file(
+            self.current_rank,
+            self.current_suit
         )
 
     # -----------------------------------------------------
@@ -2442,18 +2911,25 @@ class HiloView(OwnerView):
 
     def game_embed(self):
 
-        multiplier = 1 + self.rounds * 0.14
+        multiplier = 1 + (
+            self.rounds * 0.14
+        )
 
         embed = brand(
             "HiLo",
             (
                 f"**Current Card:** "
-                f"{self.rank(self.current)}\n"
+                f"{self.rank_name(self.current_rank)}\n\n"
 
-                f"**Next Card:** ??\n\n"
+                f"**Next Card:** ❓\n\n"
 
-                f"Higher or Lower? • "
-                f"Multiplier: **{multiplier:.2f}x**"
+                f"**High or Low?**\n\n"
+
+                f"**Current Streak:** "
+                f"{self.rounds}\n"
+
+                f"**Current Multi:** "
+                f"{multiplier:.2f}x"
             )
         )
 
@@ -2470,27 +2946,42 @@ class HiloView(OwnerView):
     async def guess(
         self,
         interaction,
-        high
+        higher
     ):
 
         if self.finished:
             return
 
-        next_card = random.randint(
+        # Draw next card
+        next_rank = random.randint(
             2,
             14
         )
 
-        # Higher
-        if high:
-            won = next_card > self.current
+        next_suit = random.choice(
+            HILO_SUITS
+        )
 
-        # Lower
+        # -------------------------------------------------
+        # HIGHER / LOWER
+        # -------------------------------------------------
+
+        if higher:
+
+            won = (
+                next_rank >
+                self.current_rank
+            )
+
         else:
-            won = next_card < self.current
+
+            won = (
+                next_rank <
+                self.current_rank
+            )
 
         # =================================================
-        # LOST
+        # LOSS
         # =================================================
 
         if not won:
@@ -2510,8 +3001,18 @@ class HiloView(OwnerView):
             embed = brand(
                 "HiLo — Lost",
                 (
-                    f"Current: **{self.rank(self.current)}**\n"
-                    f"Next: **{self.rank(next_card)}**\n\n"
+                    f"**Current Card:** "
+                    f"{self.rank_name(self.current_rank)}\n"
+
+                    f"**Next Card:** "
+                    f"{self.rank_name(next_rank)}\n\n"
+
+                    f"**Current Streak:** "
+                    f"{self.rounds}\n"
+
+                    f"**Current Multi:** "
+                    f"{1 + self.rounds * 0.14:.2f}x\n\n"
+
                     f"You lost **{money(self.bet)} points**."
                 ),
                 0xED4245
@@ -2521,13 +3022,14 @@ class HiloView(OwnerView):
                 url="attachment://hilo_card.png"
             )
 
+            next_file = hilo_card_file(
+                next_rank,
+                next_suit
+            )
+
             await interaction.response.edit_message(
                 embed=embed,
-                attachments=[
-                    card_face_image(
-                        self.rank(next_card) + "♠"
-                    )
-                ],
+                attachments=[next_file],
                 view=self
             )
 
@@ -2538,10 +3040,12 @@ class HiloView(OwnerView):
         # =================================================
 
         self.rounds += 1
-        self.current = next_card
+
+        self.current_rank = next_rank
+        self.current_suit = next_suit
 
         # =================================================
-        # COMPLETED GAME
+        # FINISH AFTER 8 ROUNDS
         # =================================================
 
         if self.rounds >= 8:
@@ -2574,8 +3078,17 @@ class HiloView(OwnerView):
             embed = brand(
                 "HiLo — Won",
                 (
+                    f"**Current Card:** "
+                    f"{self.rank_name(self.current_rank)}\n\n"
+
+                    f"**Current Streak:** "
+                    f"{self.rounds}\n"
+
+                    f"**Current Multi:** "
+                    f"{1 + self.rounds * 0.14:.2f}x\n\n"
+
                     f"{config.E['win']} "
-                    f"You won **{money(payout)} points**."
+                    f"You won **{money(payout)} points**!"
                 ),
                 0x57F287
             )
@@ -2584,39 +3097,39 @@ class HiloView(OwnerView):
                 url="attachment://hilo_card.png"
             )
 
+            final_file = hilo_card_file(
+                self.current_rank,
+                self.current_suit
+            )
+
             await interaction.response.edit_message(
                 embed=embed,
-                attachments=[
-                    card_face_image(
-                        self.rank(next_card) + "♠"
-                    )
-                ],
+                attachments=[final_file],
                 view=self
             )
 
             return
 
         # =================================================
-        # CONTINUE
+        # NEXT ROUND
         # =================================================
 
         await interaction.response.edit_message(
             embed=self.game_embed(),
             attachments=[
-                card_face_image(
-                    self.rank(self.current) + "♠"
-                )
+                self.current_card_file()
             ],
             view=self
         )
 
     # -----------------------------------------------------
-    # HIGHER BUTTON
+    # HIGHER
     # -----------------------------------------------------
 
     @discord.ui.button(
         label="Higher",
-        style=discord.ButtonStyle.success
+        style=discord.ButtonStyle.success,
+        emoji="⬆️"
     )
     async def higher(
         self,
@@ -2630,12 +3143,13 @@ class HiloView(OwnerView):
         )
 
     # -----------------------------------------------------
-    # LOWER BUTTON
+    # LOWER
     # -----------------------------------------------------
 
     @discord.ui.button(
         label="Lower",
-        style=discord.ButtonStyle.primary
+        style=discord.ButtonStyle.primary,
+        emoji="⬇️"
     )
     async def lower(
         self,
@@ -2662,10 +3176,6 @@ async def hilo(
     if not await bot.game_allowed(ctx):
         return
 
-    # -----------------------------------------------------
-    # PARSE BET
-    # -----------------------------------------------------
-
     try:
 
         amount = parse_amount(bet)
@@ -2678,10 +3188,6 @@ async def hilo(
 
         return
 
-    # -----------------------------------------------------
-    # CHECK BET
-    # -----------------------------------------------------
-
     if amount <= 0:
 
         await ctx.send(
@@ -2691,7 +3197,7 @@ async def hilo(
         return
 
     # -----------------------------------------------------
-    # REMOVE BALANCE
+    # TAKE BET
     # -----------------------------------------------------
 
     if not await bot.db.change_balance(
@@ -2716,25 +3222,38 @@ async def hilo(
     )
 
     # -----------------------------------------------------
-    # SEND GAME
+    # GET REAL CARD PNG
+    # -----------------------------------------------------
+
+    try:
+
+        card_file = view.current_card_file()
+
+    except FileNotFoundError as error:
+
+        # Refund if image is missing
+        await bot.db.change_balance(
+            ctx.author.id,
+            amount,
+            "hilo_card_error_refund"
+        )
+
+        await ctx.send(
+            f"HiLo card error: `{error}`"
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # SEND
     # -----------------------------------------------------
 
     await ctx.send(
         embed=view.game_embed(),
-        file=card_face_image(
-            view.rank(view.current) + "♠"
-        ),
+        file=card_file,
         view=view
     )
 
-@bot.command()
-async def market(ctx, bet: str):
-    if not await bot.game_allowed(ctx): return
-    try: amount=parse_amount(bet)
-    except ValueError as error: await ctx.send(str(error)); return
-    if not await bot.db.change_balance(ctx.author.id,-amount,"market_bet"): await ctx.send("Insufficient balance."); return
-    view=MarketView(ctx.author,amount)
-    await ctx.send(embed=brand("Market",f"Bet: **{money(amount)} points**\nChoose whether the chart closes up or down."),view=view)
 
 @bot.command()
 async def stats(ctx, member: discord.Member=None):
