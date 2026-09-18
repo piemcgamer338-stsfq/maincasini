@@ -195,26 +195,463 @@ from discord.ext import commands
 
 
 # =========================================================
+# SOS - SPLIT OR STEAL
+# =========================================================
+
+import random
+import discord
+
+
+# =========================================================
+# SOS CONFIRMATION VIEW
+# =========================================================
+
+class SOSConfirmView(discord.ui.View):
+
+    def __init__(self, ctx, amount):
+        super().__init__(timeout=30)
+
+        self.ctx = ctx
+        self.amount = amount
+        self.message = None
+        self.finished = False
+
+    # -----------------------------------------------------
+    # ONLY HOST CAN USE CONFIRMATION BUTTONS
+    # -----------------------------------------------------
+
+    async def interaction_check(self, interaction: discord.Interaction):
+
+        if interaction.user.id != self.ctx.author.id:
+
+            await interaction.response.send_message(
+                "Only the event host can use these buttons.",
+                ephemeral=True
+            )
+
+            return False
+
+        return True
+
+    # -----------------------------------------------------
+    # START
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Start",
+        style=discord.ButtonStyle.success,
+        emoji="✅"
+    )
+    async def start_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        if self.finished:
+            return
+
+        # Take money only when host actually starts
+        balance_changed = await bot.db.change_balance(
+            self.ctx.author.id,
+            -self.amount,
+            "sos_pot"
+        )
+
+        if not balance_changed:
+
+            await interaction.response.send_message(
+                "You do not have enough balance to start this event.",
+                ephemeral=True
+            )
+
+            return
+
+        self.finished = True
+        self.stop()
+
+        for child in self.children:
+            child.disabled = True
+
+        # First acknowledge the button
+        await interaction.response.edit_message(
+            content="",
+            embed=discord.Embed(
+                title="🟢 SOS Event Starting",
+                description=(
+                    f"{self.ctx.author.mention} started a "
+                    f"**{money(self.amount)}** Split or Steal event.\n\n"
+                    "Players can now join the event."
+                ),
+                color=discord.Color.green()
+            ),
+            view=None
+        )
+
+        # Create the actual JOIN view
+        join_view = SOSJoinView(
+            self.ctx,
+            self.amount
+        )
+
+        join_view.message = self.message
+
+        # Replace confirmation with JOIN event
+        await self.message.edit(
+            content="",
+            embed=join_view.make_embed(),
+            view=join_view
+        )
+
+    # -----------------------------------------------------
+    # DECLINE
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Decline",
+        style=discord.ButtonStyle.danger,
+        emoji="❌"
+    )
+    async def decline_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await self.cancel(
+            interaction,
+            "The SOS event was declined."
+        )
+
+    # -----------------------------------------------------
+    # DON'T START
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Don't Start",
+        style=discord.ButtonStyle.secondary,
+        emoji="🛑"
+    )
+    async def dont_start_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        await self.cancel(
+            interaction,
+            "The SOS event was cancelled."
+        )
+
+    # -----------------------------------------------------
+    # CANCEL
+    # -----------------------------------------------------
+
+    async def cancel(
+        self,
+        interaction,
+        reason
+    ):
+
+        if self.finished:
+            return
+
+        self.finished = True
+        self.stop()
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content="",
+            embed=discord.Embed(
+                title="🛑 SOS Event Cancelled",
+                description=reason,
+                color=discord.Color.red()
+            ),
+            view=self
+        )
+
+    # -----------------------------------------------------
+    # CONFIRMATION TIMEOUT
+    # -----------------------------------------------------
+
+    async def on_timeout(self):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        for child in self.children:
+            child.disabled = True
+
+        if self.message:
+
+            await self.message.edit(
+                content="",
+                embed=discord.Embed(
+                    title="⌛ SOS Confirmation Expired",
+                    description=(
+                        "The event was not started in time."
+                    ),
+                    color=discord.Color.orange()
+                ),
+                view=self
+            )
+
+
+# =========================================================
+# SOS JOIN VIEW
+# =========================================================
+
+class SOSJoinView(discord.ui.View):
+
+    def __init__(
+        self,
+        ctx,
+        amount
+    ):
+        super().__init__(timeout=28)
+
+        self.ctx = ctx
+        self.amount = amount
+
+        # Users who actually clicked Join Event
+        self.players = []
+
+        self.message = None
+        self.finished = False
+
+    # -----------------------------------------------------
+    # MENTIONS FOR MESSAGE CONTENT
+    # -----------------------------------------------------
+
+    def joined_mentions(self):
+
+        if not self.players:
+            return ""
+
+        return " ".join(
+            user.mention
+            for user in self.players
+        )
+
+    # -----------------------------------------------------
+    # NAMES FOR EMBED
+    # -----------------------------------------------------
+
+    def joined_names(self):
+
+        if not self.players:
+            return "No players have joined yet."
+
+        return "\n".join(
+            f"• {user.display_name}"
+            for user in self.players
+        )
+
+    # -----------------------------------------------------
+    # JOIN EMBED
+    # -----------------------------------------------------
+
+    def make_embed(self):
+
+        embed = discord.Embed(
+            title="⚔️ Split or Steal Event",
+            description=(
+                f"**Pot:** {money(self.amount)}\n"
+                f"**Hosted by:** {self.ctx.author.display_name}\n\n"
+
+                f"**Total Players Joined:** "
+                f"{len(self.players)} / 2 minimum\n\n"
+
+                f"**Users:**\n"
+                f"{self.joined_names()}\n\n"
+
+                "Click **Join Event** to participate.\n"
+                "Two players will be selected when "
+                "the timer ends."
+            ),
+            color=discord.Color.blurple()
+        )
+
+        embed.set_footer(
+            text="Join period: 28 seconds"
+        )
+
+        return embed
+
+    # -----------------------------------------------------
+    # JOIN BUTTON
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Join Event",
+        style=discord.ButtonStyle.success,
+        emoji="🎮"
+    )
+    async def join_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        if self.finished:
+
+            await interaction.response.send_message(
+                "This event has already ended.",
+                ephemeral=True
+            )
+
+            return
+
+        # Already joined
+        if interaction.user.id in [
+            user.id for user in self.players
+        ]:
+
+            await interaction.response.send_message(
+                "You already joined this event.",
+                ephemeral=True
+            )
+
+            return
+
+        # Add player
+        self.players.append(
+            interaction.user
+        )
+
+        # Public message mentions joined users
+        # so they receive a notification.
+        await interaction.response.edit_message(
+            content=self.joined_mentions(),
+            embed=self.make_embed(),
+            view=self
+        )
+
+    # -----------------------------------------------------
+    # JOIN TIMEOUT
+    # -----------------------------------------------------
+
+    async def on_timeout(self):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        for child in self.children:
+            child.disabled = True
+
+        # -------------------------------------------------
+        # NOT ENOUGH PLAYERS
+        # -------------------------------------------------
+
+        if len(self.players) < 2:
+
+            # Refund host
+            await bot.db.change_balance(
+                self.ctx.author.id,
+                self.amount,
+                "sos_not_enough_players_refund"
+            )
+
+            await self.message.edit(
+                content="",
+                embed=discord.Embed(
+                    title="❌ SOS Event Cancelled",
+                    description=(
+                        "Not enough players joined.\n\n"
+                        "**Minimum required:** 2 players\n"
+                        f"**Joined:** {len(self.players)}\n\n"
+                        f"Refunded: **{money(self.amount)}**"
+                    ),
+                    color=discord.Color.red()
+                ),
+                view=self
+            )
+
+            return
+
+        # -------------------------------------------------
+        # SELECT TWO RANDOM PLAYERS
+        # -------------------------------------------------
+
+        selected_players = random.sample(
+            self.players,
+            2
+        )
+
+        # Create decision view
+        decision_view = SOSDecisionView(
+            self.ctx,
+            self.amount,
+            selected_players
+        )
+
+        decision_view.message = self.message
+
+        # Mention both selected players in CONTENT.
+        # Their notifications happen here.
+        #
+        # The embed itself does not contain actual
+        # mentions, so there are no extra notifications.
+        await self.message.edit(
+            content=(
+                f"{selected_players[0].mention} "
+                f"{selected_players[1].mention}"
+            ),
+            embed=decision_view.make_embed(),
+            view=decision_view
+        )
+
+
+# =========================================================
 # SOS DECISION VIEW
 # =========================================================
 
 class SOSDecisionView(discord.ui.View):
-    def __init__(self, ctx, amount, players):
+
+    def __init__(
+        self,
+        ctx,
+        amount,
+        players
+    ):
         super().__init__(timeout=28)
 
         self.ctx = ctx
         self.amount = amount
         self.players = players
+
+        # user_id -> SPLIT / STEAL
         self.choices = {}
+
         self.message = None
         self.finished = False
 
+    # -----------------------------------------------------
+    # PUBLIC EMBED
+    # -----------------------------------------------------
+
     def make_embed(self):
+
         player_one = self.players[0]
         player_two = self.players[1]
 
-        # NEVER show the actual decision while the other
-        # player has not decided yet.
+        # IMPORTANT:
+        #
+        # We DO NOT reveal SPLIT or STEAL until BOTH
+        # players have selected.
+        #
+        # Before that:
+        #
+        # Locked In
+        # Thinking...
+        #
+
         status_one = (
             "Locked In"
             if player_one.id in self.choices
@@ -227,41 +664,67 @@ class SOSDecisionView(discord.ui.View):
             else "Thinking..."
         )
 
-        return discord.Embed(
+        embed = discord.Embed(
             title="⚔️ SPLIT OR STEAL FACE-OFF",
             description=(
                 "The players have been selected!\n"
                 "Decisions close in **28 seconds**.\n\n"
-                f"• **Player 1:** {player_one.mention} "
+
+                f"• **Player 1:** "
+                f"{player_one.display_name} "
                 f"➔ **{status_one}**\n"
-                f"• **Player 2:** {player_two.mention} "
+
+                f"• **Player 2:** "
+                f"{player_two.display_name} "
                 f"➔ **{status_two}**\n\n"
-                "Players, click your choice below to lock in "
-                "your decision privately."
+
+                "Players, click your choice below to lock "
+                "in your decision privately."
             ),
             color=discord.Color.gold()
         )
 
-    async def interaction_check(self, interaction: discord.Interaction):
+        return embed
+
+    # -----------------------------------------------------
+    # ONLY SELECTED PLAYERS CAN USE BUTTONS
+    # -----------------------------------------------------
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction
+    ):
+
         player_ids = [
-            player.id for player in self.players
+            player.id
+            for player in self.players
         ]
 
+        # Not a selected player
         if interaction.user.id not in player_ids:
+
             await interaction.response.send_message(
                 "You are not one of the selected players.",
                 ephemeral=True
             )
+
             return False
 
+        # Already chose
         if interaction.user.id in self.choices:
+
             await interaction.response.send_message(
                 "You already locked in your decision.",
                 ephemeral=True
             )
+
             return False
 
         return True
+
+    # -----------------------------------------------------
+    # SPLIT
+    # -----------------------------------------------------
 
     @discord.ui.button(
         label="SPLIT",
@@ -273,7 +736,15 @@ class SOSDecisionView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-        await self.choose(interaction, "SPLIT")
+
+        await self.choose(
+            interaction,
+            "SPLIT"
+        )
+
+    # -----------------------------------------------------
+    # STEAL
+    # -----------------------------------------------------
 
     @discord.ui.button(
         label="STEAL",
@@ -285,21 +756,43 @@ class SOSDecisionView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-        await self.choose(interaction, "STEAL")
 
-    async def choose(self, interaction, choice):
-        # Save the choice privately.
-        self.choices[interaction.user.id] = choice
+        await self.choose(
+            interaction,
+            "STEAL"
+        )
 
-        # DO NOT tell the player what was chosen publicly.
+    # -----------------------------------------------------
+    # PLAYER CHOICE
+    # -----------------------------------------------------
+
+    async def choose(
+        self,
+        interaction,
+        choice
+    ):
+
+        # Save decision
+        self.choices[
+            interaction.user.id
+        ] = choice
+
+        # PRIVATE response
+        #
+        # It does NOT say "You chose SPLIT"
+        # to avoid leaking anything.
         await interaction.response.send_message(
-            "Your decision has been locked in.",
+            "🔒 Your decision has been locked in.",
             ephemeral=True
         )
 
-        # If only one player has chosen, update only the
-        # public status to "Locked In".
+        # -------------------------------------------------
+        # ONLY ONE PLAYER HAS ANSWERED
+        # -------------------------------------------------
+
         if len(self.choices) < 2:
+
+            # Public message ONLY says Locked In.
             await self.message.edit(
                 content=(
                     f"{self.players[0].mention} "
@@ -308,13 +801,21 @@ class SOSDecisionView(discord.ui.View):
                 embed=self.make_embed(),
                 view=self
             )
+
             return
 
-        # Both players have now chosen.
-        # Reveal both decisions together.
+        # -------------------------------------------------
+        # BOTH PLAYERS HAVE ANSWERED
+        # -------------------------------------------------
+
         await self.finish_event()
 
+    # -----------------------------------------------------
+    # FINISH EVENT
+    # -----------------------------------------------------
+
     async def finish_event(self):
+
         if self.finished:
             return
 
@@ -337,14 +838,20 @@ class SOSDecisionView(discord.ui.View):
             "STEAL"
         )
 
-        # ==========================================
+        # =================================================
         # BOTH SPLIT
-        # ==========================================
+        # =================================================
 
-        if choice_one == "SPLIT" and choice_two == "SPLIT":
+        if (
+            choice_one == "SPLIT"
+            and
+            choice_two == "SPLIT"
+        ):
 
             first_reward = self.amount // 2
-            second_reward = self.amount - first_reward
+            second_reward = (
+                self.amount - first_reward
+            )
 
             await bot.db.change_balance(
                 player_one.id,
@@ -358,23 +865,31 @@ class SOSDecisionView(discord.ui.View):
                 "sos_split"
             )
 
-            result = (
-                f"• **Player 1:** {player_one.mention} "
-                f"➔ **SPLIT**\n"
-                f"• **Player 2:** {player_two.mention} "
-                f"➔ **SPLIT**\n\n"
-                "🤝 Both players chose to split!\n\n"
+            result_text = (
+                f"• **Player 1:** "
+                f"{player_one.mention} ➔ **SPLIT**\n"
+
+                f"• **Player 2:** "
+                f"{player_two.mention} ➔ **SPLIT**\n\n"
+
+                "🤝 **Both players chose SPLIT!**\n\n"
+
                 f"{player_one.mention} received "
                 f"**{money(first_reward)}**\n"
+
                 f"{player_two.mention} received "
                 f"**{money(second_reward)}**"
             )
 
-        # ==========================================
+        # =================================================
         # PLAYER 1 STEALS
-        # ==========================================
+        # =================================================
 
-        elif choice_one == "STEAL" and choice_two == "SPLIT":
+        elif (
+            choice_one == "STEAL"
+            and
+            choice_two == "SPLIT"
+        ):
 
             await bot.db.change_balance(
                 player_one.id,
@@ -382,20 +897,28 @@ class SOSDecisionView(discord.ui.View):
                 "sos_steal"
             )
 
-            result = (
-                f"• **Player 1:** {player_one.mention} "
-                f"➔ **STEAL**\n"
-                f"• **Player 2:** {player_two.mention} "
-                f"➔ **SPLIT**\n\n"
-                f"💰 {player_one.mention} stole the entire pot!\n\n"
+            result_text = (
+                f"• **Player 1:** "
+                f"{player_one.mention} ➔ **STEAL**\n"
+
+                f"• **Player 2:** "
+                f"{player_two.mention} ➔ **SPLIT**\n\n"
+
+                f"💰 {player_one.mention} "
+                "stole the entire pot!\n\n"
+
                 f"Reward: **{money(self.amount)}**"
             )
 
-        # ==========================================
+        # =================================================
         # PLAYER 2 STEALS
-        # ==========================================
+        # =================================================
 
-        elif choice_one == "SPLIT" and choice_two == "STEAL":
+        elif (
+            choice_one == "SPLIT"
+            and
+            choice_two == "STEAL"
+        ):
 
             await bot.db.change_balance(
                 player_two.id,
@@ -403,53 +926,172 @@ class SOSDecisionView(discord.ui.View):
                 "sos_steal"
             )
 
-            result = (
-                f"• **Player 1:** {player_one.mention} "
-                f"➔ **SPLIT**\n"
-                f"• **Player 2:** {player_two.mention} "
-                f"➔ **STEAL**\n\n"
-                f"💰 {player_two.mention} stole the entire pot!\n\n"
+            result_text = (
+                f"• **Player 1:** "
+                f"{player_one.mention} ➔ **SPLIT**\n"
+
+                f"• **Player 2:** "
+                f"{player_two.mention} ➔ **STEAL**\n\n"
+
+                f"💰 {player_two.mention} "
+                "stole the entire pot!\n\n"
+
                 f"Reward: **{money(self.amount)}**"
             )
 
-        # ==========================================
+        # =================================================
         # BOTH STEAL
-        # ==========================================
+        # =================================================
 
         else:
 
-            result = (
-                f"• **Player 1:** {player_one.mention} "
-                f"➔ **STEAL**\n"
-                f"• **Player 2:** {player_two.mention} "
-                f"➔ **STEAL**\n\n"
-                "💀 Both players chose **STEAL**.\n\n"
+            result_text = (
+                f"• **Player 1:** "
+                f"{player_one.mention} ➔ **STEAL**\n"
+
+                f"• **Player 2:** "
+                f"{player_two.mention} ➔ **STEAL**\n\n"
+
+                "💀 **Both players chose STEAL.**\n\n"
+
                 "Nobody receives the pot."
             )
 
-        # Only NOW are the actual choices revealed.
+        # =================================================
+        # SHOW RESULT
+        # =================================================
+
         await self.message.edit(
             content="",
             embed=discord.Embed(
                 title="🏁 SOS EVENT RESULT",
-                description=result,
+                description=result_text,
                 color=discord.Color.green()
             ),
             view=self
         )
 
+    # -----------------------------------------------------
+    # DECISION TIMEOUT
+    # -----------------------------------------------------
+
     async def on_timeout(self):
+
         if self.finished:
             return
 
-        # Anyone who didn't answer is automatically STEAL.
+        # Anyone who didn't answer becomes STEAL.
         for player in self.players:
-            if player.id not in self.choices:
-                self.choices[player.id] = "STEAL"
 
-        # Both decisions are now finalized/revealed.
+            if player.id not in self.choices:
+
+                self.choices[
+                    player.id
+                ] = "STEAL"
+
+        # Now both decisions can be revealed.
         await self.finish_event()
 
+
+# =========================================================
+# SOS COMMAND
+# =========================================================
+
+@bot.command(
+    name="sos",
+    aliases=["splitorsteal"]
+)
+async def sos(
+    ctx,
+    amount: str = None
+):
+
+    # -----------------------------------------------------
+    # GAME CHANNEL CHECK
+    # -----------------------------------------------------
+
+    if not await bot.game_allowed(ctx):
+        return
+
+    # -----------------------------------------------------
+    # NO AMOUNT
+    # -----------------------------------------------------
+
+    if amount is None:
+
+        await ctx.send(
+            f"Usage: `{ctx.prefix}sos <amount>`"
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # PARSE AMOUNT
+    # -----------------------------------------------------
+
+    try:
+
+        value = parse_amount(amount)
+
+    except ValueError as error:
+
+        await ctx.send(
+            str(error)
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # INVALID AMOUNT
+    # -----------------------------------------------------
+
+    if value <= 0:
+
+        await ctx.send(
+            "The amount must be greater than zero."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CHECK BALANCE
+    #
+    # We don't remove the balance yet.
+    # It gets removed only when Start is clicked.
+    # -----------------------------------------------------
+
+    # If your DB has a balance getter, you can add a
+    # balance check here. Otherwise Start will check it.
+
+    # -----------------------------------------------------
+    # CONFIRMATION
+    # -----------------------------------------------------
+
+    confirm_view = SOSConfirmView(
+        ctx,
+        value
+    )
+
+    embed = discord.Embed(
+        title="⚔️ Confirm Split or Steal",
+        description=(
+            f"{ctx.author.mention} wants to start a "
+            f"Split or Steal event.\n\n"
+
+            f"**Pot:** {money(value)}\n"
+            f"**Host:** {ctx.author.display_name}\n\n"
+
+            "Do you want to start this event?"
+        ),
+        color=discord.Color.gold()
+    )
+
+    message = await ctx.send(
+        embed=embed,
+        view=confirm_view
+    )
+
+    confirm_view.message = message
 
 class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
     address = discord.ui.TextInput(label="Receiving address", min_length=20, max_length=128)
@@ -1088,19 +1730,468 @@ async def rakeback(ctx):
     await bot.db.change_balance(ctx.author.id,available,"rakeback"); await bot.db.pool.execute("UPDATE users SET rakeback=0 WHERE user_id=$1",ctx.author.id)
     await ctx.send(embed=brand("Your Rakeback Details",f"{config.E['win']} Claimed **{money(available)} points**."))
 
+import io
+import random
+import asyncio
+from PIL import Image, ImageDraw, ImageFont
+import discord
+
+
+# =========================================================
+# COINFLIP IMAGE GENERATOR
+# =========================================================
+
+def get_cf_font(size, bold=False):
+    paths = []
+
+    if bold:
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "arialbd.ttf",
+        ]
+    else:
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "arial.ttf",
+        ]
+
+    for path in paths:
+        try:
+            return ImageFont.truetype(path, size)
+        except:
+            pass
+
+    return ImageFont.load_default()
+
+
+def draw_centered(draw, text, y, font, fill):
+    bbox = draw.textbbox((0, 0), text, font=font)
+    width = bbox[2] - bbox[0]
+
+    x = (900 - width) // 2
+
+    draw.text(
+        (x, y),
+        text,
+        font=font,
+        fill=fill
+    )
+
+
+def create_coinflip_image(username, pick, result, payout):
+    """
+    Creates a fresh coinflip result image every game.
+    """
+
+    WIDTH = 900
+    HEIGHT = 900
+
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        (20, 22, 38)
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # =====================================================
+    # BACKGROUND
+    # =====================================================
+
+    # Dark gradient
+    for y in range(HEIGHT):
+        ratio = y / HEIGHT
+
+        r = int(15 + ratio * 8)
+        g = int(17 + ratio * 8)
+        b = int(31 + ratio * 15)
+
+        draw.line(
+            [(0, y), (WIDTH, y)],
+            fill=(r, g, b)
+        )
+
+    # Futuristic diagonal lines
+    for x in range(-HEIGHT, WIDTH, 45):
+        draw.line(
+            [(x, 0), (x + HEIGHT, HEIGHT)],
+            fill=(28, 31, 50),
+            width=2
+        )
+
+    # =====================================================
+    # FONTS
+    # =====================================================
+
+    title_font = get_cf_font(38, True)
+    coin_font = get_cf_font(100, True)
+    result_font = get_cf_font(52, True)
+    small_font = get_cf_font(30, False)
+
+    # =====================================================
+    # TOP TEXT
+    # =====================================================
+
+    top_text = f"{username} bet on {pick.title()}"
+
+    draw_centered(
+        draw,
+        top_text,
+        65,
+        title_font,
+        (245, 245, 250)
+    )
+
+    # =====================================================
+    # COIN SHADOW
+    # =====================================================
+
+    shadow_x = 450
+    shadow_y = 450
+
+    draw.ellipse(
+        (
+            shadow_x - 180,
+            shadow_y - 180,
+            shadow_x + 180,
+            shadow_y + 180
+        ),
+        fill=(8, 9, 17)
+    )
+
+    # =====================================================
+    # GOLD COIN OUTER RIM
+    # =====================================================
+
+    draw.ellipse(
+        (
+            255,
+            210,
+            645,
+            600
+        ),
+        fill=(245, 185, 55)
+    )
+
+    # Outer highlight
+    draw.ellipse(
+        (
+            265,
+            220,
+            635,
+            590
+        ),
+        outline=(255, 222, 120),
+        width=12
+    )
+
+    # Dark gold edge
+    draw.ellipse(
+        (
+            285,
+            240,
+            615,
+            570
+        ),
+        fill=(185, 115, 25)
+    )
+
+    # Inner coin
+    draw.ellipse(
+        (
+            300,
+            255,
+            600,
+            555
+        ),
+        fill=(232, 164, 48)
+    )
+
+    # Inner highlight
+    draw.ellipse(
+        (
+            315,
+            270,
+            585,
+            540
+        ),
+        outline=(255, 201, 90),
+        width=7
+    )
+
+    # =====================================================
+    # COIN SYMBOL
+    # =====================================================
+
+    if result.lower() == "heads":
+        symbol = "H"
+
+    else:
+        # Curved tails-like symbol
+        symbol = "T"
+
+    bbox = draw.textbbox(
+        (0, 0),
+        symbol,
+        font=coin_font
+    )
+
+    symbol_width = bbox[2] - bbox[0]
+    symbol_height = bbox[3] - bbox[1]
+
+    draw.text(
+        (
+            (WIDTH - symbol_width) // 2,
+            330
+        ),
+        symbol,
+        font=coin_font,
+        fill=(150, 86, 16)
+    )
+
+    # =====================================================
+    # RESULT
+    # =====================================================
+
+    won = payout > 0
+
+    if won:
+        result_color = (65, 205, 82)
+        result_text = f"Landed on {result.upper()}"
+        sub_text = f"You won {money(payout)} points"
+
+    else:
+        result_color = (235, 70, 70)
+        result_text = f"Landed on {result.upper()}"
+        sub_text = "You lost the bet"
+
+    draw_centered(
+        draw,
+        result_text,
+        650,
+        result_font,
+        result_color
+    )
+
+    draw_centered(
+        draw,
+        sub_text,
+        715,
+        small_font,
+        (185, 185, 195)
+    )
+
+    # =====================================================
+    # EXPORT TO MEMORY
+    # =====================================================
+
+    output = io.BytesIO()
+
+    image.save(
+        output,
+        format="PNG"
+    )
+
+    output.seek(0)
+
+    return output
+
+
+# =========================================================
+# COINFLIP COMMAND
+# =========================================================
+
 @bot.command(aliases=["cf"])
-async def coinflip(ctx, bet: str, choice: str="r"):
-    if not await bot.game_allowed(ctx): return
-    try: amount=parse_amount(bet)
-    except ValueError as error: await ctx.send(str(error)); return
-    if choice.lower() not in ("h","heads","t","tails","r","random"): await ctx.send("Choose h, t, or r."); return
-    if not await bot.db.change_balance(ctx.author.id,-amount,"coinflip_bet"): await ctx.send("Insufficient balance."); return
-    pick=random.choice(["heads","tails"]) if choice.lower() in ("r","random") else ("heads" if choice.lower().startswith("h") else "tails")
-    result=random.choice(["heads","tails"]); payout=round(amount*1.92,4) if pick==result else 0
-    await bot.db.record_game(ctx.author.id,amount,payout,"coinflip")
-    embed=brand("Coinflip — Won" if payout else "Coinflip — Lost",f"You chose **{pick.title()}**. The coin landed on **{result.title()}**.\n{'You won **'+money(payout)+' points**.' if payout else 'You lost **'+money(amount)+' points**.'}",0x57F287 if payout else 0xED4245)
-    embed.set_image(url=COINFLIP_IMAGES[result])
-    await ctx.send(embed=embed)
+async def coinflip(
+    ctx,
+    bet: str,
+    choice: str = "r"
+):
+    if not await bot.game_allowed(ctx):
+        return
+
+    # =====================================================
+    # PARSE AMOUNT
+    # =====================================================
+
+    try:
+        amount = parse_amount(bet)
+
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    if amount <= 0:
+        await ctx.send("Bet must be greater than 0.")
+        return
+
+    # =====================================================
+    # PARSE CHOICE
+    # =====================================================
+
+    choice = choice.lower()
+
+    if choice not in (
+        "h",
+        "heads",
+        "t",
+        "tails",
+        "r",
+        "random"
+    ):
+        await ctx.send(
+            "Choose `h`, `t`, or `r`."
+        )
+        return
+
+    # =====================================================
+    # REMOVE BALANCE
+    # =====================================================
+
+    if not await bot.db.change_balance(
+        ctx.author.id,
+        -amount,
+        "coinflip_bet"
+    ):
+        await ctx.send(
+            "Insufficient balance."
+        )
+        return
+
+    # =====================================================
+    # DETERMINE PLAYER PICK
+    # =====================================================
+
+    if choice in ("r", "random"):
+        pick = random.choice([
+            "heads",
+            "tails"
+        ])
+
+    elif choice in ("h", "heads"):
+        pick = "heads"
+
+    else:
+        pick = "tails"
+
+    # =====================================================
+    # 2 SECOND FLIP
+    # =====================================================
+
+    flipping_embed = discord.Embed(
+        title="🪙 Coinflip",
+        description=(
+            f"{ctx.author.mention} flipped a coin...\n\n"
+            f"Bet: **{money(amount)} points**\n"
+            f"Choice: **{pick.title()}**"
+        ),
+        color=0x5865F2
+    )
+
+    flipping_message = await ctx.send(
+        embed=flipping_embed
+    )
+
+    await asyncio.sleep(2)
+
+    # =====================================================
+    # RESULT
+    # =====================================================
+
+    result = random.choice([
+        "heads",
+        "tails"
+    ])
+
+    payout = (
+        round(amount * 1.92, 4)
+        if pick == result
+        else 0
+    )
+
+    # =====================================================
+    # PAY WIN
+    # =====================================================
+
+    if payout > 0:
+        await bot.db.change_balance(
+            ctx.author.id,
+            payout,
+            "coinflip_win"
+        )
+
+    # =====================================================
+    # RECORD GAME
+    # =====================================================
+
+    await bot.db.record_game(
+        ctx.author.id,
+        amount,
+        payout,
+        "coinflip"
+    )
+
+    # =====================================================
+    # GENERATE IMAGE
+    # =====================================================
+
+    image_buffer = create_coinflip_image(
+        username=ctx.author.display_name,
+        pick=pick,
+        result=result,
+        payout=payout
+    )
+
+    image_file = discord.File(
+        image_buffer,
+        filename="coinflip_result.png"
+    )
+
+    # =====================================================
+    # RESULT EMBED
+    # =====================================================
+
+    if payout > 0:
+
+        embed = discord.Embed(
+            title="✅ You Won!",
+            description=(
+                f"You bet on **{pick.title()}** "
+                f"and won **{money(payout)} points!** 🎉"
+            ),
+            color=0x57F287
+        )
+
+    else:
+
+        embed = discord.Embed(
+            title="❌ You Lost!",
+            description=(
+                f"You bet on **{pick.title()}** "
+                f"and lost **{money(amount)} points.**"
+            ),
+            color=0xED4245
+        )
+
+    embed.set_image(
+        url="attachment://coinflip_result.png"
+    )
+
+    embed.set_footer(
+        text="🔒 Provably Fair • Coinflip"
+    )
+
+    # =====================================================
+    # SEND RESULT
+    # =====================================================
+
+    await flipping_message.edit(
+        content="",
+        embed=embed,
+        attachments=[image_file]
+    )
 
 @bot.command()
 async def addbal(ctx, member: discord.Member, points: str):
