@@ -3248,16 +3248,20 @@ async def blackjack(ctx, bet: str):
         return
 
     try:
-        # Get current balance
-        balance = await bot.db.get_balance(ctx.author.id)
+        row = await bot.db.user(ctx.author.id)
 
-        bet_lower = bet.lower()
+        if not row:
+            await ctx.send("Your account could not be found.")
+            return
 
-        if bet_lower in ("max", "all"):
+        balance = Decimal(str(row["balance"]))
+        bet_type = bet.lower().strip()
+
+        if bet_type in ("max", "all"):
             amount = balance
 
-        elif bet_lower == "half":
-            amount = balance / 2
+        elif bet_type == "half":
+            amount = balance / Decimal("2")
 
         else:
             amount = parse_amount(bet)
@@ -3265,9 +3269,16 @@ async def blackjack(ctx, bet: str):
     except ValueError as error:
         await ctx.send(str(error))
         return
+    except Exception:
+        await ctx.send("Invalid bet amount.")
+        return
 
     if amount <= 0:
         await ctx.send("Your bet must be greater than 0.")
+        return
+
+    if amount > balance:
+        await ctx.send("Insufficient balance.")
         return
 
     if not await bot.db.change_balance(
