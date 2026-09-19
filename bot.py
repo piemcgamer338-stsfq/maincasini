@@ -3606,7 +3606,7 @@ async def mines(ctx, bet: str, mine_count: int = 3):
         bot.active_mines = {}
 
     bot.active_mines[message.id] = view
-===================================
+# =========================================================
 # HILO CARD SETTINGS
 # =========================================================
 
