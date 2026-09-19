@@ -1480,10 +1480,6 @@ async def market(ctx, amount=None):
             view=view
         )
 
-
-        
-                                )
-
         await loading_message.edit(
             content=None,
             embed=result_embed,
