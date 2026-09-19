@@ -3560,6 +3560,13 @@ async def mines(ctx, bet: str, mine_count: int = 3):
         await ctx.send(str(error))
         return
 
+    # Minimum bet: 20 points ($0.10)
+    if amount < Decimal("20"):
+        await ctx.send(
+            "The minimum bet is **20 points ($0.10)**."
+        )
+        return
+
     if not 1 <= mine_count <= 20:
 
         await ctx.send(
@@ -3606,6 +3613,7 @@ async def mines(ctx, bet: str, mine_count: int = 3):
         bot.active_mines = {}
 
     bot.active_mines[message.id] = view
+        
 # =========================================================
 # HILO CARD SETTINGS
 # =========================================================
