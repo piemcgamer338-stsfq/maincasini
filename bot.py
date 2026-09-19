@@ -1482,115 +1482,13 @@ async def market(ctx, amount=None):
 
 
         
-                        payout_multiplier = Decimal("7")
-            else:
-                payout_multiplier = Decimal("9")
-
-        # -------------------------------------------------
-        # Loading message
-        # -------------------------------------------------
-
-        loading_message = await interaction.channel.send(
-            "<a:m_Loading1:1550866495641223188>"
-        )
-
-        await asyncio.sleep(3)
-
-        # -------------------------------------------------
-        # Calculate payout
-        # -------------------------------------------------
-
-        payout = Decimal("0")
-
-        if result == "win":
-
-            payout = (
-                Decimal(str(self.amount))
-                * payout_multiplier
-            )
-
-            await bot.db.change_balance(
-                self.author.id,
-                payout,
-                "crazydice_win",
-            )
-
-        elif result == "push":
-
-            # Return original bet.
-            payout = Decimal(str(self.amount))
-
-            await bot.db.change_balance(
-                self.author.id,
-                payout,
-                "crazydice_push",
-            )
-
-        # -------------------------------------------------
-        # Result text
-        # -------------------------------------------------
-
-        if result == "win":
-
-            gained = payout
-
-            result_text = (
-                f"Congratulations! You won the **{modality_name}** "
-                f"({dice_count} Dice) modality. "
-                f"You gained **{money(gained)}** points."
-            )
-
-        elif result == "push":
-
-            result_text = (
-                f"**{modality_name}** ({dice_count} Dice) "
-                "resulted in a tie. Your bet was returned."
-            )
-
-        else:
-
-            result_text = (
-                f"You lost the **{modality_name}** "
-                f"({dice_count} Dice) game."
-),
-        )
+                                )
 
         await loading_message.edit(
             content=None,
             embed=result_embed,
         )
 
-
-class CrazyDiceCountButton(discord.ui.Button):
-
-    def __init__(
-        self,
-        label,
-        dice_count,
-        style,
-    ):
-
-        super().__init__(
-            label=label,
-            style=style,
-            row=0,
-        )
-
-        self.dice_count = dice_count
-
-    async def callback(self, interaction: discord.Interaction):
-
-        view = self.view
-
-        if not isinstance(view, CrazyDiceView):
-            return
-
-        if interaction.user.id != view.author.id:
-
-            await interaction.response.send_message(
-                "This game belongs to someone else.",
-                ephemeral=True,
-            )
 
 # =========================================================
 # CRAZY DICE
