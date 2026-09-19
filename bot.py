@@ -3244,11 +3244,48 @@ async def addbal(ctx, member: discord.Member, points: str):
     
 @bot.command(aliases=["bj"])
 async def blackjack(ctx, bet: str):
-    if not await bot.game_allowed(ctx): return
-    try: amount=parse_amount(bet)
-    except ValueError as error: await ctx.send(str(error)); return
-    if not await bot.db.change_balance(ctx.author.id,-amount,"blackjack_bet"): await ctx.send("Insufficient balance."); return
-    view=BlackjackView(ctx.author,amount); embed,table=view.embed_and_file(); await ctx.send(embed=embed,file=table,view=view)
+    if not await bot.game_allowed(ctx):
+        return
+
+    try:
+        # Get current balance
+        balance = await bot.db.get_balance(ctx.author.id)
+
+        bet_lower = bet.lower()
+
+        if bet_lower in ("max", "all"):
+            amount = balance
+
+        elif bet_lower == "half":
+            amount = balance / 2
+
+        else:
+            amount = parse_amount(bet)
+
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    if amount <= 0:
+        await ctx.send("Your bet must be greater than 0.")
+        return
+
+    if not await bot.db.change_balance(
+        ctx.author.id,
+        -amount,
+        "blackjack_bet"
+    ):
+        await ctx.send("Insufficient balance.")
+        return
+
+    view = BlackjackView(ctx.author, amount)
+    embed, table = view.embed_and_file()
+
+    await ctx.send(
+        embed=embed,
+        file=table,
+        view=view
+    )
 
 # ============================================================
 # MINES GAME
