@@ -1480,312 +1480,9 @@ async def market(ctx, amount=None):
             view=view
         )
 
-# =========================================================
-# CRAZY DICE
-# =========================================================
 
-class CrazyDiceView(discord.ui.View):
-
-    def __init__(self, author, amount):
-        super().__init__(timeout=120)
-
-        self.author = author
-        self.amount = amount
-        self.modality = None
-        self.dice_count = None
-        self.finished = False
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-
-        if interaction.user.id != self.author.id:
-            await interaction.response.send_message(
-                "This game belongs to someone else.",
-                ephemeral=True,
-            )
-            return False
-
-        return True
-
-    def modality_embed(self):
-        return brand(
-            "Crazy Dice",
-            (
-                f"Bet: **{money(self.amount)} points**\n\n"
-                "Choose your winning condition:\n\n"
-                "📈 **Higher Wins** — Highest total wins\n"
-                "📉 **Lower Wins** — Lowest total wins\n"
-                "🤝 **Tie Wins** — Both totals must be equal\n\n"
-                "Choose a modality to continue."
-            ),
-        )
-
-    def dice_embed(self):
-        if self.modality == "higher":
-            name = "Higher Wins"
-        elif self.modality == "lower":
-            name = "Lower Wins"
-        else:
-            name = "Tie Wins"
-
-        return brand(
-            "Crazy Dice",
-            (
-                f"Bet: **{money(self.amount)} points**\n"
-                f"Modality: **{name}**\n\n"
-                "Now choose how many dice to roll."
-            ),
-        )
-
-    @discord.ui.button(
-        label="Higher Wins",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def higher_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        if self.finished:
-            return
-
-        self.modality = "higher"
-
-        for child in self.children:
-            child.disabled = True
-
-        self.clear_items()
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "1 Dice",
-                1,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "3 Dice",
-                3,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "6 Dice",
-                6,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-    @discord.ui.button(
-        label="Lower Wins",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def lower_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        if self.finished:
-            return
-
-        self.modality = "lower"
-
-        self.clear_items()
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "1 Dice",
-                1,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "3 Dice",
-                3,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "6 Dice",
-                6,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-    @discord.ui.button(
-        label="Tie Wins",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def tie_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        if self.finished:
-            return
-
-        self.modality = "tie"
-
-        self.clear_items()
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "1 Dice",
-                1,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "3 Dice",
-                3,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceCountButton(
-                "6 Dice",
-                6,
-                discord.ButtonStyle.secondary,
-            )
-        )
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-    async def roll_game(self, interaction: discord.Interaction, dice_count: int):
-
-        if self.finished:
-            return
-
-        self.finished = True
-        self.dice_count = dice_count
-
-        # Disable the setup message.
-        for child in self.children:
-            child.disabled = True
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-        # -------------------------------------------------
-        # Provably fair seeds
-        # -------------------------------------------------
-
-        server_seed, client_seed = provably_fair()
-
-        # -------------------------------------------------
-        # Generate player and dealer dice.
-        #
-        # The existing provably_fair system is used to
-        # create deterministic rolls from the seeds.
-        # -------------------------------------------------
-
-        import hashlib
-
-        def roll_dice(seed: str, count: int, side: str):
-
-            results = []
-
-            for index in range(count):
-
-                raw = (
-                    f"{seed}:crazydice:{side}:"
-                    f"{dice_count}:{index}"
-                ).encode()
-
-                digest = hashlib.sha256(raw).hexdigest()
-
-                number = int(digest[:8], 16)
-
-                results.append((number % 6) + 1)
-
-            return results
-
-        player_dice = roll_dice(
-            server_seed,
-            dice_count,
-            "player",
-        )
-
-        dealer_dice = roll_dice(
-            server_seed,
-            dice_count,
-            "dealer",
-        )
-
-        player_total = sum(player_dice)
-        dealer_total = sum(dealer_dice)
-
-        # -------------------------------------------------
-        # Determine result
-        # -------------------------------------------------
-
-        if self.modality == "higher":
-
-            if player_total > dealer_total:
-                result = "win"
-            elif player_total == dealer_total:
-                result = "push"
-            else:
-                result = "lose"
-
-            modality_name = "Higher Wins"
-
-            payout_multiplier = Decimal("1.96")
-
-        elif self.modality == "lower":
-
-            if player_total < dealer_total:
-                result = "win"
-            elif player_total == dealer_total:
-                result = "push"
-            else:
-                result = "lose"
-
-            modality_name = "Lower Wins"
-
-            payout_multiplier = Decimal("1.96")
-
-        else:
-
-            if player_total == dealer_total:
-                result = "win"
-            else:
-                result = "lose"
-
-            modality_name = "Tie Wins"
-
-            if dice_count == 1:
-                payout_multiplier = Decimal("5")
-            elif dice_count == 3:
-                payout_multiplier = Decimal("7")
+        
+                        payout_multiplier = Decimal("7")
             else:
                 payout_multiplier = Decimal("9")
 
@@ -1855,27 +1552,7 @@ class CrazyDiceView(discord.ui.View):
             result_text = (
                 f"You lost the **{modality_name}** "
                 f"({dice_count} Dice) game."
-            )
-
-        # -------------------------------------------------
-        # Final result embed
-        # -------------------------------------------------
-
-        result_embed = brand(
-            "Crazy Dice",
-            (
-                f"{result_text}\n\n"
-                f"**Your Roll**\n"
-                f"Dice: **{', '.join(map(str, player_dice))}**\n"
-                f"Total: **{player_total}**\n\n"
-                f"**Bot Rolled**\n"
-                f"Dice: **{', '.join(map(str, dealer_dice))}**\n"
-                f"Total: **{dealer_total}**\n\n"
-                f"**Payout:** {payout_multiplier}x\n\n"
-                f"🔒 **Provably Fair**\n"
-                f"**Server Seed:** `{server_seed}`\n"
-                f"**Client Seed:** `{client_seed}`"
-            ),
+),
         )
 
         await loading_message.edit(
@@ -1915,6 +1592,462 @@ class CrazyDiceCountButton(discord.ui.Button):
                 ephemeral=True,
             )
 
+# =========================================================
+# CRAZY DICE
+# =========================================================
+
+class CrazyDiceView(discord.ui.View):
+
+    def __init__(self, author, amount):
+        super().__init__(timeout=120)
+
+        self.author = author
+        self.amount = amount
+        self.modality = None
+        self.dice_count = None
+        self.finished = False
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.author.id:
+
+            await interaction.response.send_message(
+                "This game belongs to someone else.",
+                ephemeral=True,
+            )
+
+            return False
+
+        return True
+
+    def modality_embed(self):
+
+        return brand(
+            "Crazy Dice",
+            (
+                f"Bet: **{money(self.amount)} points**\n\n"
+                "**Choose your winning condition:**\n\n"
+                "📈 **Higher Wins** — Highest total wins\n"
+                "📉 **Lower Wins** — Lowest total wins\n"
+                "🤝 **Tie Wins** — Both totals must be equal"
+            ),
+        )
+
+    def dice_embed(self):
+
+        if self.modality == "higher":
+            modality_name = "Higher Wins"
+
+        elif self.modality == "lower":
+            modality_name = "Lower Wins"
+
+        else:
+            modality_name = "Tie Wins"
+
+        return brand(
+            "Crazy Dice",
+            (
+                f"Bet: **{money(self.amount)} points**\n"
+                f"Modality: **{modality_name}**\n\n"
+                "Choose how many dice you want to roll."
+            ),
+        )
+
+    def add_dice_buttons(self):
+
+        self.clear_items()
+
+        self.add_item(
+            CrazyDiceCountButton(
+                "1 Dice",
+                1,
+            )
+        )
+
+        self.add_item(
+            CrazyDiceCountButton(
+                "3 Dice",
+                3,
+            )
+        )
+
+        self.add_item(
+            CrazyDiceCountButton(
+                "6 Dice",
+                6,
+            )
+        )
+
+    # -----------------------------------------------------
+    # MODALITY BUTTONS
+    # -----------------------------------------------------
+
+    @discord.ui.button(
+        label="Higher Wins",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def higher_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        if self.finished:
+            return
+
+        self.modality = "higher"
+
+        self.add_dice_buttons()
+
+        await interaction.response.edit_message(
+            embed=self.dice_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="Lower Wins",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def lower_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        if self.finished:
+            return
+
+        self.modality = "lower"
+
+        self.add_dice_buttons()
+
+        await interaction.response.edit_message(
+            embed=self.dice_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="Tie Wins",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def tie_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        if self.finished:
+            return
+
+        self.modality = "tie"
+
+        self.add_dice_buttons()
+
+        await interaction.response.edit_message(
+            embed=self.dice_embed(),
+            view=self,
+        )
+
+    # -----------------------------------------------------
+    # ROLL GAME
+    # -----------------------------------------------------
+
+    async def roll_game(
+        self,
+        interaction: discord.Interaction,
+        dice_count: int,
+    ):
+
+        if self.finished:
+            return
+
+        self.finished = True
+        self.dice_count = dice_count
+
+        # Acknowledge the button immediately.
+        await interaction.response.defer()
+
+        # Disable buttons.
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.edit_original_response(
+            embed=self.dice_embed(),
+            view=self,
+        )
+
+        # -------------------------------------------------
+        # PROVABLY FAIR
+        # -------------------------------------------------
+
+        server_seed, client_seed = provably_fair()
+
+        # -------------------------------------------------
+        # DICE GENERATOR
+        # -------------------------------------------------
+
+        import hashlib
+
+        def roll_dice(
+            server_seed_value,
+            client_seed_value,
+            side,
+            count,
+        ):
+
+            rolls = []
+
+            for index in range(count):
+
+                raw = (
+                    f"{server_seed_value}:"
+                    f"{client_seed_value}:"
+                    f"crazydice:"
+                    f"{side}:"
+                    f"{count}:"
+                    f"{index}"
+                ).encode()
+
+                digest = hashlib.sha256(
+                    raw
+                ).hexdigest()
+
+                number = int(
+                    digest[:8],
+                    16,
+                )
+
+                roll = (number % 6) + 1
+
+                rolls.append(roll)
+
+            return rolls
+
+        player_dice = roll_dice(
+            server_seed,
+            client_seed,
+            "player",
+            dice_count,
+        )
+
+        dealer_dice = roll_dice(
+            server_seed,
+            client_seed,
+            "dealer",
+            dice_count,
+        )
+
+        player_total = sum(player_dice)
+        dealer_total = sum(dealer_dice)
+
+        # -------------------------------------------------
+        # DETERMINE RESULT
+        # -------------------------------------------------
+
+        if self.modality == "higher":
+
+            modality_name = "Higher Wins"
+
+            payout_multiplier = Decimal("1.96")
+
+            if player_total > dealer_total:
+
+                result = "win"
+
+            elif player_total == dealer_total:
+
+                result = "push"
+
+            else:
+
+                result = "lose"
+
+        elif self.modality == "lower":
+
+            modality_name = "Lower Wins"
+
+            payout_multiplier = Decimal("1.96")
+
+            if player_total < dealer_total:
+
+                result = "win"
+
+            elif player_total == dealer_total:
+
+                result = "push"
+
+            else:
+
+                result = "lose"
+
+        else:
+
+            modality_name = "Tie Wins"
+
+            if dice_count == 1:
+
+                payout_multiplier = Decimal("5")
+
+            elif dice_count == 3:
+
+                payout_multiplier = Decimal("7")
+
+            else:
+
+                payout_multiplier = Decimal("9")
+
+            if player_total == dealer_total:
+
+                result = "win"
+
+            else:
+
+                result = "lose"
+
+        # -------------------------------------------------
+        # LOADING MESSAGE
+        # -------------------------------------------------
+
+        loading_message = await interaction.followup.send(
+            "<a:m_Loading1:1550866495641223188>",
+            wait=True,
+        )
+
+        await asyncio.sleep(3)
+
+        # -------------------------------------------------
+        # PAYOUT
+        # -------------------------------------------------
+
+        payout = Decimal("0")
+
+        if result == "win":
+
+            payout = (
+                Decimal(str(self.amount))
+                * payout_multiplier
+            )
+
+            await bot.db.change_balance(
+                self.author.id,
+                payout,
+                "crazydice_win",
+            )
+
+        elif result == "push":
+
+            # Return original bet.
+            payout = Decimal(str(self.amount))
+
+            await bot.db.change_balance(
+                self.author.id,
+                payout,
+                "crazydice_push",
+            )
+
+        # -------------------------------------------------
+        # RESULT TEXT
+        # -------------------------------------------------
+
+        if result == "win":
+
+            result_text = (
+                f"Congratulations! You won the "
+                f"**{modality_name}** ({dice_count} Dice) "
+                f"modality. You gained "
+                f"**{money(payout)}** points."
+            )
+
+        elif result == "push":
+
+            result_text = (
+                f"**{modality_name}** ({dice_count} Dice) "
+                "resulted in a tie. "
+                "Your bet was returned."
+            )
+
+        else:
+
+            result_text = (
+                f"You lost the **{modality_name}** "
+                f"({dice_count} Dice) game."
+            )
+
+        # -------------------------------------------------
+        # FINAL RESULT
+        # -------------------------------------------------
+
+        result_embed = brand(
+            "Crazy Dice",
+            (
+                f"{result_text}\n\n"
+
+                f"**Your Roll**\n"
+                f"Dice: **{', '.join(map(str, player_dice))}**\n"
+                f"Total: **{player_total}**\n\n"
+
+                f"**Bot Rolled**\n"
+                f"Dice: **{', '.join(map(str, dealer_dice))}**\n"
+                f"Total: **{dealer_total}**\n\n"
+
+                f"**Payout:** {payout_multiplier}x\n\n"
+
+                f"🔒 **Provably Fair**\n"
+                f"**Server Seed:** `{server_seed}`\n"
+                f"**Client Seed:** `{client_seed}`"
+            ),
+        )
+
+        await loading_message.edit(
+            content=None,
+            embed=result_embed,
+        )
+
+        self.stop()
+
+
+class CrazyDiceCountButton(discord.ui.Button):
+
+    def __init__(
+        self,
+        label,
+        dice_count,
+    ):
+
+        super().__init__(
+            label=label,
+            style=discord.ButtonStyle.secondary,
+            row=0,
+        )
+
+        self.dice_count = dice_count
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        view = self.view
+
+        if not isinstance(
+            view,
+            CrazyDiceView,
+        ):
+            return
+
+        if interaction.user.id != view.author.id:
+
+            await interaction.response.send_message(
+                "This game belongs to someone else.",
+                ephemeral=True,
+            )
+
             return
 
         await view.roll_game(
@@ -1927,8 +2060,13 @@ class CrazyDiceCountButton(discord.ui.Button):
 # CRAZY DICE COMMAND
 # =========================================================
 
-@bot.command()
-async def crazydice(ctx, bet: str):
+@bot.command(
+    aliases=["cd"],
+)
+async def crazydice(
+    ctx,
+    bet: str,
+):
 
     if not await bot.game_allowed(ctx):
         return
@@ -1937,9 +2075,19 @@ async def crazydice(ctx, bet: str):
 
         bet_lower = bet.lower().strip()
 
-        if bet_lower in ("half", "all", "max"):
+        # ---------------------------------------------
+        # HALF / ALL / MAX
+        # ---------------------------------------------
 
-            row = await bot.db.user(ctx.author.id)
+        if bet_lower in (
+            "half",
+            "all",
+            "max",
+        ):
+
+            row = await bot.db.user(
+                ctx.author.id
+            )
 
             if not row:
 
@@ -1951,7 +2099,10 @@ async def crazydice(ctx, bet: str):
 
             balance = row["balance"]
 
-            if bet_lower in ("all", "max"):
+            if bet_lower in (
+                "all",
+                "max",
+            ):
 
                 amount = parse_amount(
                     str(balance)
@@ -1970,15 +2121,22 @@ async def crazydice(ctx, bet: str):
 
         else:
 
-            amount = parse_amount(bet)
+            amount = parse_amount(
+                bet
+            )
 
     except ValueError as error:
 
-        await ctx.send(str(error))
+        await ctx.send(
+            str(error)
+        )
 
         return
 
-    # Minimum bet: 20 points ($0.10)
+    # ---------------------------------------------
+    # MINIMUM BET
+    # ---------------------------------------------
+
     if Decimal(str(amount)) < Decimal("20"):
 
         await ctx.send(
@@ -1987,7 +2145,10 @@ async def crazydice(ctx, bet: str):
 
         return
 
-    # Cut the bet immediately.
+    # ---------------------------------------------
+    # DEDUCT BET
+    # ---------------------------------------------
+
     if not await bot.db.change_balance(
         ctx.author.id,
         -amount,
@@ -2000,6 +2161,10 @@ async def crazydice(ctx, bet: str):
 
         return
 
+    # ---------------------------------------------
+    # START GAME
+    # ---------------------------------------------
+
     view = CrazyDiceView(
         ctx.author,
         amount,
@@ -2009,11 +2174,6 @@ async def crazydice(ctx, bet: str):
         embed=view.modality_embed(),
         view=view,
     )
-    
-import random
-import discord
-from discord.ext import commands
-
 
 # =========================================================
 # SOS - SPLIT OR STEAL
