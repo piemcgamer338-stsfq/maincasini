@@ -1485,12 +1485,6 @@ async def market(ctx, amount=None):
             embed=result_embed,
         )
 
-
-# 
-                            "player",
-            dice_count,
-        )
-
         dealer_dice = roll_dice(
             server_seed,
             client_seed,
