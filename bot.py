@@ -3525,9 +3525,8 @@ class MinesView(OwnerView):
 # ============================================================
 # MINES COMMAND
 # ============================================================
-
-@bot.command(aliases=["cf"])
-async def coinflip(ctx, bet: str, choice: str = "heads"):
+@bot.command()
+async def mines(ctx, bet: str, mine_count: int = 3):
 
     if not await bot.game_allowed(ctx):
         return
@@ -3540,13 +3539,16 @@ async def coinflip(ctx, bet: str, choice: str = "heads"):
             row = await bot.db.user(ctx.author.id)
 
             if not row:
-                await ctx.send("Your account could not be found.")
+                await ctx.send(
+                    "Your account could not be found."
+                )
                 return
 
             balance = row["balance"]
 
             if bet_lower in ("all", "max"):
                 amount = parse_amount(str(balance))
+
             else:
                 half_balance = Decimal(str(balance)) / Decimal("2")
                 amount = parse_amount(str(half_balance))
@@ -3558,37 +3560,53 @@ async def coinflip(ctx, bet: str, choice: str = "heads"):
         await ctx.send(str(error))
         return
 
-    if amount <= 0:
-        await ctx.send("Your bet must be greater than 0.")
+    if not 1 <= mine_count <= 20:
+
+        await ctx.send(
+            "Choose from 1 to 20 mines."
+        )
+
         return
 
     if not await bot.db.change_balance(
         ctx.author.id,
         -amount,
-        "coinflip_bet",
+        "mines_bet",
     ):
-        await ctx.send("Insufficient balance.")
+
+        await ctx.send(
+            "Insufficient balance."
+        )
+
         return
 
-    view = CoinflipView(
+    view = MinesView(
         ctx.author,
         amount,
-        choice,
+        mine_count,
     )
 
-    await ctx.send(
+    message = await ctx.send(
         embed=brand(
-            "Coinflip",
+            "Mines",
             (
-                f"Bet: **{money(amount)} points**\n"
-                f"Choice: **{choice}**"
+                f"Bet: **{money(amount)} points** • "
+                f"Mines: **{mine_count}**\n"
+                f"Find diamonds, then react with 💰 to cash out."
             ),
         ),
         view=view,
     )
 
+    # Save message for reaction cashout.
+    view.message = message
 
-# =========================================================
+    # Store active game by message ID.
+    if not hasattr(bot, "active_mines"):
+        bot.active_mines = {}
+
+    bot.active_mines[message.id] = view
+===================================
 # HILO CARD SETTINGS
 # =========================================================
 
