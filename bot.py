@@ -3244,23 +3244,28 @@ async def addbal(ctx, member: discord.Member, points: str):
     
 @bot.command(aliases=["bj"])
 async def blackjack(ctx, bet: str):
+
     if not await bot.game_allowed(ctx):
         return
 
     try:
         bet_lower = bet.lower().strip()
 
-        if bet_lower in ("max", "all", "half"):
+        if bet_lower in ("half", "all", "max"):
+
             row = await bot.db.user(ctx.author.id)
 
             if not row:
-                await ctx.send("Your account could not be found.")
+                await ctx.send(
+                    "Your account could not be found."
+                )
                 return
 
             balance = row["balance"]
 
-            if bet_lower in ("max", "all"):
+            if bet_lower in ("all", "max"):
                 amount = parse_amount(str(balance))
+
             else:
                 half_balance = Decimal(str(balance)) / Decimal("2")
                 amount = parse_amount(str(half_balance))
@@ -3272,18 +3277,35 @@ async def blackjack(ctx, bet: str):
         await ctx.send(str(error))
         return
 
+    # Minimum bet: 20 points ($0.10)
+    if amount < Decimal("20"):
+        await ctx.send(
+            "The minimum bet is **20 points ($0.10)**."
+        )
+        return
+
     if not await bot.db.change_balance(
         ctx.author.id,
         -amount,
-        "blackjack_bet"
+        "blackjack_bet",
     ):
-        await ctx.send("Insufficient balance.")
+        await ctx.send(
+            "Insufficient balance."
+        )
         return
 
-    view = BlackjackView(ctx.author, amount)
-    embed, table = view.embed_and_file()
-    await ctx.send(embed=embed, file=table, view=view)
+    view = BlackjackView(
+        ctx.author,
+        amount
+    )
 
+    embed, table = view.embed_and_file()
+
+    await ctx.send(
+        embed=embed,
+        file=table,
+        view=view
+    )
 # ============================================================
 # MINES GAME
 # ============================================================
