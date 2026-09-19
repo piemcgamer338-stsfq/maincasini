@@ -3257,22 +3257,19 @@ async def blackjack(ctx, bet: str):
                 await ctx.send("Your account could not be found.")
                 return
 
-            balance = Decimal(str(row["balance"]))
+            balance = row["balance"]
 
             if bet_lower in ("max", "all"):
-                amount = balance
+                amount = parse_amount(str(balance))
             else:
-                amount = balance / Decimal("2")
+                half_balance = Decimal(str(balance)) / Decimal("2")
+                amount = parse_amount(str(half_balance))
 
         else:
             amount = parse_amount(bet)
 
     except ValueError as error:
         await ctx.send(str(error))
-        return
-
-    if amount <= 0:
-        await ctx.send("Your bet must be greater than 0.")
         return
 
     if not await bot.db.change_balance(
@@ -3285,12 +3282,7 @@ async def blackjack(ctx, bet: str):
 
     view = BlackjackView(ctx.author, amount)
     embed, table = view.embed_and_file()
-
-    await ctx.send(
-        embed=embed,
-        file=table,
-        view=view
-    )
+    await ctx.send(embed=embed, file=table, view=view)
 
 # ============================================================
 # MINES GAME
