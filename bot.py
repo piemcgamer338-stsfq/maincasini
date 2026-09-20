@@ -3426,6 +3426,7 @@ def update_buttons(self):
             ephemeral=True,
         )
         return
+
     if position in self.mines:
         self.finished = True
 
@@ -3435,6 +3436,23 @@ def update_buttons(self):
             exploded=position,
             cashout=True,
         )
+
+        await interaction.response.edit_message(
+            embed=brand(
+                "Mines — You Lost",
+                (
+                    f"**Bet:** {self.bet:,.0f} Points "
+                    f"({usd(self.bet)})\n"
+                    f"**Mines:** {self.mine_count}\n\n"
+                    f"{grid}\n\n"
+                    "You hit a mine.\n"
+                    "**Payout:** 0 Points"
+                ),
+                0xED4245,
+            ),
+            view=None,
+        )
+        return
 
         await interaction.response.edit_message(
             embed=brand(
