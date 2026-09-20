@@ -123,7 +123,7 @@ class OwnerView(discord.ui.View):
 
 
 HELP = {
-    "Games": "`.mines <bet> [mines]` — Find diamonds and cash out\n`.bj <bet>` / `.blackjack <bet>` — House blackjack\n`.cf <bet> [h/t/r]` — Coinflip\n`.hilo <bet>` — Higher or lower\n`.market <bet>` — Pick up or down",
+    "Games": "`.mines <bet> [mines]` — Find diamonds and cash out\n`.bj <bet>` / `.blackjack <bet>` — House blackjack\n`.cf <bet> [h/t/r]` — Coinflip\n`.hilo <bet>` — Higher or lower\n`.market <bet>` — Pick up or down\n`.baccarat/bacc <bet> <player/banker>` — Normal Baccarat with 1.95x Multi\n`.crazydice/cd <bet>` — Crazy Dice lower or higher choose dice amount and get 1.98x win",
     "General": "`.whois [user]` — Detailed user information\n`.stats [user]` — Player statistics\n`.thread create|add|remove|delete` — Personal thread\n`.leaderboard` / `.lb` — Top gamblers\n`.help [command]` — Command help\n`.daily` — Claim 1 point every 24 hours\n`.rain <amount>` — Start a rain\n`.sos <amount>` — Split or steal event",
     "Balance": "`.deposit` — LTC, SOL, or USDT deposits\n`.withdraw` — Request a withdrawal\n`.price <points>` — Convert points to USD\n`.ai <question>` — Ask the configured AI\n`.tip <user> <points>` — Send points\n`.vault deposit|withdraw <points>` — Personal vault\n`.balance [user]` / `.b` — Check balance\n`.claim <code>` — Claim a code\n`.rb`, `.weekly`, `.monthly` — Bonuses",
 }
