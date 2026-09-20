@@ -3375,14 +3375,14 @@ class MinesView(OwnerView):
         )
 
         # Replace the final generated button with
-        # a proper callback-capable button.
-        cashout_button = self.children[-1]
+# a proper callback-capable button.
+cashout_button = self.children[-1]
 
-        cashout_button.callback = (
-            self.cashout_callback
-        )
+cashout_button.callback = (
+    self.cashout_callback
+)
 
-    def update_buttons(self):
+def update_buttons(self):
     for item in self.children:
         if not isinstance(
             item,
