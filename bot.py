@@ -66,10 +66,8 @@ def blackjack_table(player, dealer, reveal=False) -> discord.File:
     return image_file(canvas, "blackjack_table.png")
 
 COINFLIP_IMAGES = {
-    "tails": "https://media.discordapp.net/attachments/1524764567916384256/1549963005104758784/image.png?ex=6aac9b09&is=6aab4989&hm=92dfb2bcab7b6d727648983b4cee345281fcb15d46dbd04b60036fd208b386c5&=&format=webp&quality=lossless",
-    "heads": "https://media.discordapp.net/attachments/1524764567916384256/1549963108552802344/image.png?ex=6aac9b22&is=6aab49a2&hm=3e1091d9ee25f60c010281eac36815b31c633ff2db0c3971a723c11f8a5c3368&=&format=webp&quality=lossless",
-}
-
+    "tails": "https://cdn.bloxjack.com/assets/chip-tails-v2.webp?v=20260826-1",
+    "heads": "https://cdn.bloxjack.com/assets/chip-heads-v2.webp?v=20260826-1",
 
 def _font(size=42, bold=False):
     candidates = [
