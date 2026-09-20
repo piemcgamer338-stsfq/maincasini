@@ -3737,6 +3737,29 @@ async def market(
 
         return
 
+new_card = hilo_random_card()
+
+self.current_card = new_card
+self.rounds += 1
+
+file = hilo_card_file(new_card)
+
+embed = self.make_embed()
+
+if file:
+    await interaction.response.edit_message(
+        embed=embed,
+        attachments=[file],
+        view=self
+    )
+else:
+    await interaction.response.edit_message(
+        embed=embed,
+        attachments=[],
+        view=self
+    )
+    
+
 # =========================================================
 # CRAZY DICE
 # =========================================================
