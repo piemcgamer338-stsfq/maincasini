@@ -852,6 +852,472 @@ async def gc(ctx):
 
     view.message = message
 
+# ============================================================
+# MINES GAME
+# ============================================================
+
+class MinesView(OwnerView):
+
+    def __init__(self, owner, bet, mines):
+        super().__init__(owner.id, timeout=120)
+
+        self.bet = bet
+        self.mines = mines
+        self.opened = 0
+
+        self.bombs = set(
+            random.sample(range(25), mines)
+        )
+
+        self.finished = False
+        self.message = None
+
+        # Track opened tiles
+        self.opened_tiles = set()
+
+        # Create 5x5 board
+        for index in range(25):
+
+            button = discord.ui.Button(
+                label="\u200b",
+                style=discord.ButtonStyle.secondary,
+                row=index // 5,
+                custom_id=f"mines_{index}",
+            )
+
+            button.callback = self.pick
+            self.add_item(button)
+
+    def multiplier(self):
+
+        return max(
+            1.0,
+            (25 / (25 - self.mines)) ** self.opened * 0.96
+        )
+
+    async def pick(self, interaction):
+
+        if self.finished:
+            await interaction.response.send_message(
+                "This Mines game has ended.",
+                ephemeral=True,
+            )
+            return
+
+        # OwnerView normally handles this, but keep it safe.
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This is not your Mines game.",
+                ephemeral=True,
+            )
+            return
+
+        index = int(
+            interaction.data["custom_id"].split("_")[1]
+        )
+
+        # Already opened
+        if index in self.opened_tiles:
+            await interaction.response.send_message(
+                "You already opened this tile.",
+                ephemeral=True,
+            )
+            return
+
+        button = next(
+            x for x in self.children
+            if x.custom_id == f"mines_{index}"
+        )
+
+        # ====================================================
+        # MINE HIT
+        # ====================================================
+
+        if index in self.bombs:
+
+            self.finished = True
+
+            # Show clicked bomb
+            button.emoji = config.E["bomb"]
+            button.style = discord.ButtonStyle.danger
+            button.disabled = True
+
+            # Reveal every bomb
+            for x in self.children:
+
+                if (
+                    x.custom_id
+                    and x.custom_id.startswith("mines_")
+                ):
+
+                    tile_index = int(
+                        x.custom_id.split("_")[1]
+                    )
+
+                    if tile_index in self.bombs:
+
+                        x.emoji = config.E["bomb"]
+                        x.style = discord.ButtonStyle.danger
+
+            # Disable everything
+            for x in self.children:
+                x.disabled = True
+
+            await bot.db.record_game(
+                self.owner_id,
+                self.bet,
+                0,
+                "mines",
+            )
+
+            await interaction.response.edit_message(
+                embed=brand(
+                    "Mines — Lost",
+                    (
+                        f"You hit a mine and lost "
+                        f"**{money(self.bet)} points**."
+                    ),
+                    0xED4245,
+                ),
+                view=self,
+            )
+
+            # Remove cashout reaction
+            if self.message:
+
+                try:
+                    await self.message.clear_reactions()
+                except discord.HTTPException:
+                    pass
+
+            # Remove active game
+            if hasattr(bot, "active_mines"):
+                bot.active_mines.pop(
+                    self.message.id if self.message else 0,
+                    None,
+                )
+
+            return
+
+        # ====================================================
+        # SAFE TILE
+        # ====================================================
+
+        self.opened += 1
+        self.opened_tiles.add(index)
+
+        button.emoji = config.E["diamond"]
+        button.style = discord.ButtonStyle.success
+        button.disabled = True
+
+        # ====================================================
+        # ALL SAFE TILES OPENED
+        # ====================================================
+
+        if self.opened == 25 - self.mines:
+
+            await self.cashout_message(
+                interaction.message
+            )
+
+            return
+
+        # ====================================================
+        # UPDATE BOARD
+        # ====================================================
+
+        embed = brand(
+            "Mines",
+            (
+                f"Diamonds: **{self.opened}** • "
+                f"Current payout: "
+                f"**{money(self.bet * self.multiplier())} points**"
+            ),
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self,
+        )
+
+        # Add cashout reaction after first safe tile
+        if self.message and self.opened == 1:
+
+            try:
+                await self.message.add_reaction("💰")
+            except discord.HTTPException:
+                pass
+
+    # ========================================================
+    # CASHOUT
+    # ========================================================
+
+    async def cashout_message(self, message):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        payout = round(
+            self.bet * self.multiplier(),
+            4,
+        )
+
+        # Disable all tiles
+        for x in self.children:
+            x.disabled = True
+
+        await bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            payout,
+            "mines",
+        )
+
+        embed = brand(
+            "Mines — Cashed out",
+            (
+                f"{config.E['win']} You won "
+                f"**{money(payout)} points** "
+                f"({self.multiplier():.2f}x)."
+            ),
+            0x57F287,
+        )
+
+        await message.edit(
+            embed=embed,
+            view=self,
+        )
+
+        # Remove reaction
+        try:
+            await message.clear_reactions()
+        except discord.HTTPException:
+            pass
+
+        # Remove active game
+        if hasattr(bot, "active_mines"):
+            bot.active_mines.pop(
+                message.id,
+                None,
+            )
+
+    # ========================================================
+    # TIMEOUT
+    # ========================================================
+
+    async def on_timeout(self):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        for x in self.children:
+            x.disabled = True
+
+        if self.message:
+
+            try:
+                await self.message.edit(view=self)
+                await self.message.clear_reactions()
+            except discord.HTTPException:
+                pass
+
+            if hasattr(bot, "active_mines"):
+                bot.active_mines.pop(
+                    self.message.id,
+                    None,
+                )
+
+
+# ============================================================
+# MINES REACTION CASHOUT
+# ============================================================
+
+@bot.event
+async def on_raw_reaction_add(payload):
+
+    # Ignore bot reactions
+    if payload.user_id == bot.user.id:
+        return
+
+    # Make sure active Mines games exist
+    if not hasattr(bot, "active_mines"):
+        return
+
+    # Find the Mines game using message ID
+    view = bot.active_mines.get(payload.message_id)
+
+    if view is None:
+        return
+
+    # Only 💰 can cash out
+    if str(payload.emoji) != "💰":
+        return
+
+    # Only the owner can cash out
+    if payload.user_id != view.owner_id:
+        return
+
+    # Game already ended
+    if view.finished:
+        return
+
+    # Fetch the actual Discord message
+    channel = bot.get_channel(payload.channel_id)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(
+                payload.channel_id
+            )
+        except discord.HTTPException:
+            return
+
+    try:
+        message = await channel.fetch_message(
+            payload.message_id
+        )
+    except discord.HTTPException:
+        return
+
+    # Make sure this is still the correct game
+    if view.message is None:
+        view.message = message
+
+    # Cash out
+    await view.cashout_message(message)
+
+
+# ============================================================
+# MINES COMMAND
+# ============================================================
+
+@bot.command()
+async def mines(ctx, bet: str, mine_count: int = 3):
+
+    if not await bot.game_allowed(ctx):
+        return
+
+    try:
+
+        bet_lower = bet.lower().strip()
+
+        if bet_lower in ("half", "all", "max"):
+
+            row = await bot.db.user(ctx.author.id)
+
+            if not row:
+                await ctx.send(
+                    "Your account could not be found."
+                )
+                return
+
+            balance = row["balance"]
+
+            if bet_lower in ("all", "max"):
+
+                amount = parse_amount(
+                    str(balance)
+                )
+
+            else:
+
+                half_balance = (
+                    Decimal(str(balance))
+                    / Decimal("2")
+                )
+
+                amount = parse_amount(
+                    str(half_balance)
+                )
+
+        else:
+
+            amount = parse_amount(bet)
+
+    except ValueError as error:
+
+        await ctx.send(str(error))
+        return
+
+    # ========================================================
+    # MINIMUM BET
+    # ========================================================
+
+    if amount < Decimal("20"):
+
+        await ctx.send(
+            "The minimum bet is **20 points ($0.10)**."
+        )
+        return
+
+    # ========================================================
+    # MINE COUNT
+    # ========================================================
+
+    if not 1 <= mine_count <= 20:
+
+        await ctx.send(
+            "Choose from 1 to 20 mines."
+        )
+        return
+
+    # ========================================================
+    # TAKE BET
+    # ========================================================
+
+    if not await bot.db.change_balance(
+        ctx.author.id,
+        -amount,
+        "mines_bet",
+    ):
+
+        await ctx.send(
+            "Insufficient balance."
+        )
+        return
+
+    # ========================================================
+    # CREATE GAME
+    # ========================================================
+
+    view = MinesView(
+        ctx.author,
+        amount,
+        mine_count,
+    )
+
+    # ========================================================
+    # SEND GAME
+    # ========================================================
+
+    message = await ctx.send(
+        embed=brand(
+            "Mines",
+            (
+                f"Bet: **{money(amount)} points** • "
+                f"Mines: **{mine_count}**\n"
+                f"Find diamonds, then react with 💰 to cash out."
+            ),
+        ),
+        view=view,
+    )
+
+    # Save message
+    view.message = message
+
+    # ========================================================
+    # REGISTER ACTIVE GAME
+    # ========================================================
+
+    if not hasattr(bot, "active_mines"):
+        bot.active_mines = {}
+
+    bot.active_mines[message.id] = view
+
 import asyncio
 import random
 import discord
@@ -5615,335 +6081,6 @@ async def blackjack(ctx, bet: str):
         file=table,
         view=view
     )
-# ============================================================
-# MINES GAME
-# ============================================================
-
-class MinesView(OwnerView):
-
-    def __init__(self, owner, bet, mines):
-        super().__init__(owner.id, timeout=120)
-
-        self.bet = bet
-        self.mines = mines
-        self.opened = 0
-
-        self.bombs = set(
-            random.sample(range(25), mines)
-        )
-
-        self.finished = False
-        self.message = None
-
-        # Keep track of opened tiles.
-        self.opened_tiles = set()
-
-        # Create 5x5 board.
-        for index in range(25):
-
-            button = discord.ui.Button(
-                label="\u200b",
-                style=discord.ButtonStyle.secondary,
-                row=index // 5,
-                custom_id=f"mines_{index}",
-            )
-
-            button.callback = self.pick
-
-            self.add_item(button)
-
-    def multiplier(self):
-        return max(
-            1.0,
-            (25 / (25 - self.mines)) ** self.opened * .96
-        )
-
-    async def pick(self, interaction):
-
-        if self.finished:
-            await interaction.response.send_message(
-                "This Mines game has ended.",
-                ephemeral=True,
-            )
-            return
-
-        index = int(
-            interaction.data["custom_id"].split("_")[1]
-        )
-
-        # Prevent clicking an already opened tile.
-        if index in self.opened_tiles:
-            await interaction.response.send_message(
-                "You already opened this tile.",
-                ephemeral=True,
-            )
-            return
-
-        button = next(
-            x for x in self.children
-            if x.custom_id == f"mines_{index}"
-        )
-
-        # ----------------------------------------------------
-        # MINE HIT
-        # ----------------------------------------------------
-
-        if index in self.bombs:
-
-            self.finished = True
-
-            button.emoji = config.E["bomb"]
-            button.style = discord.ButtonStyle.danger
-            button.disabled = True
-
-            # Reveal all bombs.
-            for x in self.children:
-
-                if (
-                    x.custom_id
-                    and x.custom_id.startswith("mines_")
-                    and int(x.custom_id.split("_")[1]) in self.bombs
-                ):
-                    x.emoji = config.E["bomb"]
-                    x.disabled = True
-
-            # Disable all tiles.
-            for x in self.children:
-                x.disabled = True
-
-            await bot.db.record_game(
-                self.owner_id,
-                self.bet,
-                0,
-                "mines",
-            )
-
-            await interaction.response.edit_message(
-                embed=brand(
-                    "Mines — Lost",
-                    (
-                        f"You hit a mine and lost "
-                        f"**{money(self.bet)} points**."
-                    ),
-                    0xED4245,
-                ),
-                view=self,
-            )
-
-            # Remove cashout reaction if present.
-            if self.message:
-                try:
-                    await self.message.clear_reactions()
-                except discord.HTTPException:
-                    pass
-
-            return
-
-        # ----------------------------------------------------
-        # SAFE TILE
-        # ----------------------------------------------------
-
-        self.opened += 1
-        self.opened_tiles.add(index)
-
-        button.emoji = config.E["diamond"]
-        button.style = discord.ButtonStyle.success
-        button.disabled = True
-
-        # ----------------------------------------------------
-        # ALL SAFE TILES OPENED
-        # ----------------------------------------------------
-
-        if self.opened == 25 - self.mines:
-
-            await self.cashout_message(
-                interaction.message
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # UPDATE BOARD
-        # ----------------------------------------------------
-
-        embed = brand(
-            "Mines",
-            (
-                f"Diamonds: **{self.opened}** • "
-                f"Current payout: "
-                f"**{money(self.bet * self.multiplier())} points**"
-            ),
-        )
-
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self,
-        )
-
-        # Add cashout reaction once.
-        if self.message and self.opened == 1:
-
-            try:
-                await self.message.add_reaction("💰")
-            except discord.HTTPException:
-                pass
-
-    # ========================================================
-    # CASHOUT FROM REACTION
-    # ========================================================
-
-    async def cashout_message(self, message):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        payout = round(
-            self.bet * self.multiplier(),
-            4,
-        )
-
-        # Disable all tiles.
-        for x in self.children:
-            x.disabled = True
-
-        await bot.db.record_game(
-            self.owner_id,
-            self.bet,
-            payout,
-            "mines",
-        )
-
-        embed = brand(
-            "Mines — Cashed out",
-            (
-                f"{config.E['win']} You won "
-                f"**{money(payout)} points** "
-                f"({self.multiplier():.2f}x)."
-            ),
-            0x57F287,
-        )
-
-        await message.edit(
-            embed=embed,
-            view=self,
-        )
-
-        try:
-            await message.clear_reactions()
-        except discord.HTTPException:
-            pass
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        for x in self.children:
-            x.disabled = True
-
-        if self.message:
-
-            try:
-                await self.message.edit(view=self)
-                await self.message.clear_reactions()
-            except discord.HTTPException:
-                pass
-
-# ============================================================
-# MINES COMMAND
-# ============================================================
-@bot.command()
-async def mines(ctx, bet: str, mine_count: int = 3):
-
-    if not await bot.game_allowed(ctx):
-        return
-
-    try:
-        bet_lower = bet.lower().strip()
-
-        if bet_lower in ("half", "all", "max"):
-
-            row = await bot.db.user(ctx.author.id)
-
-            if not row:
-                await ctx.send(
-                    "Your account could not be found."
-                )
-                return
-
-            balance = row["balance"]
-
-            if bet_lower in ("all", "max"):
-                amount = parse_amount(str(balance))
-
-            else:
-                half_balance = Decimal(str(balance)) / Decimal("2")
-                amount = parse_amount(str(half_balance))
-
-        else:
-            amount = parse_amount(bet)
-
-    except ValueError as error:
-        await ctx.send(str(error))
-        return
-
-    # Minimum bet: 20 points ($0.10)
-    if amount < Decimal("20"):
-        await ctx.send(
-            "The minimum bet is **20 points ($0.10)**."
-        )
-        return
-
-    if not 1 <= mine_count <= 20:
-
-        await ctx.send(
-            "Choose from 1 to 20 mines."
-        )
-
-        return
-
-    if not await bot.db.change_balance(
-        ctx.author.id,
-        -amount,
-        "mines_bet",
-    ):
-
-        await ctx.send(
-            "Insufficient balance."
-        )
-
-        return
-
-    view = MinesView(
-        ctx.author,
-        amount,
-        mine_count,
-    )
-
-    message = await ctx.send(
-        embed=brand(
-            "Mines",
-            (
-                f"Bet: **{money(amount)} points** • "
-                f"Mines: **{mine_count}**\n"
-                f"Find diamonds, then react with 💰 to cash out."
-            ),
-        ),
-        view=view,
-    )
-
-    # Save message for reaction cashout.
-    view.message = message
-
-    # Store active game by message ID.
-    if not hasattr(bot, "active_mines"):
-        bot.active_mines = {}
-
-    bot.active_mines[message.id] = view
         
 # =========================================================
 # HILO CARD SETTINGS
