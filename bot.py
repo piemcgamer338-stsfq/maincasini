@@ -1,18 +1,18 @@
 # ============================================================
-# PART 2 — CONFIGURATION + USER STATS
+# CRYPTOBET
+# PART 1 — FOUNDATION + COMPLETE HELP UI
 # ============================================================
 
 import os
 import asyncio
-from decimal import Decimal
 
+import asyncpg
 import discord
 from discord.ext import commands
-import asyncpg
 
 
 # ============================================================
-# CONFIGURATION
+# BASIC CONFIG
 # ============================================================
 
 NAME = "Cryptobet"
@@ -23,20 +23,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 PREFIXES = [".", ","]
 
-MINIMUM_BET = Decimal("20")
-
-POINTS_PER_USD = Decimal("200")
-
-COINFLIP_MULTIPLIER = Decimal("1.96")
-
-GAME_WIN_CHANCE = Decimal("45")
-
 
 # ============================================================
-# INTENTS
+# DISCORD INTENTS
 # ============================================================
 
 intents = discord.Intents.default()
+
 intents.guilds = True
 intents.members = True
 intents.messages = True
@@ -59,11 +52,13 @@ bot = commands.Bot(
 # ============================================================
 
 class Database:
+
     def __init__(self, url):
         self.url = url
         self.pool = None
 
     async def connect(self):
+
         if not self.url:
             raise RuntimeError(
                 "DATABASE_URL is missing from Railway environment variables."
@@ -81,10 +76,12 @@ class Database:
         print("PostgreSQL connected.")
 
     async def close(self):
+
         if self.pool:
             await self.pool.close()
 
     async def create_tables(self):
+
         async with self.pool.acquire() as connection:
 
             await connection.execute(
@@ -102,172 +99,6 @@ class Database:
                 """
             )
 
-            await connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bot_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-                """
-            )
-
-    async def ensure_user(self, user_id):
-        async with self.pool.acquire() as connection:
-            await connection.execute(
-                """
-                INSERT INTO users (user_id)
-                VALUES ($1)
-                ON CONFLICT (user_id) DO NOTHING
-                """,
-                user_id,
-            )
-
-    async def get_user(self, user_id):
-        await self.ensure_user(user_id)
-
-        async with self.pool.acquire() as connection:
-            return await connection.fetchrow(
-                """
-                SELECT
-                    user_id,
-                    balance,
-                    wagered,
-                    won,
-                    lost,
-                    deposited,
-                    withdrawn,
-                    created_at
-                FROM users
-                WHERE user_id = $1
-                """,
-                user_id,
-            )
-
-    async def get_balance(self, user_id):
-        row = await self.get_user(user_id)
-        return Decimal(str(row["balance"]))
-
-    async def change_balance(self, user_id, amount):
-        amount = Decimal(str(amount))
-
-        await self.ensure_user(user_id)
-
-        async with self.pool.acquire() as connection:
-            row = await connection.fetchrow(
-                """
-                UPDATE users
-                SET balance = balance + $2
-                WHERE user_id = $1
-                RETURNING balance
-                """,
-                user_id,
-                amount,
-            )
-
-        return Decimal(str(row["balance"]))
-
-    async def add_wagered(self, user_id, amount):
-        amount = Decimal(str(amount))
-
-        await self.ensure_user(user_id)
-
-        await self.pool.execute(
-            """
-            UPDATE users
-            SET wagered = wagered + $2
-            WHERE user_id = $1
-            """,
-            user_id,
-            amount,
-        )
-
-    async def add_won(self, user_id, amount):
-        amount = Decimal(str(amount))
-
-        await self.ensure_user(user_id)
-
-        await self.pool.execute(
-            """
-            UPDATE users
-            SET won = won + $2
-            WHERE user_id = $1
-            """,
-            user_id,
-            amount,
-        )
-
-    async def add_lost(self, user_id, amount):
-        amount = Decimal(str(amount))
-
-        await self.ensure_user(user_id)
-
-        await self.pool.execute(
-            """
-            UPDATE users
-            SET lost = lost + $2
-            WHERE user_id = $1
-            """,
-            user_id,
-            amount,
-        )
-
-    async def add_deposited(self, user_id, amount):
-        amount = Decimal(str(amount))
-
-        await self.ensure_user(user_id)
-
-        await self.pool.execute(
-            """
-            UPDATE users
-            SET deposited = deposited + $2
-            WHERE user_id = $1
-            """,
-            user_id,
-            amount,
-        )
-
-    async def add_withdrawn(self, user_id, amount):
-        amount = Decimal(str(amount))
-
-        await self.ensure_user(user_id)
-
-        await self.pool.execute(
-            """
-            UPDATE users
-            SET withdrawn = withdrawn + $2
-            WHERE user_id = $1
-            """,
-            user_id,
-            amount,
-        )
-
-    async def set_setting(self, key, value):
-        await self.pool.execute(
-            """
-            INSERT INTO bot_settings (key, value)
-            VALUES ($1, $2)
-            ON CONFLICT (key)
-            DO UPDATE SET value = EXCLUDED.value
-            """,
-            key,
-            str(value),
-        )
-
-    async def get_setting(self, key, default=None):
-        row = await self.pool.fetchrow(
-            """
-            SELECT value
-            FROM bot_settings
-            WHERE key = $1
-            """,
-            key,
-        )
-
-        if row is None:
-            return default
-
-        return row["value"]
-
 
 bot.db = Database(DATABASE_URL)
 
@@ -276,129 +107,219 @@ bot.db = Database(DATABASE_URL)
 # EMBED HELPER
 # ============================================================
 
-def make_embed(title, description=None):
+def make_embed(title, description=""):
+
     return discord.Embed(
         title=title,
-        description=description or "",
+        description=description,
     )
 
 
 # ============================================================
-# BOT READY
+# HELP CATEGORY DATA
+#
+# These are the commands the finished bot will contain.
+# The commands themselves will be added in later parts.
 # ============================================================
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
-    print(f"Bot ID: {bot.user.id}")
-    print(f"{NAME} is online.")
+HELP_CATEGORIES = {
+
+    "General": [
+        ("help", "Open the casino help menu"),
+        ("bal", "View your balance"),
+        ("stats", "View your casino statistics"),
+        ("whois", "View another user's profile"),
+        ("leaderboard", "View the casino leaderboard"),
+    ],
+
+    "Games": [
+        ("blackjack", "Play Blackjack"),
+        ("mines", "Play Mines"),
+        ("hilo", "Play Hi-Lo"),
+        ("coinflip", "Play Coinflip"),
+        ("crazydice", "Play Crazy Dice"),
+        ("baccarat", "Play Baccarat"),
+        ("market", "Play Market"),
+    ],
+
+    "Rewards": [
+        ("daily", "Claim your daily reward"),
+        ("weekly", "Claim your weekly reward"),
+        ("monthly", "Claim your monthly reward"),
+        ("claim", "View available rewards"),
+    ],
+
+    "Money": [
+        ("deposit", "Deposit cryptocurrency"),
+        ("withdraw", "Withdraw cryptocurrency"),
+        ("vault", "Manage your vault"),
+        ("tip", "Tip another user"),
+    ],
+
+    "Social": [
+        ("rain", "Create a point rain"),
+        ("rainend", "End an active rain"),
+        ("sos", "Request help"),
+        ("thread", "Manage a private thread"),
+    ],
+
+    "Admin": [
+        ("add", "Add points to a user"),
+        ("addbal", "Add points to a user"),
+        ("removebal", "Remove points from a user"),
+        ("resetbal", "Reset a user's balance"),
+        ("winlog", "Set the game win-log channel"),
+        ("commands", "View administrative commands"),
+    ],
+}
 
 
 # ============================================================
-# HELP
+# HELP SELECT MENU
 # ============================================================
 
-@bot.command(name="help")
+class HelpSelect(discord.ui.Select):
+
+    def __init__(self):
+
+        options = [
+            discord.SelectOption(
+                label="General",
+                description="Balance, stats and user commands",
+                value="General",
+            ),
+            discord.SelectOption(
+                label="Games",
+                description="Casino games",
+                value="Games",
+            ),
+            discord.SelectOption(
+                label="Rewards",
+                description="Daily, weekly and monthly rewards",
+                value="Rewards",
+            ),
+            discord.SelectOption(
+                label="Money",
+                description="Deposits, withdrawals, vault and tips",
+                value="Money",
+            ),
+            discord.SelectOption(
+                label="Social",
+                description="Rain, SOS and threads",
+                value="Social",
+            ),
+            discord.SelectOption(
+                label="Admin",
+                description="Owner and administration commands",
+                value="Admin",
+            ),
+        ]
+
+        super().__init__(
+            placeholder="Select a category...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        category = self.values[0]
+
+        commands_list = HELP_CATEGORIES.get(
+            category,
+            [],
+        )
+
+        lines = []
+
+        for command_name, description in commands_list:
+            lines.append(
+                f"`.{command_name}` — {description}"
+            )
+
+        embed = make_embed(
+            f"{NAME} — {category}",
+            "\n".join(lines),
+        )
+
+        embed.set_footer(
+            text="Use the menu below to switch categories."
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self.view,
+        )
+
+
+# ============================================================
+# HELP VIEW
+# ============================================================
+
+class HelpView(discord.ui.View):
+
+    def __init__(self):
+
+        super().__init__(timeout=180)
+
+        self.add_item(
+            HelpSelect()
+        )
+
+
+# ============================================================
+# HELP COMMAND
+# ============================================================
+
+@bot.command(
+    name="help",
+)
 async def help_command(ctx):
 
     embed = make_embed(
         f"{NAME} — Help",
-        "Casino commands will be added as we build each part.",
+        "Select a category below to view the available commands.",
     )
 
     embed.add_field(
-        name="General",
+        name="Categories",
         value=(
-            "`.help`\n"
-            "`.bal`\n"
-            "`.balance`\n"
-            "`.b`\n"
-            "`,help`\n"
-            "`,bal`"
+            "General\n"
+            "Games\n"
+            "Rewards\n"
+            "Money\n"
+            "Social\n"
+            "Admin"
         ),
         inline=False,
     )
 
-    embed.add_field(
-        name="Game Settings",
-        value=(
-            f"Minimum Bet: **{MINIMUM_BET:,.0f} Points**\n"
-            f"Points per $1: **{POINTS_PER_USD:,.0f}**\n"
-            f"Game Win Chance: **{GAME_WIN_CHANCE}%**"
-        ),
-        inline=False,
+    embed.set_footer(
+        text="Select a category below."
     )
 
-    await ctx.send(embed=embed)
+    await ctx.send(
+        embed=embed,
+        view=HelpView(),
+    )
 
 
 # ============================================================
-# BALANCE
+# BASIC TEST COMMAND
 # ============================================================
 
-@bot.command(name="bal", aliases=["balance", "b"])
-async def balance_command(ctx):
+@bot.command(
+    name="ping",
+)
+async def ping_command(ctx):
 
-    balance = await bot.db.get_balance(ctx.author.id)
-
-    embed = make_embed(
-        f"{ctx.author.display_name} — Balance",
-        f"**{balance:,.2f} Points**",
+    await ctx.send(
+        embed=make_embed(
+            f"{NAME} — Ping",
+            f"Bot latency: **{round(bot.latency * 1000)}ms**",
+        )
     )
-
-    await ctx.send(embed=embed)
-
-
-# ============================================================
-# STATS
-# ============================================================
-
-@bot.command(name="stats")
-async def stats_command(ctx):
-
-    user = await bot.db.get_user(ctx.author.id)
-
-    embed = make_embed(
-        f"{ctx.author.display_name} — Stats"
-    )
-
-    embed.add_field(
-        name="Balance",
-        value=f"{Decimal(str(user['balance'])):,.2f} Points",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Wagered",
-        value=f"{Decimal(str(user['wagered'])):,.2f} Points",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Won",
-        value=f"{Decimal(str(user['won'])):,.2f} Points",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Lost",
-        value=f"{Decimal(str(user['lost'])):,.2f} Points",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Deposited",
-        value=f"{Decimal(str(user['deposited'])):,.2f} Points",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Withdrawn",
-        value=f"{Decimal(str(user['withdrawn'])):,.2f} Points",
-        inline=True,
-    )
-
-    await ctx.send(embed=embed)
 
 
 # ============================================================
@@ -408,38 +329,66 @@ async def stats_command(ctx):
 @bot.event
 async def on_command_error(ctx, error):
 
-    if isinstance(error, commands.CommandNotFound):
+    if isinstance(
+        error,
+        commands.CommandNotFound,
+    ):
         return
 
-    if isinstance(error, commands.MissingRequiredArgument):
+    if isinstance(
+        error,
+        commands.MissingRequiredArgument,
+    ):
         await ctx.send(
             embed=make_embed(
                 "Invalid Usage",
-                "You are missing a required argument.",
+                "A required argument is missing.",
             )
         )
         return
 
-    if isinstance(error, commands.MissingPermissions):
+    if isinstance(
+        error,
+        commands.BadArgument,
+    ):
         await ctx.send(
             embed=make_embed(
-                "Permission Denied",
-                "You do not have permission to use this command.",
+                "Invalid Argument",
+                "One of the arguments you entered is invalid.",
             )
         )
         return
 
     print(
-        f"Command error in "
-        f"{ctx.command}: "
+        f"Command error in {ctx.command}: "
         f"{repr(error)}"
     )
 
     await ctx.send(
         embed=make_embed(
             "Command Error",
-            "An error occurred while processing this command.",
+            "An unexpected error occurred while processing this command.",
         )
+    )
+
+
+# ============================================================
+# READY
+# ============================================================
+
+@bot.event
+async def on_ready():
+
+    print(
+        f"Logged in as {bot.user}"
+    )
+
+    print(
+        f"Bot ID: {bot.user.id}"
+    )
+
+    print(
+        f"{NAME} is online."
     )
 
 
@@ -460,12 +409,17 @@ async def main():
         )
 
     await bot.db.connect()
+
     await bot.db.create_tables()
 
     try:
-        await bot.start(BOT_TOKEN)
+
+        await bot.start(
+            BOT_TOKEN
+        )
 
     finally:
+
         await bot.db.close()
 
 
@@ -474,4 +428,7 @@ async def main():
 # ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )
