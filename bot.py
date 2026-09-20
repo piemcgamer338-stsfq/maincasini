@@ -6347,52 +6347,6 @@ async def removebal_command(
 
 
 # =========================================================
-# ADMIN — WIN LOG
-# =========================================================
-
-@bot.command(
-    name="winlog",
-    help="Set the channel where game wins are logged.",
-)
-@commands.is_owner()
-async def winlog_command(
-    ctx,
-    channel: discord.TextChannel = None,
-):
-    if channel is None:
-        await ctx.send(
-            embed=discord.Embed(
-                title="Win Log",
-                description="Usage: `.winlog #channel`",
-            )
-        )
-        return
-
-    try:
-        await bot.db.set_setting(
-            "winlog_channel_id",
-            str(channel.id),
-        )
-    except Exception:
-        await ctx.send(
-            embed=discord.Embed(
-                title="Win Log",
-                description="Unable to save the win-log channel.",
-            )
-        )
-        return
-
-    await ctx.send(
-        embed=discord.Embed(
-            title="Win Log",
-            description=(
-                f"Future game wins will be logged in {channel.mention}."
-            ),
-        )
-    )
-
-
-# =========================================================
 # ADMIN — RESET USER BALANCE
 # =========================================================
 
