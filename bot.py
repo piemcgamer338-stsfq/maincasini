@@ -3383,34 +3383,34 @@ class MinesView(OwnerView):
         )
 
     def update_buttons(self):
-        for item in self.children:
-            if not isinstance(
-                item,
-                discord.ui.Button,
-            ):
-                continue
+    for item in self.children:
+        if not isinstance(
+            item,
+            discord.ui.Button,
+        ):
+            continue
 
-            if item.custom_id == "mines_cashout":
-                item.disabled = (
-                    len(self.revealed) == 0
-                )
-                continue
-
-            if not item.custom_id.startswith(
-                "mines_cell_"
-            ):
-                continue
-
-            position = int(
-                item.custom_id.split("_")[-1]
+        if item.custom_id == "mines_cashout":
+            item.disabled = (
+                len(self.revealed) == 0
             )
+            continue
 
-            if position in self.revealed:
-                item.disabled = True
-                item.label = "O"
-                item.style = (
-                    discord.ButtonStyle.success
-                )
+        if not item.custom_id.startswith(
+            "mines_cell_"
+        ):
+            continue
+
+        position = int(
+            item.custom_id.split("_")[-1]
+        )
+
+        if position in self.revealed:
+            item.disabled = True
+            item.label = "O"
+            item.style = (
+                discord.ButtonStyle.success
+            )
 
     async def reveal_cell(
     self,
@@ -3426,7 +3426,6 @@ class MinesView(OwnerView):
             ephemeral=True,
         )
         return
-
     if position in self.mines:
         self.finished = True
 
