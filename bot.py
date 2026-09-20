@@ -6586,36 +6586,6 @@ async def blackjack(ctx, bet: str):
         file=table,
         view=view
     )
-        
-import random
-import os
-import discord
-from discord.ext import commands
-
-
-new_card = hilo_random_card()
-
-self.current_card = new_card
-self.rounds += 1
-
-file = hilo_card_file(new_card)
-
-embed = self.make_embed()
-
-if file:
-    await interaction.response.edit_message(
-        embed=embed,
-        attachments=[file],
-        view=self
-    )
-else:
-    await interaction.response.edit_message(
-        embed=embed,
-        attachments=[],
-        view=self
-    )
-
-
 @bot.command()
 async def stats(ctx, member: discord.Member=None):
     member=member or ctx.author; row=await bot.db.user(member.id)
