@@ -3503,69 +3503,69 @@ class MinesView(OwnerView):
         )
 
     async def finish_win(
-        self,
-        interaction: discord.Interaction,
-        automatic: bool = False,
-    ):
-        if self.finished:
-            return
+    self,
+    interaction: discord.Interaction,
+    automatic: bool = False,
+):
+    if self.finished:
+        return
 
-        self.finished = True
+    self.finished = True
 
-        payout_amount = (
-            self.bet * self.current_multiplier
-        ).quantize(Decimal("1"))
+    payout_amount = (
+        self.bet * self.current_multiplier
+    ).quantize(Decimal("1"))
 
-      await payout(
-            self.owner_id,
-            payout_amount,
-            "Mines",
+    await payout(
+        self.owner_id,
+        payout_amount,
+        "Mines",
+    )
+
+    grid = mines_grid_text(
+        self.mines,
+        self.revealed,
+        cashout=True,
+    )
+
+    description = (
+        f"**Bet:** {self.bet:,.0f} Points "
+        f"({usd(self.bet)})\n"
+        f"**Mines:** {self.mine_count}\n"
+        f"**Safe Picks:** {len(self.revealed)}\n"
+        f"**Multiplier:** "
+        f"{self.current_multiplier}x\n\n"
+        f"{grid}\n\n"
+        f"**Payout:** "
+        f"{payout_amount:,.0f} Points "
+        f"({usd(payout_amount)})"
+    )
+
+    if automatic:
+        description += (
+            "\n\nAll safe tiles were revealed."
         )
 
-        grid = mines_grid_text(
-            self.mines,
-            self.revealed,
-            cashout=True,
-        )
+    await interaction.response.edit_message(
+        embed=brand(
+            "Mines — You Won",
+            description,
+            0x57F287,
+        ),
+        view=None,
+    )
 
-        description = (
-            f"**Bet:** {self.bet:,.0f} Points "
-            f"({usd(self.bet)})\n"
-            f"**Mines:** {self.mine_count}\n"
-            f"**Safe Picks:** {len(self.revealed)}\n"
-            f"**Multiplier:** "
-            f"{self.current_multiplier}x\n\n"
-            f"{grid}\n\n"
-            f"**Payout:** "
-            f"{payout_amount:,.0f} Points "
-            f"({usd(payout_amount)})"
-        )
-
-        if automatic:
-            description += (
-                "\n\nAll safe tiles were revealed."
-            )
-
-        await interaction.response.edit_message(
-            embed=brand(
-                "Mines — You Won",
-                description,
-                0x57F287,
-            ),
-            view=None,
-        )
-
-        await send_win_log(
-            interaction,
-            game="Mines",
-            bet=self.bet,
-            multiplier=self.current_multiplier,
-            payout_amount=payout_amount,
-            details=(
-                f"{self.mine_count} mines | "
-                f"{len(self.revealed)} safe picks"
-            ),
-        )
+    await send_win_log(
+        interaction,
+        game="Mines",
+        bet=self.bet,
+        multiplier=self.current_multiplier,
+        payout_amount=payout_amount,
+        details=(
+            f"{self.mine_count} mines | "
+            f"{len(self.revealed)} safe picks"
+        ),
+    )
 
         self.stop()
         unlock_player(self.owner_id)
