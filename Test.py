@@ -7192,3 +7192,638 @@ async def ai_command(ctx, *, prompt: str = None):
     )
 
     await ctx.send(embed=embed)
+
+                # =========================================================
+# PART 10 — THREADS / ADMIN / SETTINGS / STARTUP
+# =========================================================
+
+
+# =========================================================
+# THREAD COMMANDS
+# =========================================================
+
+@bot.group(
+    name="thread",
+    invoke_without_command=True,
+    help="Manage casino threads.",
+)
+async def thread_command(ctx):
+    if ctx.invoked_subcommand is None:
+        embed = discord.Embed(
+            title="Thread",
+            description=(
+                "` .thread create ` — Create a thread\n"
+                "` .thread add @user ` — Add a user\n"
+                "` .thread remove @user ` — Remove a user\n"
+                "` .thread delete ` — Delete the current thread"
+            ).replace("` .", "`."),
+        )
+
+        await ctx.send(embed=embed)
+
+
+@thread_command.command(
+    name="create",
+    help="Create a private thread.",
+)
+async def thread_create(ctx):
+    thread = await ctx.channel.create_thread(
+        name=f"{ctx.author.display_name}-thread",
+        type=discord.ChannelType.private_thread,
+        invitable=True,
+    )
+
+    await thread.add_user(ctx.author)
+
+    await thread.send(
+        embed=discord.Embed(
+            title="Thread Created",
+            description=(
+                f"Created by {ctx.author.mention}."
+            ),
+        )
+    )
+
+
+@thread_command.command(
+    name="add",
+    help="Add a member to the current thread.",
+)
+async def thread_add(
+    ctx,
+    member: discord.Member = None,
+):
+    if not isinstance(
+        ctx.channel,
+        discord.Thread,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description="This command must be used inside a thread.",
+            )
+        )
+        return
+
+    if member is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description="Usage: `.thread add @user`",
+            )
+        )
+        return
+
+    try:
+        await ctx.channel.add_user(member)
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description=f"Added {member.mention} to the thread.",
+            )
+        )
+    except Exception as exc:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description=f"Unable to add the user: `{exc}`",
+            )
+        )
+
+
+@thread_command.command(
+    name="remove",
+    help="Remove a member from the current thread.",
+)
+async def thread_remove(
+    ctx,
+    member: discord.Member = None,
+):
+    if not isinstance(
+        ctx.channel,
+        discord.Thread,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description="This command must be used inside a thread.",
+            )
+        )
+        return
+
+    if member is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description="Usage: `.thread remove @user`",
+            )
+        )
+        return
+
+    try:
+        await ctx.channel.remove_user(member)
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description=f"Removed {member.mention} from the thread.",
+            )
+        )
+    except Exception as exc:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description=f"Unable to remove the user: `{exc}`",
+            )
+        )
+
+
+@thread_command.command(
+    name="delete",
+    help="Delete the current thread.",
+)
+async def thread_delete(ctx):
+    if not isinstance(
+        ctx.channel,
+        discord.Thread,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Thread",
+                description="This command must be used inside a thread.",
+            )
+        )
+        return
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Thread",
+            description="Deleting this thread...",
+        )
+    )
+
+    await asyncio.sleep(1)
+
+    try:
+        await ctx.channel.delete()
+    except Exception:
+        pass
+
+
+# =========================================================
+# ADMIN — ADD BALANCE
+# =========================================================
+
+@bot.command(
+    name="add",
+    help="Admin: add points to a user's balance.",
+)
+@commands.is_owner()
+async def add_command(
+    ctx,
+    amount: str = None,
+    member: discord.Member = None,
+):
+    if amount is None or member is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Add Balance",
+                description="Usage: `.add <points> @user`",
+            )
+        )
+        return
+
+    try:
+        points = Decimal(
+            str(amount)
+            .replace(",", "")
+            .strip()
+        )
+    except Exception:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Add Balance",
+                description="Enter a valid point amount.",
+            )
+        )
+        return
+
+    if points <= 0:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Add Balance",
+                description="Amount must be greater than 0.",
+            )
+        )
+        return
+
+    await db_change_balance(
+        bot,
+        member.id,
+        points,
+        "Owner balance addition",
+    )
+
+    new_balance = await db_balance(
+        bot,
+        member.id,
+    )
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Balance Added",
+            description=(
+                f"User: {member.mention}\n"
+                f"Added: `{format_points(points)} points`\n"
+                f"New Balance: `{format_points(new_balance)} points`"
+            ),
+        )
+    )
+
+
+@bot.command(
+    name="addbal",
+    help="Admin: add points to a user's balance.",
+)
+@commands.is_owner()
+async def addbal_command(
+    ctx,
+    member: discord.Member = None,
+    amount: str = None,
+):
+    if member is None or amount is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Add Balance",
+                description="Usage: `.addbal @user <points>`",
+            )
+        )
+        return
+
+    try:
+        points = Decimal(
+            str(amount)
+            .replace(",", "")
+            .strip()
+        )
+    except Exception:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Add Balance",
+                description="Enter a valid point amount.",
+            )
+        )
+        return
+
+    if points <= 0:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Add Balance",
+                description="Amount must be greater than 0.",
+            )
+        )
+        return
+
+    await db_change_balance(
+        bot,
+        member.id,
+        points,
+        "Owner balance addition",
+    )
+
+    new_balance = await db_balance(
+        bot,
+        member.id,
+    )
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Balance Added",
+            description=(
+                f"User: {member.mention}\n"
+                f"Added: `{format_points(points)} points`\n"
+                f"New Balance: `{format_points(new_balance)} points`"
+            ),
+        )
+    )
+
+
+# =========================================================
+# ADMIN — REMOVE BALANCE
+# =========================================================
+
+@bot.command(
+    name="removebal",
+    help="Admin: remove points from a user's balance.",
+)
+@commands.is_owner()
+async def removebal_command(
+    ctx,
+    member: discord.Member = None,
+    amount: str = None,
+):
+    if member is None or amount is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Remove Balance",
+                description="Usage: `.removebal @user <points>`",
+            )
+        )
+        return
+
+    try:
+        points = Decimal(
+            str(amount)
+            .replace(",", "")
+            .strip()
+        )
+    except Exception:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Remove Balance",
+                description="Enter a valid point amount.",
+            )
+        )
+        return
+
+    if points <= 0:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Remove Balance",
+                description="Amount must be greater than 0.",
+            )
+        )
+        return
+
+    balance = await db_balance(
+        bot,
+        member.id,
+    )
+
+    if points > balance:
+        points = balance
+
+    if points <= 0:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Remove Balance",
+                description="The user has no points to remove.",
+            )
+        )
+        return
+
+    await db_change_balance(
+        bot,
+        member.id,
+        -points,
+        "Owner balance removal",
+    )
+
+    new_balance = await db_balance(
+        bot,
+        member.id,
+    )
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Balance Removed",
+            description=(
+                f"User: {member.mention}\n"
+                f"Removed: `{format_points(points)} points`\n"
+                f"New Balance: `{format_points(new_balance)} points`"
+            ),
+        )
+    )
+
+
+# =========================================================
+# ADMIN — WIN LOG
+# =========================================================
+
+@bot.command(
+    name="winlog",
+    help="Set the channel where game wins are logged.",
+)
+@commands.is_owner()
+async def winlog_command(
+    ctx,
+    channel: discord.TextChannel = None,
+):
+    if channel is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Win Log",
+                description="Usage: `.winlog #channel`",
+            )
+        )
+        return
+
+    try:
+        await bot.db.set_setting(
+            "winlog_channel_id",
+            str(channel.id),
+        )
+    except Exception:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Win Log",
+                description="Unable to save the win-log channel.",
+            )
+        )
+        return
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Win Log",
+            description=(
+                f"Future game wins will be logged in {channel.mention}."
+            ),
+        )
+    )
+
+
+# =========================================================
+# ADMIN — RESET USER BALANCE
+# =========================================================
+
+@bot.command(
+    name="resetbal",
+    help="Admin: reset a user's balance to zero.",
+)
+@commands.is_owner()
+async def resetbal_command(
+    ctx,
+    member: discord.Member = None,
+):
+    if member is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Reset Balance",
+                description="Usage: `.resetbal @user`",
+            )
+        )
+        return
+
+    balance = await db_balance(
+        bot,
+        member.id,
+    )
+
+    if balance > 0:
+        await db_change_balance(
+            bot,
+            member.id,
+            -balance,
+            "Owner balance reset",
+        )
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Balance Reset",
+            description=(
+                f"{member.mention}'s balance has been reset."
+            ),
+        )
+    )
+
+
+# =========================================================
+# COMMAND CHECK
+# =========================================================
+
+@bot.command(
+    name="commands",
+    help="Show the number of loaded commands.",
+)
+async def commands_command(ctx):
+    command_count = len(bot.commands)
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="Commands",
+            description=(
+                f"Loaded commands: `{command_count}`"
+            ),
+        )
+    )
+
+
+# =========================================================
+# GLOBAL BOT ERROR HANDLER
+# =========================================================
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(
+        error,
+        commands.CommandNotFound,
+    ):
+        return
+
+    if isinstance(
+        error,
+        commands.MissingRequiredArgument,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Command Error",
+                description=(
+                    "A required argument is missing.\n"
+                    f"Use `{bot.command_prefix(ctx.message)[0]}help "
+                    f"{ctx.command.name}` for usage."
+                ),
+            )
+        )
+        return
+
+    if isinstance(
+        error,
+        commands.BadArgument,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Command Error",
+                description="One or more arguments are invalid.",
+            )
+        )
+        return
+
+    if isinstance(
+        error,
+        commands.NotOwner,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Permission Denied",
+                description="Only the bot owner can use this command.",
+            )
+        )
+        return
+
+    if isinstance(
+        error,
+        commands.MissingPermissions,
+    ):
+        await ctx.send(
+            embed=discord.Embed(
+                title="Permission Denied",
+                description="You do not have permission to use this command.",
+            )
+        )
+        return
+
+    print(
+        f"[COMMAND ERROR] "
+        f"{ctx.command}: {repr(error)}"
+    )
+
+
+# =========================================================
+# FINAL STARTUP
+# =========================================================
+
+async def initialize_bot():
+    if not hasattr(bot, "active_rains"):
+        bot.active_rains = {}
+
+    try:
+        await bot.db.connect()
+        print("[DATABASE] PostgreSQL connected.")
+    except Exception as exc:
+        print(
+            f"[DATABASE] Connection failed: {exc}"
+        )
+        raise
+
+
+async def close_bot():
+    try:
+        await bot.db.close()
+    except Exception:
+        pass
+
+
+# =========================================================
+# START
+# =========================================================
+
+async def main():
+    await initialize_bot()
+
+    try:
+        await bot.start(BOT_TOKEN)
+    finally:
+        await close_bot()
+
+
+if __name__ == "__main__":
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is missing from Railway environment variables."
+        )
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
