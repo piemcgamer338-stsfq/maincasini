@@ -4789,9 +4789,26 @@ async def send_coinflip_win_log(
             f"[COINFLIP] Win log error: {error}"
         )
 
-
 # =========================================================
 # COINFLIP COMMAND
+#
+# Usage:
+#
+# .cf 20 h
+# .cf 20 t
+# .cf 20 heads
+# .cf 20 tails
+#
+# .cf half h
+# .cf half t
+#
+# .cf all h
+# .cf all t
+#
+# h / heads = Heads
+# t / tails = Tails
+#
+# Minimum bet = 20 points
 # =========================================================
 
 @bot.command(name="cf", aliases=["coinflip"])
@@ -4800,7 +4817,7 @@ async def send_coinflip_win_log(
     2,
     commands.BucketType.user
 )
-async def cf(ctx, choice=None, *, bet=None):
+async def cf(ctx, bet=None, choice=None):
 
     # -----------------------------------------------------
     # GAME CHANNEL CHECK
@@ -4813,41 +4830,49 @@ async def cf(ctx, choice=None, *, bet=None):
     # CHECK ARGUMENTS
     # -----------------------------------------------------
 
-    if choice is None:
+    if bet is None or choice is None:
+
         await ctx.send(
             embed=brand(
                 "🪙 Coinflip",
                 (
-                    "Usage:\n"
-                    "`.cf heads 100`\n"
-                    "`.cf tails 100`\n"
-                    "`.cf heads half`\n"
-                    "`.cf tails all`\n"
-                    "`.cf heads max`"
+                    "**Usage:**\n"
+                    "`.cf 20 h`\n"
+                    "`.cf 20 t`\n"
+                    "`.cf 20 heads`\n"
+                    "`.cf 20 tails`\n\n"
+                    "`.cf half h`\n"
+                    "`.cf half t`\n\n"
+                    "`.cf all h`\n"
+                    "`.cf all t`\n\n"
+                    "**h** = Heads\n"
+                    "**t** = Tails\n"
+                    f"**Minimum bet:** {COINFLIP_MIN_BET:,.0f} points"
                 )
             )
         )
         return
 
+    # -----------------------------------------------------
+    # NORMALIZE CHOICE
+    # -----------------------------------------------------
+
     choice = choice.lower().strip()
 
-    if choice not in ("heads", "tails"):
+    if choice in ("h", "heads"):
+        choice = "heads"
+
+    elif choice in ("t", "tails"):
+        choice = "tails"
+
+    else:
+
         await ctx.send(
             embed=brand(
                 "❌ Invalid Choice",
-                "Choose either **heads** or **tails**."
-            )
-        )
-        return
-
-    if bet is None:
-        await ctx.send(
-            embed=brand(
-                "❌ Missing Bet",
                 (
-                    "Please enter your bet amount.\n\n"
-                    "Example:\n"
-                    "`.cf heads 100`"
+                    "Choose **h** or **heads** for Heads,\n"
+                    "or **t** or **tails** for Tails."
                 )
             )
         )
@@ -4865,7 +4890,7 @@ async def cf(ctx, choice=None, *, bet=None):
     # PARSE BET
     # -----------------------------------------------------
 
-    bet_text = bet.lower().strip()
+    bet_text = str(bet).lower().strip()
 
     if bet_text in ("all", "max"):
 
@@ -4892,7 +4917,13 @@ async def cf(ctx, choice=None, *, bet=None):
             await ctx.send(
                 embed=brand(
                     "❌ Invalid Bet",
-                    "Please enter a valid amount."
+                    (
+                        "Please enter a valid amount.\n\n"
+                        "Examples:\n"
+                        "`.cf 100 h`\n"
+                        "`.cf half h`\n"
+                        "`.cf all t`"
+                    )
                 )
             )
             return
@@ -4980,11 +5011,10 @@ async def cf(ctx, choice=None, *, bet=None):
     # CALCULATE PAYOUT
     # -----------------------------------------------------
 
-    payout = (
-        amount * COINFLIP_PAYOUT
-        if won
-        else Decimal("0")
-    )
+    if won:
+        payout = amount * COINFLIP_PAYOUT
+    else:
+        payout = Decimal("0")
 
     payout = payout.quantize(
         Decimal("0.0001")
@@ -4998,16 +5028,18 @@ async def cf(ctx, choice=None, *, bet=None):
 
         # IMPORTANT:
         #
-        # DO NOT do:
-        #
-        # await bot.db.change_balance(
-        #     ctx.author.id,
-        #     float(payout)
-        # )
+        # DO NOT call change_balance(+payout) here.
         #
         # record_game() already credits the payout.
         #
-        # This is the fix for the 2x payout bug.
+        # This prevents the old 2x payout bug.
+        #
+        # Example:
+        #
+        # Bet = 100
+        # Payout = 192
+        #
+        # record_game() adds exactly 192.
         # =================================================
 
         await bot.db.record_game(
@@ -5034,12 +5066,16 @@ async def cf(ctx, choice=None, *, bet=None):
             0x57F287
         )
 
-        # New result image
+        # -------------------------------------------------
+        # RESULT IMAGE
+        # -------------------------------------------------
+
         image_url = COINFLIP_RESULT_IMAGES.get(
             result
         )
 
         if image_url:
+
             embed.set_image(
                 url=image_url
             )
@@ -5072,9 +5108,10 @@ async def cf(ctx, choice=None, *, bet=None):
 
         # Bet was already removed above.
         #
-        # record_game(..., payout=0) records the loss.
+        # record_game() records the loss.
         #
         # DO NOT subtract the bet again.
+
         await bot.db.record_game(
             ctx.author.id,
             float(amount),
@@ -5098,12 +5135,16 @@ async def cf(ctx, choice=None, *, bet=None):
             0xED4245
         )
 
-        # New result image
+        # -------------------------------------------------
+        # RESULT IMAGE
+        # -------------------------------------------------
+
         image_url = COINFLIP_RESULT_IMAGES.get(
             result
         )
 
         if image_url:
+
             embed.set_image(
                 url=image_url
             )
@@ -5115,159 +5156,6 @@ async def cf(ctx, choice=None, *, bet=None):
         await ctx.send(
             embed=embed
         )
-# =========================================================
-# CFWINLOG COMMAND
-#
-# Usage:
-#
-# .cfwinlog #channel
-#
-# Example:
-#
-# .cfwinlog #coinflip-wins
-# =========================================================
-
-@bot.command(
-    name="cfwinlog"
-)
-@commands.has_permissions(
-    manage_guild=True
-)
-async def cfwinlog(
-    ctx,
-    channel: discord.TextChannel = None
-):
-
-    global COINFLIP_WINLOG_CHANNEL_ID
-
-    # -----------------------------------------------------
-    # SHOW CURRENT CHANNEL
-    # -----------------------------------------------------
-
-    if channel is None:
-
-        if COINFLIP_WINLOG_CHANNEL_ID:
-
-            current_channel = bot.get_channel(
-                COINFLIP_WINLOG_CHANNEL_ID
-            )
-
-            if current_channel:
-
-                await ctx.send(
-                    embed=brand(
-                        "🪙 Coinflip Win Log",
-                        (
-                            f"Win logs are currently being sent to "
-                            f"{current_channel.mention}."
-                        ),
-                        0x57F287
-                    )
-                )
-
-                return
-
-        await ctx.send(
-            embed=brand(
-                "🪙 Coinflip Win Log",
-                (
-                    "**Usage:**\n"
-                    "`.cfwinlog #channel`\n\n"
-                    "Example:\n"
-                    "`.cfwinlog #coinflip-wins`"
-                ),
-                0x3498DB
-            )
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # SAVE CHANNEL
-    # -----------------------------------------------------
-
-    COINFLIP_WINLOG_CHANNEL_ID = channel.id
-
-    await ctx.send(
-        embed=brand(
-            "🪙 Coinflip Win Log",
-            (
-                f"Coinflip win logs will now be sent to "
-                f"{channel.mention}."
-            ),
-            0x57F287
-        )
-    )
-
-
-# =========================================================
-# COINFLIP PERMISSION ERROR
-# =========================================================
-
-@cfwinlog.error
-async def cfwinlog_error(
-    ctx,
-    error
-):
-
-    if isinstance(
-        error,
-        commands.MissingPermissions
-    ):
-
-        await ctx.send(
-            embed=brand(
-                "Permission Denied",
-                "You need **Manage Server** permission to use this command.",
-                0xED4245
-            )
-        )
-
-        return
-
-    if isinstance(
-        error,
-        commands.ChannelNotFound
-    ):
-
-        await ctx.send(
-            embed=brand(
-                "Coinflip Win Log",
-                (
-                    "I couldn't find that channel.\n\n"
-                    "Use the channel mention, for example:\n"
-                    "`.cfwinlog #coinflip-wins`"
-                ),
-                0xED4245
-            )
-        )
-
-        return
-
-    print(
-        f"[CFWINLOG] Error: {error}"
-    )
-
-
-# =========================================================
-# COINFLIP COMMAND
-#
-# .cf 20 h
-# .cf 20 t
-# .cf 20 r
-#
-# .cf half h
-# .cf half t
-# .cf half r
-#
-# .cf all h
-# .cf all t
-# .cf all r
-#
-# h = Heads
-# t = Tails
-# r = Random
-# =========================================================
 
 
 @bot.command(aliases=["b"])
