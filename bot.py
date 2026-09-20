@@ -3516,10 +3516,16 @@ class MinesView(OwnerView):
             self.bet * self.current_multiplier
         ).quantize(Decimal("1"))
 
-        await payout(
+      await payout(
             self.owner_id,
             payout_amount,
             "Mines",
+        )
+
+        grid = mines_grid_text(
+            self.mines,
+            self.revealed,
+            cashout=True,
         )
 
         description = (
@@ -3529,11 +3535,7 @@ class MinesView(OwnerView):
             f"**Safe Picks:** {len(self.revealed)}\n"
             f"**Multiplier:** "
             f"{self.current_multiplier}x\n\n"
-            f"{mines_grid_text("
-            self.mines,"
-            " self.revealed,"
-            " cashout=True"
-            ")}\n\n"
+            f"{grid}\n\n"
             f"**Payout:** "
             f"{payout_amount:,.0f} Points "
             f"({usd(payout_amount)})"
