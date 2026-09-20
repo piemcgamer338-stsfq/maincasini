@@ -3495,10 +3495,7 @@ class MinesView(OwnerView):
                     f"{self.current_multiplier}x\n"
                     f"**Cashout:** "
                     f"{(self.bet * self.current_multiplier).quantize(Decimal('1')):,.0f} Points\n\n"
-                    f"{mines_grid_text("
-                    self.mines,"
-                    " self.revealed"
-                    ")}"
+                    f"{mines_grid_text(self.mines, self.revealed)}"
                 ),
                 0x2B2D31,
             ),
