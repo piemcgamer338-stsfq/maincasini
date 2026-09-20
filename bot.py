@@ -3453,8 +3453,7 @@ class MinesView(OwnerView):
                 view=None,
             )
             return
-
-Do not add the duplicate "await interaction.response.edit_message(...)" that came after your "return". It was unreachable code.
+            
             self.stop()
             unlock_player(self.owner_id)
             return
