@@ -3413,45 +3413,46 @@ class MinesView(OwnerView):
                 )
 
     async def reveal_cell(
-        self,
-        interaction: discord.Interaction,
-        position: int,
-    ):
-        if self.finished:
-            return
+    self,
+    interaction: discord.Interaction,
+    position: int,
+):
+    if self.finished:
+        return
 
-        if position in self.revealed:
-            await interaction.response.send_message(
-                "That tile is already revealed.",
-                ephemeral=True,
-            )
-            return
+    if position in self.revealed:
+        await interaction.response.send_message(
+            "That tile is already revealed.",
+            ephemeral=True,
+        )
+        return
 
-        if position in self.mines:
-    self.finished = True
+    if position in self.mines:
+        self.finished = True
 
-    grid = mines_grid_text(
-        self.mines,
-        self.revealed,
-        exploded=position,
-        cashout=True,
-    )
+        grid = mines_grid_text(
+            self.mines,
+            self.revealed,
+            exploded=position,
+            cashout=True,
+        )
 
-    await interaction.response.edit_message(
-        embed=brand(
-            "Mines — You Lost",
-            (
-                f"**Bet:** {self.bet:,.0f} Points "
-                f"({usd(self.bet)})\n"
-                f"**Mines:** {self.mine_count}\n\n"
-                f"{grid}\n\n"
-                "You hit a mine.\n"
-                "**Payout:** 0 Points"
+        await interaction.response.edit_message(
+            embed=brand(
+                "Mines — You Lost",
+                (
+                    f"**Bet:** {self.bet:,.0f} Points "
+                    f"({usd(self.bet)})\n"
+                    f"**Mines:** {self.mine_count}\n\n"
+                    f"{grid}\n\n"
+                    "You hit a mine.\n"
+                    "**Payout:** 0 Points"
+                ),
+                0xED4245,
             ),
-            0xED4245,
-        ),
-        view=None,
-    )
+            view=None,
+        )
+        return
 
             self.stop()
             unlock_player(self.owner_id)
