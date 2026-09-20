@@ -863,34 +863,711 @@ from discord.ext import commands
 
 import random
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageFont,
+    ImageFilter
+)
+
+
+# =========================================================
+# MARKET CONFIG
+# =========================================================
 
 MARKET_PAYOUT = Decimal("1.92")
 
-# Change this if you already have a different minimum bet.
 MINIMUM_BET = Decimal("1")
 
 
+# =========================================================
+# MARKET FONT
+# =========================================================
+
+def market_font(size, bold=False):
+
+    if bold:
+
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ]
+
+    else:
+
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ]
+
+    for path in paths:
+
+        try:
+
+            return ImageFont.truetype(
+                path,
+                size
+            )
+
+        except Exception:
+            pass
+
+    return ImageFont.load_default()
+
+
+# =========================================================
+# MARKET IMAGE GENERATOR
+# =========================================================
+
+def create_market_chart(direction=None):
+
+    """
+    direction=None
+        Creates the hidden prediction chart.
+
+    direction="UP"
+        Creates the revealed UP chart.
+
+    direction="DOWN"
+        Creates the revealed DOWN chart.
+    """
+
+    WIDTH = 1200
+    HEIGHT = 675
+
+    # -----------------------------------------------------
+    # BASE IMAGE
+    # -----------------------------------------------------
+
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        (8, 9, 13)
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # -----------------------------------------------------
+    # BACKGROUND GRADIENT
+    # -----------------------------------------------------
+
+    for y in range(HEIGHT):
+
+        ratio = y / HEIGHT
+
+        r = int(8 + (10 * ratio))
+        g = int(9 + (10 * ratio))
+        b = int(13 + (14 * ratio))
+
+        draw.line(
+            [(0, y), (WIDTH, y)],
+            fill=(r, g, b)
+        )
+
+    # -----------------------------------------------------
+    # HEADER
+    # -----------------------------------------------------
+
+    title_font = market_font(
+        34,
+        True
+    )
+
+    draw.text(
+        (60, 35),
+        "BETRUSH  |  MARKET PREDICTION",
+        font=title_font,
+        fill=(242, 244, 248)
+    )
+
+    # -----------------------------------------------------
+    # CHART AREA
+    # -----------------------------------------------------
+
+    chart_left = 65
+    chart_right = WIDTH - 55
+
+    chart_top = 145
+    chart_bottom = HEIGHT - 65
+
+    chart_width = (
+        chart_right - chart_left
+    )
+
+    chart_height = (
+        chart_bottom - chart_top
+    )
+
+    # -----------------------------------------------------
+    # GRID
+    # -----------------------------------------------------
+
+    grid_color = (
+        27,
+        30,
+        38
+    )
+
+    # Horizontal grid
+
+    for i in range(7):
+
+        y = int(
+            chart_top
+            + (
+                chart_height / 6
+            ) * i
+        )
+
+        draw.line(
+            [
+                (chart_left, y),
+                (chart_right, y)
+            ],
+            fill=grid_color,
+            width=2
+        )
+
+    # Vertical grid
+
+    for i in range(12):
+
+        x = int(
+            chart_left
+            + (
+                chart_width / 11
+            ) * i
+        )
+
+        draw.line(
+            [
+                (x, chart_top),
+                (x, chart_bottom)
+            ],
+            fill=grid_color,
+            width=2
+        )
+
+    # -----------------------------------------------------
+    # HISTORICAL MARKET DATA
+    # -----------------------------------------------------
+
+    history = [
+        0.80,
+        0.61,
+        0.43,
+        0.25,
+        0.39,
+        0.55,
+        0.63,
+        0.47,
+        0.59,
+        0.44,
+        0.56,
+        0.38,
+        0.49,
+        0.35,
+        0.51,
+        0.63,
+        0.60,
+        0.69,
+    ]
+
+    # -----------------------------------------------------
+    # COORDINATE FUNCTION
+    # -----------------------------------------------------
+
+    def point_xy(index, value):
+
+        x = (
+            chart_left
+            + (
+                index / (len(history) - 1)
+            ) * chart_width
+        )
+
+        y = (
+            chart_top
+            + (
+                1 - value
+            ) * chart_height
+        )
+
+        return (
+            int(x),
+            int(y)
+        )
+
+    # -----------------------------------------------------
+    # HISTORY POINTS
+    # -----------------------------------------------------
+
+    history_points = [
+        point_xy(
+            i,
+            value
+        )
+
+        for i, value in enumerate(history)
+    ]
+
+    # -----------------------------------------------------
+    # DRAW HISTORY
+    # -----------------------------------------------------
+
+    for i in range(
+        len(history_points) - 1
+    ):
+
+        draw.line(
+            [
+                history_points[i],
+                history_points[i + 1]
+            ],
+            fill=(115, 137, 168),
+            width=5
+        )
+
+    # -----------------------------------------------------
+    # LAST HISTORY POINT
+    # -----------------------------------------------------
+
+    last_x, last_y = history_points[-1]
+
+    future_start = last_x
+    future_end = chart_right
+
+    future_steps = 12
+
+    # =====================================================
+    # HIDDEN STATE
+    # =====================================================
+
+    if direction is None:
+
+        hidden_points = []
+
+        current_y = last_y
+
+        for i in range(
+            1,
+            future_steps + 1
+        ):
+
+            x = int(
+                future_start
+                + (
+                    future_end
+                    - future_start
+                )
+                * (
+                    i / future_steps
+                )
+            )
+
+            current_y += random.randint(
+                -18,
+                18
+            )
+
+            current_y = max(
+                chart_top + 20,
+                min(
+                    chart_bottom - 20,
+                    current_y
+                )
+            )
+
+            hidden_points.append(
+                (x, current_y)
+            )
+
+        # -------------------------------------------------
+        # GREY HIDDEN LINE
+        # -------------------------------------------------
+
+        previous = (
+            last_x,
+            last_y
+        )
+
+        for point in hidden_points:
+
+            draw.line(
+                [
+                    previous,
+                    point
+                ],
+                fill=(74, 78, 88),
+                width=4
+            )
+
+            previous = point
+
+        # -------------------------------------------------
+        # QUESTION MARK
+        # -------------------------------------------------
+
+        question_font = market_font(
+            105,
+            True
+        )
+
+        question = "?"
+
+        bbox = draw.textbbox(
+            (0, 0),
+            question,
+            font=question_font
+        )
+
+        q_width = (
+            bbox[2] - bbox[0]
+        )
+
+        q_height = (
+            bbox[3] - bbox[1]
+        )
+
+        q_x = (
+            future_start
+            + (
+                future_end
+                - future_start
+            ) // 2
+            - q_width // 2
+        )
+
+        q_y = (
+            HEIGHT // 2
+            - q_height // 2
+        )
+
+        # Shadow
+
+        draw.text(
+            (
+                q_x + 5,
+                q_y + 5
+            ),
+            question,
+            font=question_font,
+            fill=(0, 0, 0)
+        )
+
+        # Question mark
+
+        draw.text(
+            (
+                q_x,
+                q_y
+            ),
+            question,
+            font=question_font,
+            fill=(155, 160, 170)
+        )
+
+        # -------------------------------------------------
+        # PREDICTION LABEL
+        # -------------------------------------------------
+
+        label_font = market_font(
+            18,
+            False
+        )
+
+        label = "PREDICT THE MARKET"
+
+        bbox = draw.textbbox(
+            (0, 0),
+            label,
+            font=label_font
+        )
+
+        label_width = (
+            bbox[2] - bbox[0]
+        )
+
+        draw.text(
+            (
+                future_start
+                + (
+                    future_end
+                    - future_start
+                ) // 2
+                - label_width // 2,
+                chart_bottom - 35
+            ),
+            label,
+            font=label_font,
+            fill=(105, 110, 120)
+        )
+
+    # =====================================================
+    # REVEALED STATE
+    # =====================================================
+
+    else:
+
+        if direction == "UP":
+
+            future_values = [
+                0.58,
+                0.64,
+                0.55,
+                0.70,
+                0.77,
+                0.69,
+                0.84,
+                0.91,
+                0.87,
+                0.96,
+                0.91,
+                0.99
+            ]
+
+            line_color = (
+                72,
+                190,
+                255
+            )
+
+            result_text = "▲ MARKET UP"
+
+        else:
+
+            future_values = [
+                0.48,
+                0.40,
+                0.45,
+                0.31,
+                0.38,
+                0.25,
+                0.19,
+                0.29,
+                0.15,
+                0.10,
+                0.18,
+                0.08
+            ]
+
+            line_color = (
+                255,
+                72,
+                82
+            )
+
+            result_text = "▼ MARKET DOWN"
+
+        # -------------------------------------------------
+        # REVEALED POINTS
+        # -------------------------------------------------
+
+        revealed_points = []
+
+        for i, value in enumerate(
+            future_values,
+            start=1
+        ):
+
+            x = int(
+                future_start
+                + (
+                    future_end
+                    - future_start
+                )
+                * (
+                    i / future_steps
+                )
+            )
+
+            y = int(
+                chart_top
+                + (
+                    1 - value
+                )
+                * chart_height
+            )
+
+            revealed_points.append(
+                (x, y)
+            )
+
+        all_points = [
+            history_points[-1]
+        ] + revealed_points
+
+        # -------------------------------------------------
+        # GLOW LAYER
+        # -------------------------------------------------
+
+        glow = Image.new(
+            "RGBA",
+            image.size,
+            (0, 0, 0, 0)
+        )
+
+        glow_draw = ImageDraw.Draw(
+            glow
+        )
+
+        for i in range(
+            len(all_points) - 1
+        ):
+
+            glow_draw.line(
+                [
+                    all_points[i],
+                    all_points[i + 1]
+                ],
+                fill=(
+                    line_color[0],
+                    line_color[1],
+                    line_color[2],
+                    85
+                ),
+                width=22
+            )
+
+        glow = glow.filter(
+            ImageFilter.GaussianBlur(
+                12
+            )
+        )
+
+        image = Image.alpha_composite(
+            image.convert("RGBA"),
+            glow
+        ).convert("RGB")
+
+        draw = ImageDraw.Draw(
+            image
+        )
+
+        # -------------------------------------------------
+        # MAIN RESULT LINE
+        # -------------------------------------------------
+
+        for i in range(
+            len(all_points) - 1
+        ):
+
+            draw.line(
+                [
+                    all_points[i],
+                    all_points[i + 1]
+                ],
+                fill=line_color,
+                width=6
+            )
+
+        # -------------------------------------------------
+        # RESULT DOT
+        # -----------------------------------------------------
+
+        final_x, final_y = all_points[-1]
+
+        draw.ellipse(
+            (
+                final_x - 12,
+                final_y - 12,
+                final_x + 12,
+                final_y + 12
+            ),
+            fill=line_color
+        )
+
+        # -------------------------------------------------
+        # RESULT LABEL
+        # -------------------------------------------------
+
+        result_font = market_font(
+            28,
+            True
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            result_text,
+            font=result_font
+        )
+
+        result_width = (
+            bbox[2] - bbox[0]
+        )
+
+        draw.text(
+            (
+                future_start
+                + (
+                    future_end
+                    - future_start
+                ) // 2
+                - result_width // 2,
+                chart_bottom - 42
+            ),
+            result_text,
+            font=result_font,
+            fill=line_color
+        )
+
+    # -----------------------------------------------------
+    # DISCORD FILE BUFFER
+    # -----------------------------------------------------
+
+    buffer = BytesIO()
+
+    image.save(
+        buffer,
+        format="PNG",
+        optimize=True
+    )
+
+    buffer.seek(0)
+
+    return buffer
+
+
+# =========================================================
+# MARKET VIEW
+# =========================================================
+
 class MarketView(discord.ui.View):
 
-    def __init__(self, ctx, bet):
-        super().__init__(timeout=30)
+    def __init__(
+        self,
+        ctx,
+        bet
+    ):
+
+        super().__init__(
+            timeout=30
+        )
 
         self.ctx = ctx
-        self.bet = Decimal(str(bet))
+
+        self.bet = Decimal(
+            str(bet)
+        )
+
         self.finished = False
         self.message = None
 
-    # -----------------------------------------------------
-    # ONLY THE PLAYER WHO STARTED THE GAME CAN USE IT
-    # -----------------------------------------------------
+    # =====================================================
+    # INTERACTION CHECK
+    # =====================================================
 
     async def interaction_check(
         self,
         interaction: discord.Interaction
-    ) -> bool:
+    ):
 
-        if interaction.user.id != self.ctx.author.id:
+        if (
+            interaction.user.id
+            != self.ctx.author.id
+        ):
 
             await interaction.response.send_message(
                 "This market game belongs to someone else.",
@@ -901,14 +1578,14 @@ class MarketView(discord.ui.View):
 
         return True
 
-    # -----------------------------------------------------
+    # =====================================================
     # FINISH GAME
-    # -----------------------------------------------------
+    # =====================================================
 
     async def finish_game(
         self,
-        interaction: discord.Interaction,
-        direction: str
+        interaction,
+        direction
     ):
 
         if self.finished:
@@ -916,33 +1593,39 @@ class MarketView(discord.ui.View):
 
         self.finished = True
 
-        # Disable buttons immediately
+        # -------------------------------------------------
+        # DISABLE BUTTONS
+        # -------------------------------------------------
+
         for child in self.children:
             child.disabled = True
 
         # -------------------------------------------------
-        # MARKET RESULT
+        # GENERATE RESULT
         # -------------------------------------------------
 
         market_result = random.choice(
-            ["UP", "DOWN"]
+            [
+                "UP",
+                "DOWN"
+            ]
         )
 
-        won = market_result == direction
+        won = (
+            market_result
+            == direction
+        )
 
-        # -------------------------------------------------
+        # =================================================
         # WIN
-        # -------------------------------------------------
+        # =================================================
 
         if won:
 
-            # Bet was already deducted.
-            #
-            # Example:
-            # Bet = 100
-            # 1.92x total payout = 192
-            #
-            payout = self.bet * MARKET_PAYOUT
+            payout = (
+                self.bet
+                * MARKET_PAYOUT
+            )
 
             try:
 
@@ -975,9 +1658,9 @@ class MarketView(discord.ui.View):
                     embed=brand(
                         "Market Error",
                         (
-                            "The payout could not be processed.\n\n"
-                            "Your game was not completed. "
-                            "Please try again."
+                            "The payout could not be "
+                            "processed. Your game was not "
+                            "completed."
                         ),
                         0xED4245
                     ),
@@ -986,9 +1669,13 @@ class MarketView(discord.ui.View):
 
                 return
 
-            # -------------------------------------------------
-            # WIN RESULT
-            # -------------------------------------------------
+            result_title = (
+                "📈 Market Won!"
+            )
+
+            result_colour = (
+                0x57F287
+            )
 
             result_text = (
                 f"**Result:** {market_result}\n"
@@ -998,15 +1685,19 @@ class MarketView(discord.ui.View):
                 f"**Multiplier:** {MARKET_PAYOUT}x"
             )
 
-            result_colour = 0x57F287
-
-            result_title = "📈 Market Won!"
-
-        # -------------------------------------------------
+        # =================================================
         # LOSS
-        # -------------------------------------------------
+        # =================================================
 
         else:
+
+            result_title = (
+                "📉 Market Lost"
+            )
+
+            result_colour = (
+                0xED4245
+            )
 
             result_text = (
                 f"**Result:** {market_result}\n"
@@ -1016,13 +1707,22 @@ class MarketView(discord.ui.View):
                 f"**Multiplier:** {MARKET_PAYOUT}x"
             )
 
-            result_colour = 0xED4245
+        # =================================================
+        # GENERATE RESULT IMAGE
+        # =================================================
 
-            result_title = "📉 Market Lost"
+        chart = create_market_chart(
+            direction=market_result
+        )
 
-        # -------------------------------------------------
+        chart_file = discord.File(
+            chart,
+            filename="market_result.png"
+        )
+
+        # =================================================
         # RESULT EMBED
-        # -------------------------------------------------
+        # =================================================
 
         embed = brand(
             result_title,
@@ -1030,18 +1730,55 @@ class MarketView(discord.ui.View):
             result_colour
         )
 
+        embed.set_image(
+            url="attachment://market_result.png"
+        )
+
         embed.set_footer(
             text="Market"
         )
 
-        # -------------------------------------------------
-        # UPDATE MESSAGE
-        # -------------------------------------------------
+        # =================================================
+        # SHOW RESULT
+        # =================================================
 
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self
-        )
+        try:
+
+            await interaction.response.edit_message(
+                embed=embed,
+                view=self,
+                attachments=[
+                    chart_file
+                ]
+            )
+
+        except Exception as error:
+
+            print(
+                f"[MARKET] Result edit error: {error}"
+            )
+
+            # The result has already been processed,
+            # so do not attempt another payout here.
+
+            try:
+
+                await interaction.followup.send(
+                    embed=embed,
+                    file=discord.File(
+                        create_market_chart(
+                            direction=market_result
+                        ),
+                        filename="market_result.png"
+                    ),
+                    ephemeral=True
+                )
+
+            except Exception as followup_error:
+
+                print(
+                    f"[MARKET] Followup error: {followup_error}"
+                )
 
         self.stop()
 
@@ -1096,18 +1833,56 @@ class MarketView(discord.ui.View):
 
         self.finished = True
 
+        # -------------------------------------------------
+        # DISABLE BUTTONS
+        # -------------------------------------------------
+
         for child in self.children:
             child.disabled = True
+
+        # -------------------------------------------------
+        # REFUND UNFINISHED GAME
+        # -------------------------------------------------
+
+        try:
+
+            await bot.db.change_balance(
+                self.ctx.author.id,
+                float(self.bet),
+                "market_timeout_refund"
+            )
+
+        except Exception as error:
+
+            print(
+                f"[MARKET] Timeout refund error: {error}"
+            )
+
+        # -------------------------------------------------
+        # UPDATE MESSAGE
+        # -------------------------------------------------
 
         if self.message:
 
             try:
 
+                embed = brand(
+                    "Market Expired",
+                    (
+                        "The prediction window expired.\n\n"
+                        f"Your **{self.bet:,.2f} points** "
+                        "bet has been refunded."
+                    ),
+                    0x95A5A6
+                )
+
                 await self.message.edit(
+                    embed=embed,
                     view=self
                 )
 
             except discord.HTTPException:
+
                 pass
 
         self.stop()
@@ -1117,37 +1892,41 @@ class MarketView(discord.ui.View):
 # MARKET COMMAND
 # =========================================================
 
-@bot.command(name="market")
+@bot.command(
+    name="market"
+)
 async def market(
     ctx,
     amount: str = None
 ):
 
-    # -----------------------------------------------------
+    # =====================================================
     # USAGE
-    # -----------------------------------------------------
+    # =====================================================
 
     if amount is None:
 
         await ctx.send(
             embed=brand(
-                "Market",
+                "📊 Market Prediction",
                 (
                     "**Usage:**\n"
                     "`.market <amount>`\n\n"
                     f"**Minimum Bet:** "
                     f"{MINIMUM_BET:,.0f} points\n"
                     f"**Payout:** "
-                    f"{MARKET_PAYOUT}x total"
+                    f"{MARKET_PAYOUT}x total\n\n"
+                    "Predict whether the market "
+                    "will go **UP** or **DOWN**."
                 )
             )
         )
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # PARSE BET
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
@@ -1155,7 +1934,10 @@ async def market(
             str(amount)
         )
 
-    except (InvalidOperation, ValueError):
+    except (
+        InvalidOperation,
+        ValueError
+    ):
 
         await ctx.send(
             embed=brand(
@@ -1167,9 +1949,9 @@ async def market(
 
         return
 
-    # -----------------------------------------------------
-    # VALIDATE BET
-    # -----------------------------------------------------
+    # =====================================================
+    # FINITE CHECK
+    # =====================================================
 
     if not bet.is_finite():
 
@@ -1183,6 +1965,10 @@ async def market(
 
         return
 
+    # =====================================================
+    # POSITIVE CHECK
+    # =====================================================
+
     if bet <= 0:
 
         await ctx.send(
@@ -1194,6 +1980,10 @@ async def market(
         )
 
         return
+
+    # =====================================================
+    # MINIMUM BET
+    # =====================================================
 
     if bet < MINIMUM_BET:
 
@@ -1210,9 +2000,9 @@ async def market(
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # GET USER
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
@@ -1236,6 +2026,10 @@ async def market(
 
         return
 
+    # =====================================================
+    # USER NOT FOUND
+    # =====================================================
+
     if not row:
 
         await ctx.send(
@@ -1248,9 +2042,9 @@ async def market(
 
         return
 
-    # -----------------------------------------------------
-    # BALANCE
-    # -----------------------------------------------------
+    # =====================================================
+    # GET BALANCE
+    # =====================================================
 
     try:
 
@@ -1258,7 +2052,11 @@ async def market(
             str(row["balance"])
         )
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            f"[MARKET] Balance conversion error: {error}"
+        )
 
         await ctx.send(
             embed=brand(
@@ -1270,9 +2068,9 @@ async def market(
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # BALANCE CHECK
-    # -----------------------------------------------------
+    # =====================================================
 
     if balance < bet:
 
@@ -1292,9 +2090,9 @@ async def market(
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # DEDUCT BET
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
@@ -1312,6 +2110,10 @@ async def market(
 
         deducted = False
 
+    # =====================================================
+    # DEDUCTION FAILED
+    # =====================================================
+
     if not deducted:
 
         await ctx.send(
@@ -1327,36 +2129,96 @@ async def market(
 
         return
 
-    # -----------------------------------------------------
-    # GAME SCREEN
-    # -----------------------------------------------------
+    # =====================================================
+    # CREATE HIDDEN CHART
+    # =====================================================
+
+    try:
+
+        chart = create_market_chart()
+
+        chart_file = discord.File(
+            chart,
+            filename="market.png"
+        )
+
+    except Exception as error:
+
+        print(
+            f"[MARKET] Image generation error: {error}"
+        )
+
+        # Refund if image generation fails
+
+        try:
+
+            await bot.db.change_balance(
+                ctx.author.id,
+                float(bet),
+                "market_image_refund"
+            )
+
+        except Exception as refund_error:
+
+            print(
+                f"[MARKET] Image refund error: "
+                f"{refund_error}"
+            )
+
+        await ctx.send(
+            embed=brand(
+                "Market",
+                (
+                    "The market image could not be "
+                    "generated. Your bet was refunded."
+                ),
+                0xED4245
+            )
+        )
+
+        return
+
+    # =====================================================
+    # GAME EMBED
+    # =====================================================
 
     embed = brand(
         "📊 Market Prediction",
         (
             f"**Bet:** {bet:,.2f} points\n"
             f"**Payout:** {MARKET_PAYOUT}x total\n\n"
-            "Choose the market direction."
+            "The market is hidden.\n"
+            "Predict whether it will move **UP** "
+            "or **DOWN**."
         )
     )
 
-    # -----------------------------------------------------
+    embed.set_image(
+        url="attachment://market.png"
+    )
+
+    embed.set_footer(
+        text="Choose carefully • Market Prediction"
+    )
+
+    # =====================================================
     # CREATE VIEW
-    # -----------------------------------------------------
+    # =====================================================
 
     view = MarketView(
         ctx,
         bet
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # SEND GAME
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
         message = await ctx.send(
             embed=embed,
+            file=chart_file,
             view=view
         )
 
@@ -1368,8 +2230,9 @@ async def market(
             f"[MARKET] Message error: {error}"
         )
 
-        # If Discord fails after the bet was deducted,
-        # refund the player.
+        # -------------------------------------------------
+        # REFUND BET
+        # -------------------------------------------------
 
         try:
 
@@ -1382,7 +2245,8 @@ async def market(
         except Exception as refund_error:
 
             print(
-                f"[MARKET] Refund error: {refund_error}"
+                f"[MARKET] Refund error: "
+                f"{refund_error}"
             )
 
         return
