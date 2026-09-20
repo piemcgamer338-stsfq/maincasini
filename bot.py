@@ -6089,10 +6089,10 @@ async def blackjack(ctx, bet: str):
 import os
 import random
 import discord
+from decimal import Decimal
 
 
 HILO_CARD_FOLDER = "."
-
 
 HILO_SUITS = [
     "clubs",
@@ -6100,7 +6100,6 @@ HILO_SUITS = [
     "hearts",
     "spades"
 ]
-
 
 HILO_RANKS = {
     2: "2",
@@ -6133,6 +6132,7 @@ def hilo_card_file(rank, suit):
     )
 
     if not os.path.exists(path):
+
         raise FileNotFoundError(
             f"Card image not found: {filename}"
         )
@@ -6169,10 +6169,11 @@ class HiloView(OwnerView):
 
         self.rounds = 0
         self.finished = False
+        self.message = None
 
-    # -----------------------------------------------------
+    # =====================================================
     # RANK NAME
-    # -----------------------------------------------------
+    # =====================================================
 
     def rank_name(self, value):
 
@@ -6186,9 +6187,19 @@ class HiloView(OwnerView):
             str(value)
         )
 
-    # -----------------------------------------------------
+    # =====================================================
+    # MULTIPLIER
+    # =====================================================
+
+    def multiplier(self):
+
+        return 1 + (
+            self.rounds * 0.14
+        )
+
+    # =====================================================
     # CURRENT CARD
-    # -----------------------------------------------------
+    # =====================================================
 
     def current_card_file(self):
 
@@ -6197,15 +6208,15 @@ class HiloView(OwnerView):
             self.current_suit
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # GAME EMBED
-    # -----------------------------------------------------
+    # =====================================================
 
     def game_embed(self):
 
-        multiplier = 1 + (
-            self.rounds * 0.14
-        )
+        multiplier = self.multiplier()
+
+        payout = self.bet * multiplier
 
         embed = brand(
             "HiLo",
@@ -6215,13 +6226,16 @@ class HiloView(OwnerView):
 
                 f"**Next Card:** ❓\n\n"
 
-                f"**High or Low?**\n\n"
+                f"**Higher or Lower?**\n\n"
 
                 f"**Current Streak:** "
                 f"{self.rounds}\n"
 
                 f"**Current Multi:** "
-                f"{multiplier:.2f}x"
+                f"{multiplier:.2f}x\n"
+
+                f"**Current Payout:** "
+                f"{money(payout)} points"
             )
         )
 
@@ -6231,9 +6245,9 @@ class HiloView(OwnerView):
 
         return embed
 
-    # -----------------------------------------------------
+    # =====================================================
     # GUESS
-    # -----------------------------------------------------
+    # =====================================================
 
     async def guess(
         self,
@@ -6242,9 +6256,18 @@ class HiloView(OwnerView):
     ):
 
         if self.finished:
+
+            await interaction.response.send_message(
+                "This HiLo game has already ended.",
+                ephemeral=True
+            )
+
             return
 
-        # Draw next card
+        # -------------------------------------------------
+        # DRAW NEXT CARD
+        # -------------------------------------------------
+
         next_rank = random.randint(
             2,
             14
@@ -6255,7 +6278,7 @@ class HiloView(OwnerView):
         )
 
         # -------------------------------------------------
-        # HIGHER / LOWER
+        # CHECK GUESS
         # -------------------------------------------------
 
         if higher:
@@ -6293,17 +6316,17 @@ class HiloView(OwnerView):
             embed = brand(
                 "HiLo — Lost",
                 (
-                    f"**Current Card:** "
+                    f"**Previous Card:** "
                     f"{self.rank_name(self.current_rank)}\n"
 
                     f"**Next Card:** "
                     f"{self.rank_name(next_rank)}\n\n"
 
-                    f"**Current Streak:** "
+                    f"**Final Streak:** "
                     f"{self.rounds}\n"
 
-                    f"**Current Multi:** "
-                    f"{1 + self.rounds * 0.14:.2f}x\n\n"
+                    f"**Final Multi:** "
+                    f"{self.multiplier():.2f}x\n\n"
 
                     f"You lost **{money(self.bet)} points**."
                 ),
@@ -6325,6 +6348,8 @@ class HiloView(OwnerView):
                 view=self
             )
 
+            self.stop()
+
             return
 
         # =================================================
@@ -6337,7 +6362,7 @@ class HiloView(OwnerView):
         self.current_suit = next_suit
 
         # =================================================
-        # FINISH AFTER 8 ROUNDS
+        # AUTO FINISH AFTER 8 ROUNDS
         # =================================================
 
         if self.rounds >= 8:
@@ -6345,9 +6370,7 @@ class HiloView(OwnerView):
             self.finished = True
 
             payout = round(
-                self.bet * (
-                    1 + self.rounds * 0.14
-                ),
+                self.bet * self.multiplier(),
                 4
             )
 
@@ -6373,11 +6396,11 @@ class HiloView(OwnerView):
                     f"**Current Card:** "
                     f"{self.rank_name(self.current_rank)}\n\n"
 
-                    f"**Current Streak:** "
+                    f"**Final Streak:** "
                     f"{self.rounds}\n"
 
-                    f"**Current Multi:** "
-                    f"{1 + self.rounds * 0.14:.2f}x\n\n"
+                    f"**Final Multi:** "
+                    f"{self.multiplier():.2f}x\n\n"
 
                     f"{config.E['win']} "
                     f"You won **{money(payout)} points**!"
@@ -6400,6 +6423,8 @@ class HiloView(OwnerView):
                 view=self
             )
 
+            self.stop()
+
             return
 
         # =================================================
@@ -6414,14 +6439,15 @@ class HiloView(OwnerView):
             view=self
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # HIGHER
-    # -----------------------------------------------------
+    # =====================================================
 
     @discord.ui.button(
         label="Higher",
         style=discord.ButtonStyle.success,
-        emoji="⬆️"
+        emoji="⬆️",
+        row=0
     )
     async def higher(
         self,
@@ -6434,14 +6460,15 @@ class HiloView(OwnerView):
             True
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # LOWER
-    # -----------------------------------------------------
+    # =====================================================
 
     @discord.ui.button(
         label="Lower",
         style=discord.ButtonStyle.primary,
-        emoji="⬇️"
+        emoji="⬇️",
+        row=0
     )
     async def lower(
         self,
@@ -6453,6 +6480,133 @@ class HiloView(OwnerView):
             interaction,
             False
         )
+
+    # =====================================================
+    # CASH OUT
+    # =====================================================
+
+    @discord.ui.button(
+        label="Cash Out",
+        style=discord.ButtonStyle.success,
+        emoji="💰",
+        row=1
+    )
+    async def cashout(
+        self,
+        interaction,
+        button
+    ):
+
+        if self.finished:
+
+            await interaction.response.send_message(
+                "This HiLo game has already ended.",
+                ephemeral=True
+            )
+
+            return
+
+        # Must win at least one round
+        if self.rounds <= 0:
+
+            await interaction.response.send_message(
+                "You need to win at least one round before cashing out.",
+                ephemeral=True
+            )
+
+            return
+
+        self.finished = True
+
+        payout = round(
+            self.bet * self.multiplier(),
+            4
+        )
+
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
+
+        # -------------------------------------------------
+        # PAYOUT
+        # -------------------------------------------------
+
+        await bot.db.change_balance(
+            self.owner_id,
+            payout,
+            "hilo_cashout"
+        )
+
+        await bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            payout,
+            "hilo"
+        )
+
+        # -------------------------------------------------
+        # CASHOUT EMBED
+        # -------------------------------------------------
+
+        embed = brand(
+            "HiLo — Cashed Out",
+            (
+                f"**Current Card:** "
+                f"{self.rank_name(self.current_rank)}\n\n"
+
+                f"**Streak:** "
+                f"{self.rounds}\n"
+
+                f"**Multiplier:** "
+                f"{self.multiplier():.2f}x\n\n"
+
+                f"{config.E['win']} "
+                f"You cashed out **{money(payout)} points**!"
+            ),
+            0x57F287
+        )
+
+        embed.set_image(
+            url="attachment://hilo_card.png"
+        )
+
+        final_file = hilo_card_file(
+            self.current_rank,
+            self.current_suit
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            attachments=[final_file],
+            view=self
+        )
+
+        self.stop()
+
+    # =====================================================
+    # TIMEOUT
+    # =====================================================
+
+    async def on_timeout(self):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        for item in self.children:
+            item.disabled = True
+
+        if self.message:
+
+            try:
+
+                await self.message.edit(
+                    view=self
+                )
+
+            except discord.HTTPException:
+                pass
 
 
 # =========================================================
@@ -6468,9 +6622,71 @@ async def hilo(
     if not await bot.game_allowed(ctx):
         return
 
+    # =====================================================
+    # DETERMINE BET
+    # =====================================================
+
     try:
 
-        amount = parse_amount(bet)
+        bet_lower = bet.lower().strip()
+
+        # -------------------------------------------------
+        # GET USER BALANCE FOR ALL / HALF
+        # -------------------------------------------------
+
+        if bet_lower in (
+            "all",
+            "max",
+            "half"
+        ):
+
+            row = await bot.db.user(
+                ctx.author.id
+            )
+
+            if not row:
+
+                await ctx.send(
+                    "Your account could not be found."
+                )
+
+                return
+
+            balance = Decimal(
+                str(row["balance"])
+            )
+
+            # ALL / MAX
+            if bet_lower in (
+                "all",
+                "max"
+            ):
+
+                amount = parse_amount(
+                    str(balance)
+                )
+
+            # HALF
+            else:
+
+                half_balance = (
+                    balance /
+                    Decimal("2")
+                )
+
+                amount = parse_amount(
+                    str(half_balance)
+                )
+
+        # -------------------------------------------------
+        # NORMAL AMOUNT
+        # -------------------------------------------------
+
+        else:
+
+            amount = parse_amount(
+                bet
+            )
 
     except ValueError as error:
 
@@ -6480,6 +6696,10 @@ async def hilo(
 
         return
 
+    # =====================================================
+    # VALIDATE BET
+    # =====================================================
+
     if amount <= 0:
 
         await ctx.send(
@@ -6488,9 +6708,9 @@ async def hilo(
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # TAKE BET
-    # -----------------------------------------------------
+    # =====================================================
 
     if not await bot.db.change_balance(
         ctx.author.id,
@@ -6504,18 +6724,18 @@ async def hilo(
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # CREATE GAME
-    # -----------------------------------------------------
+    # =====================================================
 
     view = HiloView(
         ctx.author,
         amount
     )
 
-    # -----------------------------------------------------
-    # GET REAL CARD PNG
-    # -----------------------------------------------------
+    # =====================================================
+    # GET CARD
+    # =====================================================
 
     try:
 
@@ -6523,7 +6743,7 @@ async def hilo(
 
     except FileNotFoundError as error:
 
-        # Refund if image is missing
+        # Refund bet
         await bot.db.change_balance(
             ctx.author.id,
             amount,
@@ -6536,15 +6756,18 @@ async def hilo(
 
         return
 
-    # -----------------------------------------------------
-    # SEND
-    # -----------------------------------------------------
+    # =====================================================
+    # SEND GAME
+    # =====================================================
 
-    await ctx.send(
+    message = await ctx.send(
         embed=view.game_embed(),
         file=card_file,
         view=view
     )
+
+    # Save message
+    view.message = message
 
 
 @bot.command()
