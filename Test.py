@@ -6513,687 +6513,499 @@ async def rainend_command_error(ctx, error):
     raise error
           
 # =========================================================
-# PART 9 — DEPOSIT / WITHDRAW / PRICE / AI
+# PART 9 — DEPOSIT & WITHDRAW
 # =========================================================
 
+import discord
+from discord.ext import commands
+from decimal import Decimal, InvalidOperation
+
+
 # =========================================================
-# CRYPTO CONFIG
+# FIXED DEPOSIT ADDRESSES
 # =========================================================
 
-SUPPORTED_CRYPTO = {
-    "ltc": "Litecoin",
-    "sol": "Solana",
+DEPOSIT_ADDRESSES = {
+    "usdt": "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2",
+    "sol": "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6",
+    "ltc": "LfdpchVVZbgysmqykQoHTYziUow6C14cwq",
+}
+
+
+# =========================================================
+# DEPOSIT SETTINGS
+# =========================================================
+
+DEPOSIT_MINIMUMS = {
+    "usdt": Decimal("0.50"),
+    "sol": Decimal("0.001"),
+    "ltc": Decimal("0.0005"),
+}
+
+# 1 point = 0.0001 coin
+DEPOSIT_POINT_CONVERSION = {
+    "usdt": Decimal("0.0001"),
+    "sol": Decimal("0.0001"),
+    "ltc": Decimal("0.0001"),
+}
+
+
+# =========================================================
+# WITHDRAW SETTINGS
+# =========================================================
+
+WITHDRAW_MINIMUMS = {
+    "ltc": Decimal("20"),
+    "sol": Decimal("200"),
+    "usdt": Decimal("250"),
+}
+
+
+# =========================================================
+# CURRENCY DISPLAY
+# =========================================================
+
+CURRENCY_NAMES = {
+    "ltc": "LTC",
+    "sol": "SOL",
     "usdt": "USDT",
 }
 
-CRYPTO_ALIASES = {
-    "litecoin": "ltc",
-    "ltc": "ltc",
-    "solana": "sol",
-    "sol": "sol",
-    "usdt": "usdt",
-    "usdtbep20": "usdt",
-    "usdtbep": "usdt",
-    "bep20": "usdt",
-}
 
+# =========================================================
+# DEPOSIT EMBED
+# =========================================================
 
-def normalize_crypto(value):
-    if not value:
-        return None
-
-    value = str(value).lower().strip()
-
-    return CRYPTO_ALIASES.get(value)
-
-
-def crypto_name(symbol):
-    return SUPPORTED_CRYPTO.get(
-        symbol.lower(),
-        symbol.upper(),
+def build_deposit_embed():
+    embed = discord.Embed(
+        title="Cryptobet — Deposit",
+        description="Choose a currency below.",
     )
 
-
-# =========================================================
-# DEPOSIT ADDRESS HELPERS
-# =========================================================
-
-async def get_deposit_address(user_id, crypto):
-    crypto = normalize_crypto(crypto)
-
-    if crypto is None:
-        return None
-
-    try:
-        address = await bot.db.get_deposit_address(
-            int(user_id),
-            crypto,
-        )
-
-        if address:
-            return address
-    except Exception:
-        pass
-
-    try:
-        row = await bot.db.get_user_deposit_address(
-            int(user_id),
-            crypto,
-        )
-
-        if isinstance(row, dict):
-            return row.get("address")
-
-        if row:
-            return str(row)
-    except Exception:
-        pass
-
-    return None
-
-
-async def create_deposit_address(user_id, crypto):
-    crypto = normalize_crypto(crypto)
-
-    if crypto is None:
-        return None
-
-    existing = await get_deposit_address(
-        user_id,
-        crypto,
+    embed.add_field(
+        name="Deposit Information",
+        value=(
+            "Your deposit address will be sent to your DMs.\n"
+            "Deposits are credited only after blockchain confirmation."
+        ),
+        inline=False,
     )
 
-    if existing:
-        return existing
-
-    # Address generation/scanning is handled by the
-    # database/deposit system. This command only requests
-    # the already configured deposit-address provider.
-    try:
-        address = await bot.db.create_deposit_address(
-            int(user_id),
-            crypto,
-        )
-
-        if address:
-            return address
-    except Exception:
-        pass
-
-    return None
+    return embed
 
 
 # =========================================================
-# DEPOSIT
+# DEPOSIT ADDRESS EMBED
 # =========================================================
 
-class DepositCryptoSelect(discord.ui.Select):
-    def __init__(self, author_id):
-        self.author_id = author_id
+def build_deposit_address_embed(user, crypto):
+    crypto = crypto.lower()
 
-        options = [
-            discord.SelectOption(
-                label="Litecoin",
-                value="ltc",
-                description="Generate your Litecoin deposit address.",
-            ),
-            discord.SelectOption(
-                label="Solana",
-                value="sol",
-                description="Generate your Solana deposit address.",
-            ),
-            discord.SelectOption(
-                label="USDT",
-                value="usdt",
-                description="USDT deposit address.",
-            ),
-        ]
+    address = DEPOSIT_ADDRESSES[crypto]
+
+    if crypto == "usdt":
+        minimum = "0.50 USDT"
+        conversion = "1 point = 0.0001 USDT"
+
+    elif crypto == "sol":
+        minimum = "0.001 SOL"
+        conversion = "1 point = 0.0001 SOL"
+
+    else:
+        minimum = "0.0005 LTC"
+        conversion = "1 point = 0.0001 LTC"
+
+    embed = discord.Embed(
+        title="Cryptobet — Deposit"
+    )
+
+    embed.description = (
+        f"{user.mention}, deposit **{CURRENCY_NAMES[crypto]}** only:\n\n"
+        f"```{address}```\n\n"
+        f"Minimum: **{minimum}**\n"
+        f"Conversion: **{conversion}**\n"
+        f"Fee: **0%**"
+    )
+
+    return embed
+
+
+# =========================================================
+# DEPOSIT BUTTON
+# =========================================================
+
+class DepositCurrencyButton(discord.ui.Button):
+
+    def __init__(self, crypto):
+        self.crypto = crypto
 
         super().__init__(
-            placeholder="Select cryptocurrency...",
-            min_values=1,
-            max_values=1,
-            options=options,
+            label=crypto.upper(),
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"deposit_{crypto}",
         )
 
-    async def callback(self, interaction):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "This deposit panel belongs to another user.",
-                ephemeral=True,
+    async def callback(self, interaction: discord.Interaction):
+
+        try:
+            embed = build_deposit_address_embed(
+                interaction.user,
+                self.crypto,
             )
-            return
 
-        crypto = self.values[0]
+            try:
+                await interaction.user.send(embed=embed)
 
-        await interaction.response.defer(
-            ephemeral=True,
-        )
+                await interaction.response.send_message(
+                    "Your deposit address has been sent to your DMs.",
+                    ephemeral=True,
+                )
 
-        address = await create_deposit_address(
-            self.author_id,
-            crypto,
-        )
+            except discord.Forbidden:
 
-        if not address:
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="Deposit",
-                    description=(
-                        f"{crypto_name(crypto)} deposit addresses "
-                        "are not configured yet."
-                    ),
-                ),
-                ephemeral=True,
-            )
-            return
+                await interaction.response.send_message(
+                    "I could not send you a DM. Please enable DMs from this server and try again.",
+                    ephemeral=True,
+                )
 
-        embed = discord.Embed(
-            title=f"{crypto_name(crypto)} Deposit",
-            description=(
-                f"Send **only {crypto_name(crypto)}** to this address.\n\n"
-                f"```{address}```\n\n"
-                "Your deposit will be detected automatically once "
-                "the required network confirmations are reached."
-            ),
-        )
+        except Exception:
 
-        await interaction.followup.send(
-            embed=embed,
-            ephemeral=True,
-        )
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Something went wrong while creating the deposit message.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Something went wrong while creating the deposit message.",
+                    ephemeral=True,
+                )
 
+
+# =========================================================
+# DEPOSIT VIEW
+# =========================================================
 
 class DepositView(discord.ui.View):
-    def __init__(self, author_id):
-        super().__init__(timeout=180)
 
-        self.add_item(
-            DepositCryptoSelect(author_id)
-        )
+    def __init__(self):
+        super().__init__(timeout=300)
 
+        self.add_item(DepositCurrencyButton("ltc"))
+        self.add_item(DepositCurrencyButton("sol"))
+        self.add_item(DepositCurrencyButton("usdt"))
+
+
+# =========================================================
+# .DEPOSIT
+# =========================================================
 
 @bot.command(
     name="deposit",
-    help="View your cryptocurrency deposit addresses.",
+    aliases=["dep"],
 )
 async def deposit_command(ctx):
-    embed = discord.Embed(
-        title="Deposit",
-        description=(
-            "Select a cryptocurrency below to get your "
-            "personal deposit address.\n\n"
-            "Supported:\n"
-            "`LTC` — Litecoin\n"
-            "`SOL` — Solana\n"
-            "`USDT` — USDT"
-        ),
-    )
+
+    embed = build_deposit_embed()
 
     await ctx.send(
         embed=embed,
-        view=DepositView(ctx.author.id),
+        view=DepositView(),
     )
 
 
 # =========================================================
-# WITHDRAW HELPERS
+# WITHDRAW EMBED
 # =========================================================
 
-async def create_withdrawal(
-    user_id,
-    crypto,
-    amount,
-    address,
-):
-    try:
-        result = await bot.db.create_withdrawal(
-            user_id=int(user_id),
-            crypto=crypto,
-            amount=str(amount),
-            address=address,
-        )
+def build_withdraw_embed():
 
-        return result
-    except Exception:
-        return None
+    embed = discord.Embed(
+        title="Cryptobet — Withdraw",
+        description="Choose the currency to withdraw.",
+    )
 
+    embed.add_field(
+        name="Minimum Withdrawal",
+        value=(
+            "LTC: **20 points**\n"
+            "SOL: **200 points**\n"
+            "USDT: **250 points**"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Processing",
+        value="Your withdrawal will be processed automatically.",
+        inline=False,
+    )
+
+    return embed
+
+
+# =========================================================
+# WITHDRAW MODAL
+# =========================================================
 
 class WithdrawModal(discord.ui.Modal):
-    def __init__(self, author_id, crypto):
-        super().__init__(
-            title=f"{crypto_name(crypto)} Withdrawal"
-        )
 
-        self.author_id = author_id
+    def __init__(self, crypto):
         self.crypto = crypto
 
-        self.amount = discord.ui.TextInput(
-            label="Amount in points",
-            placeholder="Enter points to withdraw",
-            required=True,
-            max_length=30,
+        super().__init__(
+            title=f"Withdraw {crypto.upper()}"
         )
 
-        self.address = discord.ui.TextInput(
-            label="Wallet address",
+        self.receiving_address = discord.ui.TextInput(
+            label="Enter your receiving address",
             placeholder="Enter your wallet address",
             required=True,
-            max_length=150,
+            min_length=5,
+            max_length=200,
         )
 
-        self.add_item(self.amount)
-        self.add_item(self.address)
+        self.amount = discord.ui.TextInput(
+            label="Enter withdrawing amount in points",
+            placeholder="Example: 250",
+            required=True,
+            min_length=1,
+            max_length=20,
+        )
 
-    async def on_submit(self, interaction):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "This withdrawal belongs to another user.",
-                ephemeral=True,
-            )
-            return
+        self.add_item(self.receiving_address)
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        crypto = self.crypto
+
+        address = self.receiving_address.value.strip()
+        amount_raw = self.amount.value.strip()
 
         try:
-            points = Decimal(
-                str(self.amount.value)
-                .replace(",", "")
-                .strip()
+            amount = Decimal(amount_raw)
+
+        except (InvalidOperation, ValueError):
+
+            await interaction.response.send_message(
+                "Please enter a valid withdrawal amount in points.",
+                ephemeral=True,
             )
+            return
+
+        if amount <= 0:
+
+            await interaction.response.send_message(
+                "Withdrawal amount must be greater than 0 points.",
+                ephemeral=True,
+            )
+            return
+
+        minimum = WITHDRAW_MINIMUMS[crypto]
+
+        if amount < minimum:
+
+            await interaction.response.send_message(
+                f"Minimum {crypto.upper()} withdrawal is **{minimum} points**.",
+                ephemeral=True,
+            )
+            return
+
+        # -------------------------------------------------
+        # CHECK BALANCE
+        # -------------------------------------------------
+
+        try:
+            balance = await db_balance(interaction.user.id)
+
         except Exception:
+
             await interaction.response.send_message(
-                "Enter a valid point amount.",
+                "Unable to check your balance right now. Please try again.",
                 ephemeral=True,
             )
             return
 
-        if points <= 0:
+        if balance < amount:
+
             await interaction.response.send_message(
-                "Withdrawal amount must be greater than 0.",
+                f"You do not have enough points.\n\n"
+                f"Required: **{amount} points**\n"
+                f"Balance: **{balance} points**",
                 ephemeral=True,
             )
             return
 
-        balance = await db_balance(
-            bot,
-            self.author_id,
-        )
+        # -------------------------------------------------
+        # DEDUCT BALANCE
+        # -------------------------------------------------
 
-        if points > balance:
+        try:
+
+            await db_change_balance(
+                interaction.user.id,
+                -amount,
+            )
+
+        except Exception:
+
             await interaction.response.send_message(
-                f"You only have `{format_points(balance)} points`.",
+                "The withdrawal could not be processed. Your balance was not changed.",
                 ephemeral=True,
             )
             return
 
-        address = str(
-            self.address.value
-        ).strip()
+        # -------------------------------------------------
+        # SAVE WITHDRAWAL
+        # -------------------------------------------------
 
-        if not address:
+        withdrawal_saved = False
+
+        try:
+
+            if hasattr(bot.db, "create_withdrawal"):
+
+                result = await bot.db.create_withdrawal(
+                    user_id=interaction.user.id,
+                    crypto=crypto,
+                    amount_points=amount,
+                    address=address,
+                )
+
+                withdrawal_saved = True
+
+        except Exception:
+
+            withdrawal_saved = False
+
+        # -------------------------------------------------
+        # ROLLBACK IF DATABASE SAVE FAILED
+        # -------------------------------------------------
+
+        if not withdrawal_saved:
+
+            try:
+
+                await db_change_balance(
+                    interaction.user.id,
+                    amount,
+                )
+
+            except Exception:
+                pass
+
             await interaction.response.send_message(
-                "A wallet address is required.",
+                "The withdrawal request could not be created. Your balance has been restored.",
                 ephemeral=True,
             )
             return
 
-        await interaction.response.defer(
-            ephemeral=True,
-        )
-
-        result = await create_withdrawal(
-            self.author_id,
-            self.crypto,
-            points,
-            address,
-        )
-
-        if not result:
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="Withdrawal",
-                    description=(
-                        "Withdrawals are not configured yet."
-                    ),
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await db_change_balance(
-            bot,
-            self.author_id,
-            -points,
-            f"{self.crypto.upper()} withdrawal",
-        )
+        # -------------------------------------------------
+        # SUCCESS
+        # -------------------------------------------------
 
         embed = discord.Embed(
-            title="Withdrawal Requested",
+            title="Cryptobet — Withdrawal Submitted",
             description=(
-                f"Currency: `{self.crypto.upper()}`\n"
-                f"Amount: `{format_points(points)} points`\n"
-                f"USD Value: `{format_usd(points)}`\n\n"
-                f"Address:\n"
-                f"```{address}```\n\n"
-                "Your withdrawal has been submitted."
+                "Your withdrawal has been submitted for automatic processing."
             ),
         )
 
-        await interaction.followup.send(
+        embed.add_field(
+            name="Currency",
+            value=crypto.upper(),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Amount",
+            value=f"{amount} points",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Receiving Address",
+            value=f"```{address}```",
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Status",
+            value="Processing",
+            inline=False,
+        )
+
+        await interaction.response.send_message(
             embed=embed,
             ephemeral=True,
         )
 
 
-class WithdrawCryptoSelect(discord.ui.Select):
-    def __init__(self, author_id):
-        self.author_id = author_id
+# =========================================================
+# WITHDRAW BUTTON
+# =========================================================
 
-        options = [
-            discord.SelectOption(
-                label="Litecoin",
-                value="ltc",
-            ),
-            discord.SelectOption(
-                label="Solana",
-                value="sol",
-            ),
-            discord.SelectOption(
-                label="USDT",
-                value="usdt",
-            ),
-        ]
+class WithdrawCurrencyButton(discord.ui.Button):
+
+    def __init__(self, crypto):
+
+        self.crypto = crypto
 
         super().__init__(
-            placeholder="Select cryptocurrency...",
-            min_values=1,
-            max_values=1,
-            options=options,
+            label=crypto.upper(),
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"withdraw_{crypto}",
         )
 
-    async def callback(self, interaction):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "This withdrawal panel belongs to another user.",
-                ephemeral=True,
-            )
-            return
+    async def callback(self, interaction: discord.Interaction):
 
         await interaction.response.send_modal(
-            WithdrawModal(
-                self.author_id,
-                self.values[0],
-            )
-        )
-
-
-class WithdrawView(discord.ui.View):
-    def __init__(self, author_id):
-        super().__init__(timeout=180)
-
-        self.add_item(
-            WithdrawCryptoSelect(author_id)
+            WithdrawModal(self.crypto)
         )
 
 
 # =========================================================
-# WITHDRAW
+# WITHDRAW VIEW
+# =========================================================
+
+class WithdrawView(discord.ui.View):
+
+    def __init__(self):
+
+        super().__init__(timeout=300)
+
+        self.add_item(
+            WithdrawCurrencyButton("sol")
+        )
+
+        self.add_item(
+            WithdrawCurrencyButton("ltc")
+        )
+
+        self.add_item(
+            WithdrawCurrencyButton("usdt")
+        )
+
+
+# =========================================================
+# .WITHDRAW
 # =========================================================
 
 @bot.command(
     name="withdraw",
-    help="Withdraw your points as cryptocurrency.",
+    aliases=["wd"],
 )
 async def withdraw_command(ctx):
-    balance = await db_balance(
-        bot,
-        ctx.author.id,
-    )
 
-    if balance <= 0:
-        await ctx.send(
-            embed=discord.Embed(
-                title="Withdraw",
-                description="You do not have any points available.",
-            )
-        )
-        return
-
-    embed = discord.Embed(
-        title="Withdraw",
-        description=(
-            f"Available Balance: `{format_points(balance)} points`\n"
-            f"USD Value: `{format_usd(balance)}`\n\n"
-            "Select the cryptocurrency you want to withdraw."
-        ),
-    )
+    embed = build_withdraw_embed()
 
     await ctx.send(
         embed=embed,
-        view=WithdrawView(ctx.author.id),
-    )
-
-
-# =========================================================
-# PRICE
-# =========================================================
-
-PRICE_IDS = {
-    "ltc": "litecoin",
-    "sol": "solana",
-}
-
-
-async def get_crypto_price(symbol):
-    symbol = normalize_crypto(symbol)
-
-    if symbol == "usdt":
-        return Decimal("1")
-
-    coin_id = PRICE_IDS.get(symbol)
-
-    if not coin_id:
-        return None
-
-    url = (
-        "https://api.coingecko.com/api/v3/simple/price"
-        f"?ids={coin_id}&vs_currencies=usd"
-    )
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-
-        async with aiohttp.ClientSession(
-            timeout=timeout
-        ) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return None
-
-                data = await response.json()
-
-        price = data.get(coin_id, {}).get("usd")
-
-        if price is None:
-            return None
-
-        return Decimal(str(price))
-
-    except Exception:
-        return None
-
-
-@bot.command(
-    name="price",
-    help="View current supported cryptocurrency prices.",
-)
-async def price_command(ctx):
-    await ctx.typing()
-
-    ltc_price = await get_crypto_price("ltc")
-    sol_price = await get_crypto_price("sol")
-    usdt_price = await get_crypto_price("usdt")
-
-    lines = []
-
-    if ltc_price is not None:
-        lines.append(
-            f"Litecoin: `${ltc_price:,.2f}`"
-        )
-    else:
-        lines.append(
-            "Litecoin: `Unavailable`"
-        )
-
-    if sol_price is not None:
-        lines.append(
-            f"Solana: `${sol_price:,.2f}`"
-        )
-    else:
-        lines.append(
-            "Solana: `Unavailable`"
-        )
-
-    if usdt_price is not None:
-        lines.append(
-            f"USDT: `${usdt_price:,.2f}`"
-        )
-    else:
-        lines.append(
-            "USDT: `Unavailable`"
-        )
-
-    embed = discord.Embed(
-        title="Crypto Prices",
-        description="\n".join(lines),
-    )
-
-    await ctx.send(embed=embed)
-
-
-# =========================================================
-# AI
-# =========================================================
-
-async def ai_request(prompt):
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        return None
-
-    url = "https://api.openai.com/v1/responses"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "model": os.getenv(
-            "OPENAI_MODEL",
-            "gpt-5.6-mini",
-        ),
-        "input": (
-            "You are the AI assistant for a Discord casino bot. "
-            "Answer clearly and briefly. "
-            "Do not claim to perform actions that you cannot perform.\n\n"
-            f"User request:\n{prompt}"
-        ),
-    }
-
-    try:
-        timeout = aiohttp.ClientTimeout(
-            total=30
-        )
-
-        async with aiohttp.ClientSession(
-            timeout=timeout
-        ) as session:
-            async with session.post(
-                url,
-                headers=headers,
-                json=payload,
-            ) as response:
-                if response.status != 200:
-                    return None
-
-                data = await response.json()
-
-        output = data.get("output", [])
-
-        text_parts = []
-
-        for item in output:
-            for content in item.get("content", []):
-                if content.get("type") == "output_text":
-                    text_parts.append(
-                        content.get("text", "")
-                    )
-
-        result = "\n".join(
-            part for part in text_parts if part
-        ).strip()
-
-        return result or None
-
-    except Exception:
-        return None
-
-
-@bot.command(
-    name="ai",
-    help="Ask the casino AI assistant a question.",
-)
-async def ai_command(ctx, *, prompt: str = None):
-    if not prompt:
-        await ctx.send(
-            embed=discord.Embed(
-                title="AI",
-                description=(
-                    "Usage: `.ai <question>`"
-                ),
+        view=WithdrawView(),
             )
-        )
-        return
 
-    if len(prompt) > 2000:
-        await ctx.send(
-            embed=discord.Embed(
-                title="AI",
-                description=(
-                    "Your question is too long. "
-                    "Keep it under 2000 characters."
-                ),
-            )
-        )
-        return
-
-    async with ctx.typing():
-        response = await ai_request(
-            prompt
-        )
-
-    if not response:
-        await ctx.send(
-            embed=discord.Embed(
-                title="AI",
-                description=(
-                    "The AI service is currently unavailable."
-                ),
-            )
-        )
-        return
-
-    if len(response) > 4000:
-        response = response[:3997] + "..."
-
-    embed = discord.Embed(
-        title="AI",
-        description=response,
-    )
-
-    await ctx.send(embed=embed)
-
-                # =========================================================
+# =========================================================
 # PART 10 — THREADS / ADMIN / SETTINGS / STARTUP
 # =========================================================
 
