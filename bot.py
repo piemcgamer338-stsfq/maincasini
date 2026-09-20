@@ -3428,28 +3428,30 @@ class MinesView(OwnerView):
             return
 
         if position in self.mines:
-            self.finished = True
+    self.finished = True
 
-            await interaction.response.edit_message(
-                embed=brand(
-                    "Mines — You Lost",
-                    (
-                        f"**Bet:** {self.bet:,.0f} Points "
-                        f"({usd(self.bet)})\n"
-                        f"**Mines:** {self.mine_count}\n\n"
-                        f"{mines_grid_text("
-                        self.mines,"
-                        " self.revealed,"
-                        f" exploded=position,"
-                        " cashout=True"
-                        ")}\n\n"
-                        "You hit a mine.\n"
-                        "**Payout:** 0 Points"
-                    ),
-                    0xED4245,
-                ),
-                view=None,
-            )
+    grid = mines_grid_text(
+        self.mines,
+        self.revealed,
+        exploded=position,
+        cashout=True,
+    )
+
+    await interaction.response.edit_message(
+        embed=brand(
+            "Mines — You Lost",
+            (
+                f"**Bet:** {self.bet:,.0f} Points "
+                f"({usd(self.bet)})\n"
+                f"**Mines:** {self.mine_count}\n\n"
+                f"{grid}\n\n"
+                "You hit a mine.\n"
+                "**Payout:** 0 Points"
+            ),
+            0xED4245,
+        ),
+        view=None,
+    )
 
             self.stop()
             unlock_player(self.owner_id)
