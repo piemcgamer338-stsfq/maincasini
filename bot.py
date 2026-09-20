@@ -3374,103 +3374,87 @@ class MinesView(OwnerView):
             )
         )
 
-        # Replace the final generated button with
-# a proper callback-capable button.
-cashout_button = self.children[-1]
+        # Replace the final generated button
+        # with a proper callback-capable button.
+        cashout_button = self.children[-1]
 
-cashout_button.callback = (
-    self.cashout_callback
-)
-
-def update_buttons(self):
-    for item in self.children:
-        if not isinstance(
-            item,
-            discord.ui.Button,
-        ):
-            continue
-
-        if item.custom_id == "mines_cashout":
-            item.disabled = (
-                len(self.revealed) == 0
-            )
-            continue
-
-        if not item.custom_id.startswith(
-            "mines_cell_"
-        ):
-            continue
-
-        position = int(
-            item.custom_id.split("_")[-1]
+        cashout_button.callback = (
+            self.cashout_callback
         )
 
-        if position in self.revealed:
-            item.disabled = True
-            item.label = "O"
-            item.style = (
-                discord.ButtonStyle.success
+    def update_buttons(self):
+        for item in self.children:
+            if not isinstance(
+                item,
+                discord.ui.Button,
+            ):
+                continue
+
+            if item.custom_id == "mines_cashout":
+                item.disabled = (
+                    len(self.revealed) == 0
+                )
+                continue
+
+            if not item.custom_id.startswith(
+                "mines_cell_"
+            ):
+                continue
+
+            position = int(
+                item.custom_id.split("_")[-1]
             )
+
+            if position in self.revealed:
+                item.disabled = True
+                item.label = "O"
+                item.style = (
+                    discord.ButtonStyle.success
+                )
 
     async def reveal_cell(
-    self,
-    interaction: discord.Interaction,
-    position: int,
-):
-    if self.finished:
-        return
+        self,
+        interaction: discord.Interaction,
+        position: int,
+    ):
+        if self.finished:
+            return
 
-    if position in self.revealed:
-        await interaction.response.send_message(
-            "That tile is already revealed.",
-            ephemeral=True,
-        )
-        return
+        if position in self.revealed:
+            await interaction.response.send_message(
+                "That tile is already revealed.",
+                ephemeral=True,
+            )
+            return
 
-    if position in self.mines:
-        self.finished = True
+        if position in self.mines:
+            self.finished = True
 
-        grid = mines_grid_text(
-            self.mines,
-            self.revealed,
-            exploded=position,
-            cashout=True,
-        )
+            grid = mines_grid_text(
+                self.mines,
+                self.revealed,
+                exploded=position,
+                cashout=True,
+            )
 
-        await interaction.response.edit_message(
-            embed=brand(
-                "Mines — You Lost",
-                (
-                    f"**Bet:** {self.bet:,.0f} Points "
-                    f"({usd(self.bet)})\n"
-                    f"**Mines:** {self.mine_count}\n\n"
-                    f"{grid}\n\n"
-                    "You hit a mine.\n"
-                    "**Payout:** 0 Points"
+            await interaction.response.edit_message(
+                embed=brand(
+                    "Mines — You Lost",
+                    (
+                        f"**Bet:** {self.bet:,.0f} Points "
+                        f"({usd(self.bet)})\n"
+                        f"**Mines:** {self.mine_count}\n\n"
+                        f"{grid}\n\n"
+                        "You hit a mine.\n"
+                        "**Payout:** 0 Points"
+                    ),
+                    0xED4245,
                 ),
-                0xED4245,
-            ),
-            view=None,
-        )
-        return
+                view=None,
+            )
+            return
 
-        await interaction.response.edit_message(
-            embed=brand(
-                "Mines — You Lost",
-                (
-                    f"**Bet:** {self.bet:,.0f} Points "
-                    f"({usd(self.bet)})\n"
-                    f"**Mines:** {self.mine_count}\n\n"
-                    f"{grid}\n\n"
-                    "You hit a mine.\n"
-                    "**Payout:** 0 Points"
-                ),
-                0xED4245,
-            ),
-            view=None,
-        )
-        return
-
+Do not add the duplicate "await interaction.response.edit_message(...)" that came after your "return". It was unreachable code.
             self.stop()
             unlock_player(self.owner_id)
             return
