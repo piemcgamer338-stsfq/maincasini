@@ -432,3 +432,424 @@ if __name__ == "__main__":
     asyncio.run(
         main()
     )
+# ============================================================
+# PART 2 — ECONOMY FOUNDATION
+# ============================================================
+
+from decimal import Decimal, InvalidOperation
+
+
+# ============================================================
+# ECONOMY SETTINGS
+# ============================================================
+
+POINTS_PER_CENT = Decimal("2")
+POINTS_PER_USD = Decimal("200")
+
+MINIMUM_BET = Decimal("20")
+
+
+# ============================================================
+# DATABASE ECONOMY METHODS
+# ============================================================
+
+async def ensure_user(user_id: int):
+
+    async with bot.db.pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            INSERT INTO users (user_id)
+            VALUES ($1)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            user_id,
+        )
+
+
+async def get_balance(user_id: int) -> Decimal:
+
+    await ensure_user(user_id)
+
+    async with bot.db.pool.acquire() as connection:
+
+        row = await connection.fetchrow(
+            """
+            SELECT balance
+            FROM users
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+
+    return Decimal(str(row["balance"]))
+
+
+async def change_balance(
+    user_id: int,
+    amount: Decimal,
+) -> Decimal:
+
+    await ensure_user(user_id)
+
+    amount = Decimal(str(amount))
+
+    async with bot.db.pool.acquire() as connection:
+
+        row = await connection.fetchrow(
+            """
+            UPDATE users
+            SET balance = balance + $2
+            WHERE user_id = $1
+            RETURNING balance
+            """,
+            user_id,
+            amount,
+        )
+
+    return Decimal(str(row["balance"]))
+
+
+async def add_wagered(
+    user_id: int,
+    amount: Decimal,
+):
+
+    await ensure_user(user_id)
+
+    amount = Decimal(str(amount))
+
+    async with bot.db.pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            UPDATE users
+            SET wagered = wagered + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+
+async def add_won(
+    user_id: int,
+    amount: Decimal,
+):
+
+    await ensure_user(user_id)
+
+    amount = Decimal(str(amount))
+
+    async with bot.db.pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            UPDATE users
+            SET won = won + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+
+async def add_lost(
+    user_id: int,
+    amount: Decimal,
+):
+
+    await ensure_user(user_id)
+
+    amount = Decimal(str(amount))
+
+    async with bot.db.pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            UPDATE users
+            SET lost = lost + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+
+async def add_deposited(
+    user_id: int,
+    amount: Decimal,
+):
+
+    await ensure_user(user_id)
+
+    amount = Decimal(str(amount))
+
+    async with bot.db.pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            UPDATE users
+            SET deposited = deposited + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+
+async def add_withdrawn(
+    user_id: int,
+    amount: Decimal,
+):
+
+    await ensure_user(user_id)
+
+    amount = Decimal(str(amount))
+
+    async with bot.db.pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            UPDATE users
+            SET withdrawn = withdrawn + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+
+# ============================================================
+# BALANCE COMMAND
+# ============================================================
+
+@bot.command(
+    name="bal",
+    aliases=["balance", "b"],
+)
+async def balance_command(ctx):
+
+    balance = await get_balance(
+        ctx.author.id
+    )
+
+    embed = make_embed(
+        f"{NAME} — Balance",
+        (
+            f"**{balance:,.2f} Points**\n\n"
+            f"Minimum bet: **{MINIMUM_BET:,.0f} Points**"
+        ),
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+# ============================================================
+# STATS COMMAND
+# ============================================================
+
+@bot.command(
+    name="stats",
+)
+async def stats_command(ctx):
+
+    await ensure_user(
+        ctx.author.id
+    )
+
+    async with bot.db.pool.acquire() as connection:
+
+        user = await connection.fetchrow(
+            """
+            SELECT
+                balance,
+                wagered,
+                won,
+                lost,
+                deposited,
+                withdrawn,
+                created_at
+            FROM users
+            WHERE user_id = $1
+            """,
+            ctx.author.id,
+        )
+
+    balance = Decimal(str(user["balance"]))
+    wagered = Decimal(str(user["wagered"]))
+    won = Decimal(str(user["won"]))
+    lost = Decimal(str(user["lost"]))
+    deposited = Decimal(str(user["deposited"]))
+    withdrawn = Decimal(str(user["withdrawn"]))
+
+    embed = make_embed(
+        f"{NAME} — {ctx.author.display_name}",
+        "Casino statistics",
+    )
+
+    embed.add_field(
+        name="Balance",
+        value=f"{balance:,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Wagered",
+        value=f"{wagered:,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Won",
+        value=f"{won:,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Lost",
+        value=f"{lost:,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Deposited",
+        value=f"{deposited:,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Withdrawn",
+        value=f"{withdrawn:,.2f} Points",
+        inline=True,
+    )
+
+    embed.set_footer(
+        text="All amounts are displayed in Points."
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+# ============================================================
+# INTERNAL BET VALIDATION
+# ============================================================
+
+def parse_points(
+    value: str,
+) -> Decimal:
+
+    value = value.strip()
+
+    try:
+
+        amount = Decimal(value)
+
+    except InvalidOperation:
+
+        raise ValueError(
+            "Invalid point amount."
+        )
+
+    if not amount.is_finite():
+
+        raise ValueError(
+            "Invalid point amount."
+        )
+
+    if amount <= 0:
+
+        raise ValueError(
+            "Amount must be greater than zero."
+        )
+
+    return amount
+
+
+async def validate_bet(
+    user_id: int,
+    amount: Decimal,
+):
+
+    amount = Decimal(str(amount))
+
+    if amount < MINIMUM_BET:
+
+        return False, (
+            f"Minimum bet is "
+            f"**{MINIMUM_BET:,.0f} Points**."
+        )
+
+    balance = await get_balance(
+        user_id
+    )
+
+    if balance < amount:
+
+        return False, (
+            f"You only have "
+            f"**{balance:,.2f} Points**."
+        )
+
+    return True, None
+
+
+# ============================================================
+# INTERNAL BET DEDUCTION
+# ============================================================
+
+async def take_bet(
+    user_id: int,
+    amount: Decimal,
+):
+
+    amount = Decimal(str(amount))
+
+    valid, error_message = await validate_bet(
+        user_id,
+        amount,
+    )
+
+    if not valid:
+
+        return False, error_message
+
+    new_balance = await change_balance(
+        user_id,
+        -amount,
+    )
+
+    await add_wagered(
+        user_id,
+        amount,
+    )
+
+    return True, new_balance
+
+
+# ============================================================
+# INTERNAL PAYOUT
+# ============================================================
+
+async def payout(
+    user_id: int,
+    amount: Decimal,
+):
+
+    amount = Decimal(str(amount))
+
+    new_balance = await change_balance(
+        user_id,
+        amount,
+    )
+
+    await add_won(
+        user_id,
+        amount,
+    )
+
+    return new_balance
