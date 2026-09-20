@@ -3737,28 +3737,803 @@ async def market(
 
         return
 
-new_card = hilo_random_card()
+# ============================================================
+# HILO
+# ============================================================
 
-self.current_card = new_card
-self.rounds += 1
+import os
+import random
+from pathlib import Path
+import discord
 
-file = hilo_card_file(new_card)
 
-embed = self.make_embed()
+# ------------------------------------------------------------
+# HILO SETTINGS
+# ------------------------------------------------------------
 
-if file:
-    await interaction.response.edit_message(
-        embed=embed,
-        attachments=[file],
-        view=self
+HILO_CARD_DIR = Path(__file__).parent
+
+HILO_MAX_ROUNDS = 8
+HILO_ROUND_MULTIPLIER = 0.14
+
+
+# ------------------------------------------------------------
+# HILO CARDS
+# ------------------------------------------------------------
+
+HILO_SUITS = {
+    "hearts": "♥",
+    "diamonds": "♦",
+    "clubs": "♣",
+    "spades": "♠",
+}
+
+HILO_RANKS = [
+    ("2", 2),
+    ("3", 3),
+    ("4", 4),
+    ("5", 5),
+    ("6", 6),
+    ("7", 7),
+    ("8", 8),
+    ("9", 9),
+    ("10", 10),
+    ("J", 11),
+    ("Q", 12),
+    ("K", 13),
+    ("A", 14),
+]
+
+
+def hilo_random_card():
+    rank_name, rank_value = random.choice(HILO_RANKS)
+    suit_name, suit_symbol = random.choice(list(HILO_SUITS.items()))
+
+    return {
+        "rank": rank_name,
+        "value": rank_value,
+        "suit": suit_name,
+        "symbol": suit_symbol,
+    }
+
+
+def hilo_card_text(card):
+    return f"{card['rank']}{card['symbol']}"
+
+
+# ------------------------------------------------------------
+# HILO CARD IMAGE
+# ------------------------------------------------------------
+
+def hilo_card_path(card):
+    """
+    Card images are directly beside bot.py.
+
+    Examples:
+        2_of_hearts.png
+        10_of_clubs.png
+        jack_of_spades.png
+        ace_of_diamonds.png
+    """
+
+    rank = card["rank"].lower()
+    suit = card["suit"].lower()
+
+    # Convert J/Q/K/A to full filename names
+    rank_names = {
+        "j": "jack",
+        "q": "queen",
+        "k": "king",
+        "a": "ace",
+    }
+
+    rank = rank_names.get(rank, rank)
+
+    path = HILO_CARD_DIR / f"{rank}_of_{suit}.png"
+
+    if path.exists():
+        return path
+
+    print(f"[HiLo] Card image not found: {path}")
+    return None
+
+
+def hilo_card_file(card):
+    path = hilo_card_path(card)
+
+    if not path:
+        return None
+
+    try:
+        return discord.File(
+            path,
+            filename="hilo_card.png"
+        )
+    except Exception as e:
+        print(f"[HiLo Card Image Error] {e}")
+        return None
+
+
+# ------------------------------------------------------------
+# HILO VIEW
+# ------------------------------------------------------------
+
+class HiloView(OwnerView):
+
+    def __init__(
+        self,
+        bot,
+        owner_id,
+        bet,
+        current_card
+    ):
+        super().__init__(owner_id)
+
+        self.bot = bot
+        self.owner_id = owner_id
+        self.bet = float(bet)
+
+        self.current_card = current_card
+
+        self.rounds = 0
+        self.finished = False
+        self.message = None
+
+        self.timeout = 60
+
+
+    # --------------------------------------------------------
+    # MULTIPLIER
+    # --------------------------------------------------------
+
+    def multiplier(self):
+        return 1 + (
+            self.rounds * HILO_ROUND_MULTIPLIER
+        )
+
+
+    # --------------------------------------------------------
+    # PAYOUT
+    # --------------------------------------------------------
+
+    def payout(self):
+        return round(
+            self.bet * self.multiplier(),
+            4
+        )
+
+
+    # --------------------------------------------------------
+    # EMBED
+    # --------------------------------------------------------
+
+    def make_embed(self):
+
+        current = hilo_card_text(
+            self.current_card
+        )
+
+        embed = brand(
+            "🃏 HiLo",
+            (
+                f"**Bet:** {money(self.bet)}\n"
+                f"**Current Card:** `{current}`\n"
+                f"**Round:** `{self.rounds}/{HILO_MAX_ROUNDS}`\n"
+                f"**Multiplier:** `{self.multiplier():.2f}x`\n"
+                f"**Cashout:** {money(self.payout())}"
+            )
+        )
+
+        embed.set_image(
+            url="attachment://hilo_card.png"
+        )
+
+        return embed
+
+
+    # --------------------------------------------------------
+    # DISABLE BUTTONS
+    # --------------------------------------------------------
+
+    def disable_all(self):
+
+        for child in self.children:
+            child.disabled = True
+
+
+    # --------------------------------------------------------
+    # LOSE GAME
+    # --------------------------------------------------------
+
+    async def lose_game(
+        self,
+        interaction,
+        new_card
+    ):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        self.disable_all()
+
+        self.current_card = new_card
+
+        # Record loss.
+        #
+        # IMPORTANT:
+        # The bet was already removed when the game started.
+        # record_game(..., payout=0) does NOT add anything back.
+        await self.bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            0,
+            "hilo"
+        )
+
+        card_text = hilo_card_text(
+            new_card
+        )
+
+        embed = brand(
+            "💥 HiLo — Lost",
+            (
+                f"**Card:** `{card_text}`\n"
+                f"**Rounds:** `{self.rounds}`\n"
+                f"**Lost:** {money(self.bet)}"
+            )
+        )
+
+        file = hilo_card_file(new_card)
+
+        if file:
+            embed.set_image(
+                url="attachment://hilo_card.png"
+            )
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[file],
+                view=self
+            )
+
+        else:
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[],
+                view=self
+            )
+
+        self.stop()
+
+
+    # --------------------------------------------------------
+    # WIN GAME
+    # --------------------------------------------------------
+
+    async def win_game(
+        self,
+        interaction
+    ):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        self.disable_all()
+
+        payout = self.payout()
+
+        # IMPORTANT:
+        #
+        # record_game() credits payout to the balance.
+        #
+        # DO NOT call change_balance(+payout) here.
+        #
+        await self.bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            payout,
+            "hilo"
+        )
+
+        current = hilo_card_text(
+            self.current_card
+        )
+
+        embed = brand(
+            "🎉 HiLo — Won",
+            (
+                f"**Final Card:** `{current}`\n"
+                f"**Rounds:** `{self.rounds}`\n"
+                f"**Multiplier:** `{self.multiplier():.2f}x`\n"
+                f"**Payout:** {money(payout)}"
+            )
+        )
+
+        file = hilo_card_file(
+            self.current_card
+        )
+
+        if file:
+
+            embed.set_image(
+                url="attachment://hilo_card.png"
+            )
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[file],
+                view=self
+            )
+
+        else:
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[],
+                view=self
+            )
+
+        self.stop()
+
+
+    # --------------------------------------------------------
+    # CASH OUT
+    # --------------------------------------------------------
+
+    async def cashout_message(
+        self,
+        interaction
+    ):
+
+        if self.finished:
+            await interaction.response.send_message(
+                "❌ This HiLo game has already ended.",
+                ephemeral=True
+            )
+            return
+
+        if self.rounds <= 0:
+
+            await interaction.response.send_message(
+                "❌ You need to play at least one round before cashing out.",
+                ephemeral=True
+            )
+
+            return
+
+        await self.win_game(
+            interaction
+        )
+
+
+    # --------------------------------------------------------
+    # GUESS
+    # --------------------------------------------------------
+
+    async def guess(
+        self,
+        interaction,
+        higher
+    ):
+
+        if self.finished:
+
+            await interaction.response.send_message(
+                "❌ This HiLo game has already ended.",
+                ephemeral=True
+            )
+
+            return
+
+        # Generate next card
+        new_card = hilo_random_card()
+
+        old_value = self.current_card["value"]
+        new_value = new_card["value"]
+
+
+        # ----------------------------------------------------
+        # SAME VALUE = LOSS
+        # ----------------------------------------------------
+
+        if new_value == old_value:
+
+            await self.lose_game(
+                interaction,
+                new_card
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # CHECK GUESS
+        # ----------------------------------------------------
+
+        if higher:
+
+            correct = new_value > old_value
+
+        else:
+
+            correct = new_value < old_value
+
+
+        # ----------------------------------------------------
+        # WRONG GUESS = LOSS
+        # ----------------------------------------------------
+
+        if not correct:
+
+            await self.lose_game(
+                interaction,
+                new_card
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # CORRECT GUESS
+        # ----------------------------------------------------
+
+        self.current_card = new_card
+
+        self.rounds += 1
+
+
+        # ----------------------------------------------------
+        # MAX ROUND WIN
+        # ----------------------------------------------------
+
+        if self.rounds >= HILO_MAX_ROUNDS:
+
+            await self.win_game(
+                interaction
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # UPDATE CARD
+        # ----------------------------------------------------
+
+        file = hilo_card_file(
+            new_card
+        )
+
+        embed = self.make_embed()
+
+
+        if file:
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[file],
+                view=self
+            )
+
+        else:
+
+            await interaction.response.edit_message(
+                embed=embed,
+                attachments=[],
+                view=self
+            )
+
+
+    # --------------------------------------------------------
+    # HIGHER BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Higher",
+        style=discord.ButtonStyle.green,
+        emoji="⬆️",
+        row=0
     )
-else:
-    await interaction.response.edit_message(
-        embed=embed,
-        attachments=[],
-        view=self
+    async def higher_button(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.guess(
+            interaction,
+            True
+        )
+
+
+    # --------------------------------------------------------
+    # LOWER BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Lower",
+        style=discord.ButtonStyle.red,
+        emoji="⬇️",
+        row=0
     )
-    
+    async def lower_button(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.guess(
+            interaction,
+            False
+        )
+
+
+    # --------------------------------------------------------
+    # CASH OUT BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Cash Out",
+        style=discord.ButtonStyle.blurple,
+        emoji="💰",
+        row=1
+    )
+    async def cashout_button(
+        self,
+        interaction,
+        button
+    ):
+
+        await self.cashout_message(
+            interaction
+        )
+
+
+    # --------------------------------------------------------
+    # TIMEOUT
+    # --------------------------------------------------------
+
+    async def on_timeout(self):
+
+        if self.finished:
+            return
+
+        self.finished = True
+
+        self.disable_all()
+
+        # Timeout counts as a loss.
+        await self.bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            0,
+            "hilo"
+        )
+
+        if self.message:
+
+            try:
+
+                embed = brand(
+                    "⏰ HiLo — Timed Out",
+                    (
+                        f"**Rounds:** `{self.rounds}`\n"
+                        f"**Lost:** {money(self.bet)}\n\n"
+                        "The game timed out."
+                    )
+                )
+
+                file = hilo_card_file(
+                    self.current_card
+                )
+
+                if file:
+
+                    embed.set_image(
+                        url="attachment://hilo_card.png"
+                    )
+
+                    await self.message.edit(
+                        embed=embed,
+                        attachments=[file],
+                        view=self
+                    )
+
+                else:
+
+                    await self.message.edit(
+                        embed=embed,
+                        attachments=[],
+                        view=self
+                    )
+
+            except Exception as e:
+
+                print(
+                    f"[HiLo Timeout Error] {e}"
+                )
+
+        self.stop()
+
+
+# ============================================================
+# HILO COMMAND
+# ============================================================
+
+@bot.command(
+    name="hilo"
+)
+async def hilo(
+    ctx,
+    bet: str
+):
+
+    # --------------------------------------------------------
+    # GAME CHANNEL CHECK
+    # --------------------------------------------------------
+
+    if not bot.game_allowed(ctx):
+        return
+
+
+    # --------------------------------------------------------
+    # PARSE BET
+    # --------------------------------------------------------
+
+    try:
+
+        amount = parse_amount(
+            bet
+        )
+
+    except ValueError as e:
+
+        await ctx.send(
+            str(e)
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # MINIMUM BET
+    # --------------------------------------------------------
+
+    if amount <= 0:
+
+        await ctx.send(
+            "❌ Bet must be greater than 0."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # GET USER
+    # --------------------------------------------------------
+
+    user = await bot.db.user(
+        ctx.author.id
+    )
+
+    balance = float(
+        user["balance"]
+    )
+
+
+    # --------------------------------------------------------
+    # BALANCE CHECK
+    # --------------------------------------------------------
+
+    if amount > balance:
+
+        await ctx.send(
+            "❌ You don't have enough points."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # REMOVE BET
+    # --------------------------------------------------------
+    #
+    # The bet is removed once at game start.
+    #
+    # record_game() later handles the game statistics
+    # and, on a win, credits the payout.
+    #
+
+    success = await bot.db.change_balance(
+        ctx.author.id,
+        -amount,
+        "game_bet",
+        "hilo"
+    )
+
+    if not success:
+
+        await ctx.send(
+            "❌ Failed to place your bet."
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # FIRST CARD
+    # --------------------------------------------------------
+
+    first_card = hilo_random_card()
+
+
+    # --------------------------------------------------------
+    # CREATE VIEW
+    # --------------------------------------------------------
+
+    view = HiloView(
+        bot=bot,
+        owner_id=ctx.author.id,
+        bet=amount,
+        current_card=first_card
+    )
+
+
+    # --------------------------------------------------------
+    # CREATE EMBED
+    # --------------------------------------------------------
+
+    file = hilo_card_file(
+        first_card
+    )
+
+    embed = view.make_embed()
+
+
+    # --------------------------------------------------------
+    # SEND GAME
+    # --------------------------------------------------------
+
+    try:
+
+        if file:
+
+            message = await ctx.send(
+                embed=embed,
+                file=file,
+                view=view
+            )
+
+        else:
+
+            # Remove attachment image reference if the image
+            # could not be found.
+            embed.set_image(
+                url=None
+            )
+
+            message = await ctx.send(
+                embed=embed,
+                view=view
+            )
+
+        view.message = message
+
+    except Exception:
+
+        # If Discord fails to send the game message,
+        # refund the bet.
+        await bot.db.change_balance(
+            ctx.author.id,
+            amount,
+            "game_refund",
+            "hilo_send_failed"
+        )
+
+        raise
 
 # =========================================================
 # CRAZY DICE
