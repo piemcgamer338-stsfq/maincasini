@@ -1,9 +1,10 @@
 # ============================================================
-# PART 1 — BOT FOUNDATION
+# PART 2 — CONFIGURATION + USER STATS
 # ============================================================
 
 import os
 import asyncio
+from decimal import Decimal
 
 import discord
 from discord.ext import commands
@@ -11,7 +12,7 @@ import asyncpg
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 NAME = "Cryptobet"
@@ -21,6 +22,14 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 PREFIXES = [".", ","]
+
+MINIMUM_BET = Decimal("20")
+
+POINTS_PER_USD = Decimal("200")
+
+COINFLIP_MULTIPLIER = Decimal("1.96")
+
+GAME_WIN_CHANCE = Decimal("45")
 
 
 # ============================================================
@@ -77,12 +86,27 @@ class Database:
 
     async def create_tables(self):
         async with self.pool.acquire() as connection:
+
             await connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     balance NUMERIC(30, 8) NOT NULL DEFAULT 0,
+                    wagered NUMERIC(30, 8) NOT NULL DEFAULT 0,
+                    won NUMERIC(30, 8) NOT NULL DEFAULT 0,
+                    lost NUMERIC(30, 8) NOT NULL DEFAULT 0,
+                    deposited NUMERIC(30, 8) NOT NULL DEFAULT 0,
+                    withdrawn NUMERIC(30, 8) NOT NULL DEFAULT 0,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
                 """
             )
@@ -98,27 +122,158 @@ class Database:
                 user_id,
             )
 
-    async def get_balance(self, user_id):
+    async def get_user(self, user_id):
         await self.ensure_user(user_id)
 
         async with self.pool.acquire() as connection:
-            row = await connection.fetchrow(
+            return await connection.fetchrow(
                 """
-                SELECT balance
+                SELECT
+                    user_id,
+                    balance,
+                    wagered,
+                    won,
+                    lost,
+                    deposited,
+                    withdrawn,
+                    created_at
                 FROM users
                 WHERE user_id = $1
                 """,
                 user_id,
             )
 
-        return row["balance"]
+    async def get_balance(self, user_id):
+        row = await self.get_user(user_id)
+        return Decimal(str(row["balance"]))
+
+    async def change_balance(self, user_id, amount):
+        amount = Decimal(str(amount))
+
+        await self.ensure_user(user_id)
+
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE users
+                SET balance = balance + $2
+                WHERE user_id = $1
+                RETURNING balance
+                """,
+                user_id,
+                amount,
+            )
+
+        return Decimal(str(row["balance"]))
+
+    async def add_wagered(self, user_id, amount):
+        amount = Decimal(str(amount))
+
+        await self.ensure_user(user_id)
+
+        await self.pool.execute(
+            """
+            UPDATE users
+            SET wagered = wagered + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+    async def add_won(self, user_id, amount):
+        amount = Decimal(str(amount))
+
+        await self.ensure_user(user_id)
+
+        await self.pool.execute(
+            """
+            UPDATE users
+            SET won = won + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+    async def add_lost(self, user_id, amount):
+        amount = Decimal(str(amount))
+
+        await self.ensure_user(user_id)
+
+        await self.pool.execute(
+            """
+            UPDATE users
+            SET lost = lost + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+    async def add_deposited(self, user_id, amount):
+        amount = Decimal(str(amount))
+
+        await self.ensure_user(user_id)
+
+        await self.pool.execute(
+            """
+            UPDATE users
+            SET deposited = deposited + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+    async def add_withdrawn(self, user_id, amount):
+        amount = Decimal(str(amount))
+
+        await self.ensure_user(user_id)
+
+        await self.pool.execute(
+            """
+            UPDATE users
+            SET withdrawn = withdrawn + $2
+            WHERE user_id = $1
+            """,
+            user_id,
+            amount,
+        )
+
+    async def set_setting(self, key, value):
+        await self.pool.execute(
+            """
+            INSERT INTO bot_settings (key, value)
+            VALUES ($1, $2)
+            ON CONFLICT (key)
+            DO UPDATE SET value = EXCLUDED.value
+            """,
+            key,
+            str(value),
+        )
+
+    async def get_setting(self, key, default=None):
+        row = await self.pool.fetchrow(
+            """
+            SELECT value
+            FROM bot_settings
+            WHERE key = $1
+            """,
+            key,
+        )
+
+        if row is None:
+            return default
+
+        return row["value"]
 
 
 bot.db = Database(DATABASE_URL)
 
 
 # ============================================================
-# EMBED HELPERS
+# EMBED HELPER
 # ============================================================
 
 def make_embed(title, description=None):
@@ -129,7 +284,7 @@ def make_embed(title, description=None):
 
 
 # ============================================================
-# EVENTS
+# BOT READY
 # ============================================================
 
 @bot.event
@@ -145,18 +300,31 @@ async def on_ready():
 
 @bot.command(name="help")
 async def help_command(ctx):
+
     embed = make_embed(
         f"{NAME} — Help",
-        "Select a command category from the commands that will be added in the next parts.",
+        "Casino commands will be added as we build each part.",
     )
 
     embed.add_field(
-        name="Current Commands",
+        name="General",
         value=(
             "`.help`\n"
             "`.bal`\n"
+            "`.balance`\n"
+            "`.b`\n"
             "`,help`\n"
             "`,bal`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Game Settings",
+        value=(
+            f"Minimum Bet: **{MINIMUM_BET:,.0f} Points**\n"
+            f"Points per $1: **{POINTS_PER_USD:,.0f}**\n"
+            f"Game Win Chance: **{GAME_WIN_CHANCE}%**"
         ),
         inline=False,
     )
@@ -170,6 +338,7 @@ async def help_command(ctx):
 
 @bot.command(name="bal", aliases=["balance", "b"])
 async def balance_command(ctx):
+
     balance = await bot.db.get_balance(ctx.author.id)
 
     embed = make_embed(
@@ -181,11 +350,64 @@ async def balance_command(ctx):
 
 
 # ============================================================
+# STATS
+# ============================================================
+
+@bot.command(name="stats")
+async def stats_command(ctx):
+
+    user = await bot.db.get_user(ctx.author.id)
+
+    embed = make_embed(
+        f"{ctx.author.display_name} — Stats"
+    )
+
+    embed.add_field(
+        name="Balance",
+        value=f"{Decimal(str(user['balance'])):,.2f} Points",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Wagered",
+        value=f"{Decimal(str(user['wagered'])):,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Won",
+        value=f"{Decimal(str(user['won'])):,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Lost",
+        value=f"{Decimal(str(user['lost'])):,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Deposited",
+        value=f"{Decimal(str(user['deposited'])):,.2f} Points",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Withdrawn",
+        value=f"{Decimal(str(user['withdrawn'])):,.2f} Points",
+        inline=True,
+    )
+
+    await ctx.send(embed=embed)
+
+
+# ============================================================
 # ERROR HANDLER
 # ============================================================
 
 @bot.event
 async def on_command_error(ctx, error):
+
     if isinstance(error, commands.CommandNotFound):
         return
 
@@ -207,7 +429,11 @@ async def on_command_error(ctx, error):
         )
         return
 
-    print(f"Command error in {ctx.command}: {repr(error)}")
+    print(
+        f"Command error in "
+        f"{ctx.command}: "
+        f"{repr(error)}"
+    )
 
     await ctx.send(
         embed=make_embed(
@@ -222,6 +448,7 @@ async def on_command_error(ctx, error):
 # ============================================================
 
 async def main():
+
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN is missing from Railway environment variables."
@@ -237,6 +464,7 @@ async def main():
 
     try:
         await bot.start(BOT_TOKEN)
+
     finally:
         await bot.db.close()
 
