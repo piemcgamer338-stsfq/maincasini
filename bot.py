@@ -4661,6 +4661,23 @@ COINFLIP_IMAGES = {
 
 
 # =========================================================
+# COINFLIP CONFIG
+# =========================================================
+
+# TOTAL payout multiplier.
+#
+# Example:
+# 100 bet -> 192 total payout
+# 500 bet -> 960 total payout
+# 1000 bet -> 1920 total payout
+#
+# The original bet is already removed before the game,
+# so the player receives the full 1.92x amount on a win.
+
+COINFLIP_PAYOUT = 1.92
+
+
+# =========================================================
 # COINFLIP COMMAND
 # =========================================================
 
@@ -4674,6 +4691,10 @@ async def coinflip(
     choice: str = "r"
 ):
 
+    # -----------------------------------------------------
+    # CHECK IF GAMES ARE ALLOWED
+    # -----------------------------------------------------
+
     if not await bot.game_allowed(ctx):
         return
 
@@ -4682,16 +4703,27 @@ async def coinflip(
     # -----------------------------------------------------
 
     try:
+
         amount = parse_amount(bet)
 
     except ValueError as error:
-        await ctx.send(str(error))
+
+        await ctx.send(
+            str(error)
+        )
+
         return
 
+    # -----------------------------------------------------
+    # VALIDATE BET
+    # -----------------------------------------------------
+
     if amount <= 0:
+
         await ctx.send(
             "Bet must be greater than zero."
         )
+
         return
 
     # -----------------------------------------------------
@@ -4708,40 +4740,57 @@ async def coinflip(
         "r",
         "random"
     ):
+
         await ctx.send(
             "Choose `h`, `t`, or `r`."
         )
+
         return
 
     # -----------------------------------------------------
     # REMOVE BET
     # -----------------------------------------------------
 
-    if not await bot.db.change_balance(
+    deducted = await bot.db.change_balance(
         ctx.author.id,
         -amount,
         "coinflip_bet"
-    ):
+    )
+
+    if not deducted:
+
         await ctx.send(
             "Insufficient balance."
         )
+
         return
 
     # -----------------------------------------------------
     # PLAYER PICK
     # -----------------------------------------------------
 
-    if choice in ("h", "heads"):
+    if choice in (
+        "h",
+        "heads"
+    ):
+
         pick = "heads"
 
-    elif choice in ("t", "tails"):
+    elif choice in (
+        "t",
+        "tails"
+    ):
+
         pick = "tails"
 
     else:
-        pick = random.choice([
-            "heads",
-            "tails"
-        ])
+
+        pick = random.choice(
+            [
+                "heads",
+                "tails"
+            ]
+        )
 
     # -----------------------------------------------------
     # FLIPPING MESSAGE
@@ -4751,8 +4800,9 @@ async def coinflip(
         "🪙 Coinflip",
         (
             f"{ctx.author.mention} flipped a coin...\n\n"
-            f"Bet: **{money(amount)} points**\n"
-            f"Choice: **{pick.title()}**"
+            f"**Bet:** {money(amount)} points\n"
+            f"**Choice:** {pick.title()}\n"
+            f"**Payout:** {COINFLIP_PAYOUT:.2f}x total"
         )
     )
 
@@ -4770,10 +4820,12 @@ async def coinflip(
     # RESULT
     # -----------------------------------------------------
 
-    result = random.choice([
-        "heads",
-        "tails"
-    ])
+    result = random.choice(
+        [
+            "heads",
+            "tails"
+        ]
+    )
 
     # -----------------------------------------------------
     # PAYOUT
@@ -4781,16 +4833,62 @@ async def coinflip(
 
     if pick == result:
 
+        # -------------------------------------------------
+        # 1.92x TOTAL PAYOUT
+        #
+        # 100 bet = 192 payout
+        # 200 bet = 384 payout
+        # 500 bet = 960 payout
+        # -------------------------------------------------
+
         payout = round(
-            amount * 1.92,
+            amount * COINFLIP_PAYOUT,
             4
         )
 
-        await bot.db.change_balance(
+        payout_success = await bot.db.change_balance(
             ctx.author.id,
             payout,
             "coinflip_win"
         )
+
+        # -------------------------------------------------
+        # PAYOUT ERROR
+        # -------------------------------------------------
+
+        if not payout_success:
+
+            # Refund original bet if payout fails
+            try:
+
+                await bot.db.change_balance(
+                    ctx.author.id,
+                    amount,
+                    "coinflip_payout_refund"
+                )
+
+            except Exception as refund_error:
+
+                print(
+                    f"[COINFLIP] Refund error: "
+                    f"{refund_error}"
+                )
+
+            error_embed = brand(
+                "Coinflip Error",
+                (
+                    "The payout could not be processed.\n\n"
+                    "Your original bet has been refunded."
+                ),
+                0xED4245
+            )
+
+            await flipping_message.edit(
+                content="",
+                embed=error_embed
+            )
+
+            return
 
     else:
 
@@ -4800,12 +4898,21 @@ async def coinflip(
     # RECORD GAME
     # -----------------------------------------------------
 
-    await bot.db.record_game(
-        ctx.author.id,
-        amount,
-        payout,
-        "coinflip"
-    )
+    try:
+
+        await bot.db.record_game(
+            ctx.author.id,
+            amount,
+            payout,
+            "coinflip"
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Record game error: "
+            f"{error}"
+        )
 
     # -----------------------------------------------------
     # RESULT EMBED
@@ -4814,10 +4921,14 @@ async def coinflip(
     if payout > 0:
 
         embed = brand(
-            "You Won!",
+            "🎉 You Won!",
             (
                 f"You bet on **{pick.title()}** "
-                f"and won **{money(payout)} points!** 🎉"
+                f"and the coin landed on "
+                f"**{result.title()}**.\n\n"
+                f"**Bet:** {money(amount)} points\n"
+                f"**Payout:** {money(payout)} points\n"
+                f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x"
             ),
             0x57F287
         )
@@ -4828,13 +4939,16 @@ async def coinflip(
             "You Lost!",
             (
                 f"You bet on **{pick.title()}** "
-                f"and lost **{money(amount)} points.**"
+                f"but the coin landed on "
+                f"**{result.title()}**.\n\n"
+                f"**Bet:** {money(amount)} points\n"
+                f"**Payout:** 0 points"
             ),
             0xED4245
         )
 
     # -----------------------------------------------------
-    # USE HEADS/TAILS IMAGE
+    # RESULT IMAGE
     # -----------------------------------------------------
 
     embed.set_image(
