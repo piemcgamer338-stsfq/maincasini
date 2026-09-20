@@ -881,7 +881,7 @@ class MarketView(discord.ui.View):
 
         return True
 
-    async def finish_game(self, interaction, direction):
+    async def finish_game(self, interaction: discord.Interaction, direction: str):
         if self.finished:
             return
 
@@ -891,24 +891,41 @@ class MarketView(discord.ui.View):
             child.disabled = True
 
         # -------------------------------------------------
-        # RESULT
+        # MARKET RESULT
         # -------------------------------------------------
 
         market_result = random.choice(["UP", "DOWN"])
-
         won = market_result == direction
 
         if won:
-            # 1.92x is TOTAL payout.
-            # Example:
-            # Bet 100 -> payout 192 total.
+            # 1.92x is the TOTAL payout.
+            #
+            # 50 bet  = 96 total payout
+            # 100 bet = 192 total payout
+
             payout = self.bet * MARKET_PAYOUT
 
-            await bot.db.change_balance(
+            success = await bot.db.change_balance(
                 self.ctx.author.id,
                 payout,
-                "Market win"
+                "market_win"
             )
+
+            if not success:
+                self.finished = False
+
+                for child in self.children:
+                    child.disabled = False
+
+                await interaction.response.send_message(
+                    embed=brand(
+                        "Market Error",
+                        "The payout could not be processed. Your game was not completed.",
+                        0xED4245
+                    ),
+                    ephemeral=True
+                )
+                return
 
             result_text = (
                 f"**Result:** {market_result}\n"
@@ -919,8 +936,6 @@ class MarketView(discord.ui.View):
             )
 
         else:
-            payout = Decimal("0")
-
             result_text = (
                 f"**Result:** {market_result}\n"
                 f"**Your Choice:** {direction}\n"
@@ -929,9 +944,9 @@ class MarketView(discord.ui.View):
                 f"**Multiplier:** {MARKET_PAYOUT}x"
             )
 
-        embed = discord.Embed(
-            title=f"{NAME} Market",
-            description=result_text
+        embed = brand(
+            "Market",
+            result_text
         )
 
         await interaction.response.edit_message(
@@ -948,7 +963,10 @@ class MarketView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-        await self.finish_game(interaction, "UP")
+        await self.finish_game(
+            interaction,
+            "UP"
+        )
 
     @discord.ui.button(
         label="DOWN",
@@ -959,7 +977,10 @@ class MarketView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-        await self.finish_game(interaction, "DOWN")
+        await self.finish_game(
+            interaction,
+            "DOWN"
+        )
 
     async def on_timeout(self):
         if self.finished:
@@ -971,90 +992,149 @@ class MarketView(discord.ui.View):
             child.disabled = True
 
 
+# =========================================================
+# MARKET COMMAND
+# =========================================================
+
 @bot.command(name="market")
 async def market(ctx, amount: str = None):
+
+    # -----------------------------------------------------
+    # USAGE
+    # -----------------------------------------------------
+
     if amount is None:
-        embed = discord.Embed(
-            title=f"{NAME} Market",
-            description=(
-                "Usage:\n"
-                "`.market <amount>`\n\n"
-                f"Minimum bet: {MINIMUM_BET:,.0f} points\n"
-                f"Payout: {MARKET_PAYOUT}x"
+        await ctx.send(
+            embed=brand(
+                "Market",
+                (
+                    "Usage:\n"
+                    "`.market <amount>`\n\n"
+                    f"Minimum bet: {MINIMUM_BET:,.0f} points\n"
+                    f"Payout: {MARKET_PAYOUT}x total"
+                )
             )
         )
-
-        await ctx.send(embed=embed)
         return
+
+    # -----------------------------------------------------
+    # PARSE BET
+    # -----------------------------------------------------
 
     try:
         bet = Decimal(str(amount))
-    except (InvalidOperation, ValueError):
-        embed = discord.Embed(
-            title=f"{NAME} Market",
-            description="Enter a valid bet amount."
+    except Exception:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Enter a valid bet amount.",
+                0xED4245
+            )
         )
-        await ctx.send(embed=embed)
+        return
+
+    # -----------------------------------------------------
+    # VALIDATE BET
+    # -----------------------------------------------------
+
+    if bet <= 0:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Bet must be greater than 0.",
+                0xED4245
+            )
+        )
         return
 
     if bet < MINIMUM_BET:
-        embed = discord.Embed(
-            title=f"{NAME} Market",
-            description=(
-                f"Minimum bet is {MINIMUM_BET:,.0f} points."
+        await ctx.send(
+            embed=brand(
+                "Market",
+                f"Minimum bet is {MINIMUM_BET:,.0f} points.",
+                0xED4245
             )
         )
-        await ctx.send(embed=embed)
         return
 
-    if bet <= 0:
-        embed = discord.Embed(
-            title=f"{NAME} Market",
-            description="Bet must be greater than 0."
+    # -----------------------------------------------------
+    # GET USER
+    # -----------------------------------------------------
+
+    row = await bot.db.user(ctx.author.id)
+
+    if not row:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Your account could not be found.",
+                0xED4245
+            )
         )
-        await ctx.send(embed=embed)
         return
 
-    balance = await bot.db.get_balance(ctx.author.id)
+    balance = Decimal(str(row["balance"]))
+
+    # -----------------------------------------------------
+    # BALANCE CHECK
+    # -----------------------------------------------------
 
     if balance < bet:
-        embed = discord.Embed(
-            title=f"{NAME} Market",
-            description=(
-                f"Insufficient balance.\n\n"
-                f"**Balance:** {balance:,.2f} points\n"
-                f"**Bet:** {bet:,.2f} points"
+        await ctx.send(
+            embed=brand(
+                "Market",
+                (
+                    "Insufficient balance.\n\n"
+                    f"**Balance:** {balance:,.2f} points\n"
+                    f"**Bet:** {bet:,.2f} points"
+                ),
+                0xED4245
             )
         )
-        await ctx.send(embed=embed)
         return
 
     # -----------------------------------------------------
-    # DEDUCT BET BEFORE THE GAME
+    # DEDUCT BET
     # -----------------------------------------------------
 
-    await bot.db.change_balance(
+    deducted = await bot.db.change_balance(
         ctx.author.id,
         -bet,
-        "Market bet"
+        "market_bet"
     )
 
-    embed = discord.Embed(
-        title=f"{NAME} Market",
-        description=(
+    if not deducted:
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Your bet could not be processed. Please try again.",
+                0xED4245
+            )
+        )
+        return
+
+    # -----------------------------------------------------
+    # GAME SCREEN
+    # -----------------------------------------------------
+
+    embed = brand(
+        "Market",
+        (
             f"**Bet:** {bet:,.2f} points\n"
             f"**Payout:** {MARKET_PAYOUT}x total\n\n"
             "Choose the market direction."
         )
     )
 
-    view = MarketView(ctx, bet)
+    view = MarketView(
+        ctx,
+        bet
+    )
 
     await ctx.send(
         embed=embed,
         view=view
     )
-
 
 # =========================================================
 # CRAZY DICE
