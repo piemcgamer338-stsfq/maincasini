@@ -4179,6 +4179,878 @@ async def help(ctx, command: str = None):
     embed=brand("Help", "**0.01 USD = 2 Points**\nUse `.help <command>` for details.\n-# Select a category below.")
     await ctx.send(embed=embed, view=HelpView(ctx.author.id))
 
+# =========================================================
+# COINFLIP
+# =========================================================
+
+import asyncio
+import random
+from decimal import Decimal, InvalidOperation
+
+
+# =========================================================
+# CONFIG
+# =========================================================
+
+COINFLIP_PAYOUT = Decimal("1.92")
+COINFLIP_MIN_BET = Decimal("20")
+
+# Win-log channel.
+# This is stored in memory and resets when the bot restarts.
+COINFLIP_WINLOG_CHANNEL_ID = None
+
+
+# =========================================================
+# COINFLIP IMAGES
+# =========================================================
+
+COINFLIP_IMAGES = {
+    "heads": (
+        "https://media.discordapp.net/attachments/"
+        "1550136730731024425/"
+        "1550495453781426216/"
+        "image.png?ex=6aae8aea&is=6aad396a&"
+        "hm=871a61aec62433c1a7cc838f9405b39095b00e521ee5b64a154b7318f3e2d80d"
+        "&=&format=webp&quality=lossless&width=640&height=516"
+    ),
+
+    "tails": (
+        "https://media.discordapp.net/attachments/"
+        "1550136730731024425/"
+        "1550495462342267053/"
+        "image.png?ex=6aae8aed&is=6aad396d&"
+        "hm=276af9bbf5c628c07c7d3c735d1ea7092a2e679502af81856cee5fd45820484a"
+        "&=&format=webp&quality=lossless"
+    )
+}
+
+
+# =========================================================
+# COINFLIP WIN LOG HELPER
+# =========================================================
+
+async def send_coinflip_win_log(
+    ctx,
+    player_choice,
+    result,
+    amount,
+    payout
+):
+
+    global COINFLIP_WINLOG_CHANNEL_ID
+
+    # No channel configured
+    if not COINFLIP_WINLOG_CHANNEL_ID:
+        return
+
+    try:
+
+        channel = bot.get_channel(
+            COINFLIP_WINLOG_CHANNEL_ID
+        )
+
+        # Try fetching if it isn't cached
+        if channel is None:
+
+            try:
+
+                channel = await bot.fetch_channel(
+                    COINFLIP_WINLOG_CHANNEL_ID
+                )
+
+            except Exception:
+                return
+
+        if channel is None:
+            return
+
+        # -------------------------------------------------
+        # WIN LOG EMBED
+        # -------------------------------------------------
+
+        log_embed = brand(
+            "🪙 Coinflip Win",
+            (
+                f"**Player:** {ctx.author.mention}\n"
+                f"**Choice:** {player_choice.title()}\n"
+                f"**Result:** {result.title()}\n\n"
+
+                f"**Bet:** {amount:,.2f} points\n"
+                f"**Payout:** {payout:,.2f} points\n"
+                f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x"
+            ),
+            0x57F287
+        )
+
+        # Show the actual result image
+        image_url = COINFLIP_IMAGES.get(result)
+
+        if image_url:
+            log_embed.set_image(
+                url=image_url
+            )
+
+        log_embed.set_footer(
+            text="Coinflip Win Log"
+        )
+
+        await channel.send(
+            embed=log_embed
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Win log error: {error}"
+        )
+
+
+# =========================================================
+# CFWINLOG COMMAND
+#
+# Usage:
+#
+# .cfwinlog #channel
+#
+# Example:
+#
+# .cfwinlog #coinflip-wins
+# =========================================================
+
+@bot.command(
+    name="cfwinlog"
+)
+@commands.has_permissions(
+    manage_guild=True
+)
+async def cfwinlog(
+    ctx,
+    channel: discord.TextChannel = None
+):
+
+    global COINFLIP_WINLOG_CHANNEL_ID
+
+    # -----------------------------------------------------
+    # SHOW CURRENT CHANNEL
+    # -----------------------------------------------------
+
+    if channel is None:
+
+        if COINFLIP_WINLOG_CHANNEL_ID:
+
+            current_channel = bot.get_channel(
+                COINFLIP_WINLOG_CHANNEL_ID
+            )
+
+            if current_channel:
+
+                await ctx.send(
+                    embed=brand(
+                        "🪙 Coinflip Win Log",
+                        (
+                            f"Win logs are currently being sent to "
+                            f"{current_channel.mention}."
+                        ),
+                        0x57F287
+                    )
+                )
+
+                return
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip Win Log",
+                (
+                    "**Usage:**\n"
+                    "`.cfwinlog #channel`\n\n"
+                    "Example:\n"
+                    "`.cfwinlog #coinflip-wins`"
+                ),
+                0x3498DB
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # SAVE CHANNEL
+    # -----------------------------------------------------
+
+    COINFLIP_WINLOG_CHANNEL_ID = channel.id
+
+    await ctx.send(
+        embed=brand(
+            "🪙 Coinflip Win Log",
+            (
+                f"Coinflip win logs will now be sent to "
+                f"{channel.mention}."
+            ),
+            0x57F287
+        )
+    )
+
+
+# =========================================================
+# COINFLIP PERMISSION ERROR
+# =========================================================
+
+@cfwinlog.error
+async def cfwinlog_error(
+    ctx,
+    error
+):
+
+    if isinstance(
+        error,
+        commands.MissingPermissions
+    ):
+
+        await ctx.send(
+            embed=brand(
+                "Permission Denied",
+                "You need **Manage Server** permission to use this command.",
+                0xED4245
+            )
+        )
+
+        return
+
+    if isinstance(
+        error,
+        commands.ChannelNotFound
+    ):
+
+        await ctx.send(
+            embed=brand(
+                "Coinflip Win Log",
+                (
+                    "I couldn't find that channel.\n\n"
+                    "Use the channel mention, for example:\n"
+                    "`.cfwinlog #coinflip-wins`"
+                ),
+                0xED4245
+            )
+        )
+
+        return
+
+    print(
+        f"[CFWINLOG] Error: {error}"
+    )
+
+
+# =========================================================
+# COINFLIP COMMAND
+#
+# .cf 20 h
+# .cf 20 t
+# .cf 20 r
+#
+# .cf half h
+# .cf half t
+# .cf half r
+#
+# .cf all h
+# .cf all t
+# .cf all r
+#
+# h = Heads
+# t = Tails
+# r = Random
+# =========================================================
+
+@bot.command(
+    name="coinflip",
+    aliases=["cf"]
+)
+async def coinflip(
+    ctx,
+    bet: str = None,
+    choice: str = "r"
+):
+
+    # =====================================================
+    # GAME CHECK
+    # =====================================================
+
+    if not await bot.game_allowed(ctx):
+        return
+
+    # =====================================================
+    # USAGE
+    # =====================================================
+
+    if bet is None:
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                (
+                    "**Usage:**\n"
+                    "`.cf <amount> <h/t/r>`\n\n"
+
+                    "**Examples:**\n"
+                    "`.cf 20 h`\n"
+                    "`.cf 50 t`\n"
+                    "`.cf half h`\n"
+                    "`.cf all r`\n\n"
+
+                    "**Choices:**\n"
+                    "`h` = Heads\n"
+                    "`t` = Tails\n"
+                    "`r` = Random\n\n"
+
+                    f"**Minimum Bet:** "
+                    f"{COINFLIP_MIN_BET:,.2f} points\n"
+
+                    f"**Payout:** "
+                    f"{COINFLIP_PAYOUT:.2f}x total"
+                )
+            )
+        )
+
+        return
+
+    # =====================================================
+    # CHOICE
+    # =====================================================
+
+    choice = choice.lower().strip()
+
+    if choice not in (
+        "h",
+        "heads",
+        "t",
+        "tails",
+        "r",
+        "random"
+    ):
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                (
+                    "Invalid choice.\n\n"
+                    "Use:\n"
+                    "`h` = Heads\n"
+                    "`t` = Tails\n"
+                    "`r` = Random"
+                ),
+                0xED4245
+            )
+        )
+
+        return
+
+    # =====================================================
+    # GET BALANCE
+    # =====================================================
+
+    try:
+
+        row = await bot.db.user(
+            ctx.author.id
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Balance lookup error: {error}"
+        )
+
+        await ctx.send(
+            embed=brand(
+                "Coinflip Error",
+                "Could not read your balance.",
+                0xED4245
+            )
+        )
+
+        return
+
+    if not row:
+
+        await ctx.send(
+            embed=brand(
+                "Coinflip",
+                "Your account could not be found.",
+                0xED4245
+            )
+        )
+
+        return
+
+    # =====================================================
+    # READ BALANCE
+    # =====================================================
+
+    try:
+
+        balance = Decimal(
+            str(row["balance"])
+        )
+
+    except Exception:
+
+        await ctx.send(
+            embed=brand(
+                "Coinflip Error",
+                "Your balance could not be read.",
+                0xED4245
+            )
+        )
+
+        return
+
+    # =====================================================
+    # DETERMINE BET
+    # =====================================================
+
+    bet_text = bet.lower().strip()
+
+    # -----------------------------------------------------
+    # ALL
+    # -----------------------------------------------------
+
+    if bet_text == "all":
+
+        amount = balance
+
+    # -----------------------------------------------------
+    # HALF
+    # -----------------------------------------------------
+
+    elif bet_text == "half":
+
+        amount = balance / Decimal("2")
+
+    # -----------------------------------------------------
+    # NORMAL AMOUNT
+    # -----------------------------------------------------
+
+    else:
+
+        try:
+
+            amount = Decimal(
+                str(parse_amount(bet))
+            )
+
+        except Exception:
+
+            try:
+
+                amount = Decimal(
+                    bet
+                )
+
+            except Exception:
+
+                await ctx.send(
+                    embed=brand(
+                        "🪙 Coinflip",
+                        "Enter a valid bet amount.",
+                        0xED4245
+                    )
+                )
+
+                return
+
+    # =====================================================
+    # VALIDATE BET
+    # =====================================================
+
+    if not amount.is_finite():
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                "Enter a valid bet amount.",
+                0xED4245
+            )
+        )
+
+        return
+
+    if amount <= 0:
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                "Bet must be greater than zero.",
+                0xED4245
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # MINIMUM BET
+    # -----------------------------------------------------
+
+    if amount < COINFLIP_MIN_BET:
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                (
+                    f"Minimum bet is "
+                    f"**{COINFLIP_MIN_BET:,.2f} points**."
+                ),
+                0xED4245
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # BALANCE CHECK
+    # -----------------------------------------------------
+
+    if amount > balance:
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                (
+                    "**Insufficient balance.**\n\n"
+                    f"**Balance:** "
+                    f"{balance:,.2f} points\n"
+                    f"**Bet:** "
+                    f"{amount:,.2f} points"
+                ),
+                0xED4245
+            )
+        )
+
+        return
+
+    # =====================================================
+    # PLAYER CHOICE
+    # =====================================================
+
+    if choice in (
+        "h",
+        "heads"
+    ):
+
+        player_choice = "heads"
+
+    elif choice in (
+        "t",
+        "tails"
+    ):
+
+        player_choice = "tails"
+
+    else:
+
+        player_choice = random.choice(
+            [
+                "heads",
+                "tails"
+            ]
+        )
+
+    # =====================================================
+    # DEDUCT BET
+    #
+    # THE BET IS DEDUCTED EXACTLY ONCE.
+    # =====================================================
+
+    try:
+
+        deducted = await bot.db.change_balance(
+            ctx.author.id,
+            -float(amount),
+            "coinflip_bet"
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Bet deduction error: {error}"
+        )
+
+        deducted = False
+
+    if not deducted:
+
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                "Your bet could not be processed.",
+                0xED4245
+            )
+        )
+
+        return
+
+    # =====================================================
+    # FLIPPING MESSAGE
+    # =====================================================
+
+    flipping_embed = brand(
+        "🪙 Coinflip",
+        (
+            f"{ctx.author.mention} flipped a coin...\n\n"
+            f"**Bet:** {amount:,.2f} points\n"
+            f"**Choice:** {player_choice.title()}\n\n"
+            f"**Payout:** {COINFLIP_PAYOUT:.2f}x total"
+        )
+    )
+
+    try:
+
+        flipping_message = await ctx.send(
+            embed=flipping_embed
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Message error: {error}"
+        )
+
+        # Refund if the message could not be sent
+        try:
+
+            await bot.db.change_balance(
+                ctx.author.id,
+                float(amount),
+                "coinflip_refund"
+            )
+
+        except Exception as refund_error:
+
+            print(
+                f"[COINFLIP] Refund error: "
+                f"{refund_error}"
+            )
+
+        return
+
+    # =====================================================
+    # WAIT 2 SECONDS
+    # =====================================================
+
+    await asyncio.sleep(2)
+
+    # =====================================================
+    # FLIP
+    # =====================================================
+
+    result = random.choice(
+        [
+            "heads",
+            "tails"
+        ]
+    )
+
+    won = (
+        player_choice == result
+    )
+
+    # =====================================================
+    # WIN
+    # =====================================================
+
+    if won:
+
+        # -------------------------------------------------
+        # TOTAL PAYOUT = BET × 1.92
+        #
+        # 20  -> 38.40
+        # 26  -> 49.92
+        # 100 -> 192.00
+        # -------------------------------------------------
+
+        payout = (
+            amount *
+            COINFLIP_PAYOUT
+        )
+
+        payout = payout.quantize(
+            Decimal("0.01")
+        )
+
+        try:
+
+            payout_success = await bot.db.change_balance(
+                ctx.author.id,
+                float(payout),
+                "coinflip_win"
+            )
+
+        except Exception as error:
+
+            print(
+                f"[COINFLIP] Payout error: {error}"
+            )
+
+            payout_success = False
+
+        # -------------------------------------------------
+        # PAYOUT FAILED
+        # -------------------------------------------------
+
+        if not payout_success:
+
+            try:
+
+                await bot.db.change_balance(
+                    ctx.author.id,
+                    float(amount),
+                    "coinflip_refund"
+                )
+
+            except Exception as refund_error:
+
+                print(
+                    f"[COINFLIP] Refund error: "
+                    f"{refund_error}"
+                )
+
+            error_embed = brand(
+                "Coinflip Error",
+                (
+                    "The payout could not be processed.\n\n"
+                    "Your original bet has been refunded."
+                ),
+                0xED4245
+            )
+
+            await flipping_message.edit(
+                content="",
+                embed=error_embed
+            )
+
+            return
+
+        # -------------------------------------------------
+        # WIN EMBED
+        # -------------------------------------------------
+
+        embed = brand(
+            "🎉 You Won!",
+            (
+                f"You bet on **{player_choice.title()}** "
+                f"and the coin landed on "
+                f"**{result.title()}**.\n\n"
+
+                f"**Bet:** "
+                f"{amount:,.2f} points\n"
+
+                f"**Payout:** "
+                f"{payout:,.2f} points\n"
+
+                f"**Multiplier:** "
+                f"{COINFLIP_PAYOUT:.2f}x"
+            ),
+            0x57F287
+        )
+
+    # =====================================================
+    # LOSS
+    # =====================================================
+
+    else:
+
+        payout = Decimal("0")
+
+        embed = brand(
+            "😔 You Lost!",
+            (
+                f"You bet on **{player_choice.title()}** "
+                f"and the coin landed on "
+                f"**{result.title()}**.\n\n"
+
+                f"**Bet:** "
+                f"{amount:,.2f} points\n"
+
+                f"**Payout:** "
+                f"0.00 points\n"
+
+                f"**Multiplier:** "
+                f"{COINFLIP_PAYOUT:.2f}x"
+            ),
+            0xED4245
+        )
+
+    # =====================================================
+    # RESULT IMAGE
+    # =====================================================
+
+    image_url = COINFLIP_IMAGES.get(
+        result
+    )
+
+    if image_url:
+
+        embed.set_image(
+            url=image_url
+        )
+
+    # =====================================================
+    # FOOTER
+    # =====================================================
+
+    embed.set_footer(
+        text="🔒 Provably Fair | Coinflip"
+    )
+
+    # =====================================================
+    # RECORD GAME
+    # =====================================================
+
+    try:
+
+        await bot.db.record_game(
+            ctx.author.id,
+            float(amount),
+            float(payout),
+            "coinflip"
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Record game error: {error}"
+        )
+
+    # =====================================================
+    # EDIT ORIGINAL MESSAGE
+    # =====================================================
+
+    try:
+
+        await flipping_message.edit(
+            content="",
+            embed=embed
+        )
+
+    except Exception as error:
+
+        print(
+            f"[COINFLIP] Result edit error: {error}"
+        )
+
+    # =====================================================
+    # SEND WIN LOG
+    #
+    # ONLY WINNING GAMES ARE LOGGED.
+    # =====================================================
+
+    if won:
+
+        await send_coinflip_win_log(
+            ctx=ctx,
+            player_choice=player_choice,
+            result=result,
+            amount=amount,
+            payout=payout
+        )
+
 @bot.command(aliases=["b"])
 async def balance(ctx, member: discord.Member = None):
     member=member or ctx.author; row=await bot.db.user(member.id)
@@ -4647,330 +5519,6 @@ import random
 import asyncio
 from PIL import Image, ImageDraw, ImageFont
 import discord
-
-
-# =========================================================
-# COINFLIP IMAGES
-# =========================================================
-
-COINFLIP_IMAGES = {
-    "heads": "https://media.discordapp.net/attachments/1550136730731024425/1550495453781426216/image.png?ex=6aae8aea&is=6aad396a&hm=871a61aec62433c1a7cc838f9405b39095b00e521ee5b64a154b7318f3e2d80d&=&format=webp&quality=lossless&width=640&height=516",
-
-    "tails": "https://media.discordapp.net/attachments/1550136730731024425/1550495462342267053/image.png?ex=6aae8aed&is=6aad396d&hm=276af9bbf5c628c07c7d3c735d1ea7092a2e679502af81856cee5fd45820484a&=&format=webp&quality=lossless"
-}
-
-
-# =========================================================
-# COINFLIP CONFIG
-# =========================================================
-
-# TOTAL payout multiplier.
-#
-# Example:
-# 100 bet -> 192 total payout
-# 500 bet -> 960 total payout
-# 1000 bet -> 1920 total payout
-#
-# The original bet is already removed before the game,
-# so the player receives the full 1.92x amount on a win.
-
-COINFLIP_PAYOUT = 1.92
-
-
-# =========================================================
-# COINFLIP COMMAND
-# =========================================================
-
-@bot.command(
-    name="coinflip",
-    aliases=["cf"]
-)
-async def coinflip(
-    ctx,
-    bet: str,
-    choice: str = "r"
-):
-
-    # -----------------------------------------------------
-    # CHECK IF GAMES ARE ALLOWED
-    # -----------------------------------------------------
-
-    if not await bot.game_allowed(ctx):
-        return
-
-    # -----------------------------------------------------
-    # PARSE BET
-    # -----------------------------------------------------
-
-    try:
-
-        amount = parse_amount(bet)
-
-    except ValueError as error:
-
-        await ctx.send(
-            str(error)
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # VALIDATE BET
-    # -----------------------------------------------------
-
-    if amount <= 0:
-
-        await ctx.send(
-            "Bet must be greater than zero."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # CHOICE
-    # -----------------------------------------------------
-
-    choice = choice.lower()
-
-    if choice not in (
-        "h",
-        "heads",
-        "t",
-        "tails",
-        "r",
-        "random"
-    ):
-
-        await ctx.send(
-            "Choose `h`, `t`, or `r`."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # REMOVE BET
-    # -----------------------------------------------------
-
-    deducted = await bot.db.change_balance(
-        ctx.author.id,
-        -amount,
-        "coinflip_bet"
-    )
-
-    if not deducted:
-
-        await ctx.send(
-            "Insufficient balance."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # PLAYER PICK
-    # -----------------------------------------------------
-
-    if choice in (
-        "h",
-        "heads"
-    ):
-
-        pick = "heads"
-
-    elif choice in (
-        "t",
-        "tails"
-    ):
-
-        pick = "tails"
-
-    else:
-
-        pick = random.choice(
-            [
-                "heads",
-                "tails"
-            ]
-        )
-
-    # -----------------------------------------------------
-    # FLIPPING MESSAGE
-    # -----------------------------------------------------
-
-    flipping_embed = brand(
-        "🪙 Coinflip",
-        (
-            f"{ctx.author.mention} flipped a coin...\n\n"
-            f"**Bet:** {money(amount)} points\n"
-            f"**Choice:** {pick.title()}\n"
-            f"**Payout:** {COINFLIP_PAYOUT:.2f}x total"
-        )
-    )
-
-    flipping_message = await ctx.send(
-        embed=flipping_embed
-    )
-
-    # -----------------------------------------------------
-    # WAIT 2 SECONDS
-    # -----------------------------------------------------
-
-    await asyncio.sleep(2)
-
-    # -----------------------------------------------------
-    # RESULT
-    # -----------------------------------------------------
-
-    result = random.choice(
-        [
-            "heads",
-            "tails"
-        ]
-    )
-
-    # -----------------------------------------------------
-    # PAYOUT
-    # -----------------------------------------------------
-
-    if pick == result:
-
-        # -------------------------------------------------
-        # 1.92x TOTAL PAYOUT
-        #
-        # 100 bet = 192 payout
-        # 200 bet = 384 payout
-        # 500 bet = 960 payout
-        # -------------------------------------------------
-
-        payout = round(
-            amount * COINFLIP_PAYOUT,
-            4
-        )
-
-        payout_success = await bot.db.change_balance(
-            ctx.author.id,
-            payout,
-            "coinflip_win"
-        )
-
-        # -------------------------------------------------
-        # PAYOUT ERROR
-        # -------------------------------------------------
-
-        if not payout_success:
-
-            # Refund original bet if payout fails
-            try:
-
-                await bot.db.change_balance(
-                    ctx.author.id,
-                    amount,
-                    "coinflip_payout_refund"
-                )
-
-            except Exception as refund_error:
-
-                print(
-                    f"[COINFLIP] Refund error: "
-                    f"{refund_error}"
-                )
-
-            error_embed = brand(
-                "Coinflip Error",
-                (
-                    "The payout could not be processed.\n\n"
-                    "Your original bet has been refunded."
-                ),
-                0xED4245
-            )
-
-            await flipping_message.edit(
-                content="",
-                embed=error_embed
-            )
-
-            return
-
-    else:
-
-        payout = 0
-
-    # -----------------------------------------------------
-    # RECORD GAME
-    # -----------------------------------------------------
-
-    try:
-
-        await bot.db.record_game(
-            ctx.author.id,
-            amount,
-            payout,
-            "coinflip"
-        )
-
-    except Exception as error:
-
-        print(
-            f"[COINFLIP] Record game error: "
-            f"{error}"
-        )
-
-    # -----------------------------------------------------
-    # RESULT EMBED
-    # -----------------------------------------------------
-
-    if payout > 0:
-
-        embed = brand(
-            "🎉 You Won!",
-            (
-                f"You bet on **{pick.title()}** "
-                f"and the coin landed on "
-                f"**{result.title()}**.\n\n"
-                f"**Bet:** {money(amount)} points\n"
-                f"**Payout:** {money(payout)} points\n"
-                f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x"
-            ),
-            0x57F287
-        )
-
-    else:
-
-        embed = brand(
-            "You Lost!",
-            (
-                f"You bet on **{pick.title()}** "
-                f"but the coin landed on "
-                f"**{result.title()}**.\n\n"
-                f"**Bet:** {money(amount)} points\n"
-                f"**Payout:** 0 points"
-            ),
-            0xED4245
-        )
-
-    # -----------------------------------------------------
-    # RESULT IMAGE
-    # -----------------------------------------------------
-
-    embed.set_image(
-        url=COINFLIP_IMAGES[result]
-    )
-
-    # -----------------------------------------------------
-    # FOOTER
-    # -----------------------------------------------------
-
-    embed.set_footer(
-        text="🔒 Provably Fair | Coinflip"
-    )
-
-    # -----------------------------------------------------
-    # EDIT ORIGINAL MESSAGE
-    # -----------------------------------------------------
-
-    await flipping_message.edit(
-        content="",
-        embed=embed
-    )
 
 @bot.command()
 async def addbal(ctx, member: discord.Member, points: str):
