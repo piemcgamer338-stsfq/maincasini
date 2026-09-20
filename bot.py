@@ -883,34 +883,25 @@ MINIMUM_BET = Decimal("1")
 
 
 # =========================================================
-# MARKET FONT
+# MARKET IMAGE GENERATOR
 # =========================================================
 
 def market_font(size, bold=False):
 
     if bold:
-
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
         ]
-
     else:
-
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         ]
 
     for path in paths:
-
         try:
-
-            return ImageFont.truetype(
-                path,
-                size
-            )
-
+            return ImageFont.truetype(path, size)
         except Exception:
             pass
 
@@ -918,21 +909,156 @@ def market_font(size, bold=False):
 
 
 # =========================================================
-# MARKET IMAGE GENERATOR
+# RANDOM MARKET DATA
 # =========================================================
 
-def create_market_chart(direction=None):
+def generate_market_history():
 
-    """
-    direction=None
-        Creates the hidden prediction chart.
+    points = []
 
-    direction="UP"
-        Creates the revealed UP chart.
+    # Start somewhere around the middle
+    current = random.uniform(
+        0.42,
+        0.62
+    )
 
-    direction="DOWN"
-        Creates the revealed DOWN chart.
-    """
+    for _ in range(24):
+
+        # Random movement
+        movement = random.uniform(
+            -0.11,
+            0.11
+        )
+
+        current += movement
+
+        # Keep chart inside bounds
+        current = max(
+            0.12,
+            min(
+                0.88,
+                current
+            )
+        )
+
+        points.append(
+            current
+        )
+
+    return points
+
+
+# =========================================================
+# GENERATE FUTURE MARKET MOVEMENT
+# =========================================================
+
+def generate_market_future(
+    start_value,
+    result
+):
+
+    values = []
+
+    current = start_value
+
+    # -----------------------------------------------------
+    # UP RESULT
+    # -----------------------------------------------------
+
+    if result == "UP":
+
+        # Random total upward movement
+        target_change = random.uniform(
+            0.18,
+            0.42
+        )
+
+        target = min(
+            0.92,
+            current + target_change
+        )
+
+    # -----------------------------------------------------
+    # DOWN RESULT
+    # -----------------------------------------------------
+
+    else:
+
+        target_change = random.uniform(
+            0.18,
+            0.42
+        )
+
+        target = max(
+            0.08,
+            current - target_change
+        )
+
+    steps = 16
+
+    for i in range(steps):
+
+        remaining = steps - i
+
+        # Amount needed to eventually reach target
+        difference = target - current
+
+        # Stronger movement as the chart approaches result
+        base_step = (
+            difference / remaining
+        )
+
+        # Random noise
+        noise = random.uniform(
+            -0.055,
+            0.055
+        )
+
+        movement = (
+            base_step
+            + noise
+        )
+
+        current += movement
+
+        # Don't allow chart to leave boundaries
+        current = max(
+            0.06,
+            min(
+                0.94,
+                current
+            )
+        )
+
+        values.append(
+            current
+        )
+
+    # Force final point clearly toward result
+    if result == "UP":
+
+        values[-1] = random.uniform(
+            max(current, 0.72),
+            0.94
+        )
+
+    else:
+
+        values[-1] = random.uniform(
+            0.06,
+            min(current, 0.30)
+        )
+
+    return values
+
+
+# =========================================================
+# MARKET IMAGE
+# =========================================================
+
+def create_market_chart(
+    result=None
+):
 
     WIDTH = 1200
     HEIGHT = 675
@@ -943,11 +1069,16 @@ def create_market_chart(direction=None):
 
     image = Image.new(
         "RGB",
-        (WIDTH, HEIGHT),
-        (8, 9, 13)
+        (
+            WIDTH,
+            HEIGHT
+        ),
+        (7, 9, 13)
     )
 
-    draw = ImageDraw.Draw(image)
+    draw = ImageDraw.Draw(
+        image
+    )
 
     # -----------------------------------------------------
     # BACKGROUND GRADIENT
@@ -957,13 +1088,28 @@ def create_market_chart(direction=None):
 
         ratio = y / HEIGHT
 
-        r = int(8 + (10 * ratio))
-        g = int(9 + (10 * ratio))
-        b = int(13 + (14 * ratio))
+        r = int(
+            7 + (8 * ratio)
+        )
+
+        g = int(
+            9 + (9 * ratio)
+        )
+
+        b = int(
+            13 + (13 * ratio)
+        )
 
         draw.line(
-            [(0, y), (WIDTH, y)],
-            fill=(r, g, b)
+            [
+                (0, y),
+                (WIDTH, y)
+            ],
+            fill=(
+                r,
+                g,
+                b
+            )
         )
 
     # -----------------------------------------------------
@@ -976,28 +1122,31 @@ def create_market_chart(direction=None):
     )
 
     draw.text(
-        (60, 35),
+        (
+            60,
+            30
+        ),
         "BETRUSH  |  MARKET PREDICTION",
         font=title_font,
-        fill=(242, 244, 248)
+        fill=(240, 242, 247)
     )
 
     # -----------------------------------------------------
     # CHART AREA
     # -----------------------------------------------------
 
-    chart_left = 65
-    chart_right = WIDTH - 55
+    left = 65
+    right = WIDTH - 55
 
-    chart_top = 145
-    chart_bottom = HEIGHT - 65
+    top = 135
+    bottom = HEIGHT - 65
 
     chart_width = (
-        chart_right - chart_left
+        right - left
     )
 
     chart_height = (
-        chart_bottom - chart_top
+        bottom - top
     )
 
     # -----------------------------------------------------
@@ -1005,17 +1154,15 @@ def create_market_chart(direction=None):
     # -----------------------------------------------------
 
     grid_color = (
-        27,
-        30,
-        38
+        28,
+        31,
+        39
     )
-
-    # Horizontal grid
 
     for i in range(7):
 
         y = int(
-            chart_top
+            top
             + (
                 chart_height / 6
             ) * i
@@ -1023,99 +1170,95 @@ def create_market_chart(direction=None):
 
         draw.line(
             [
-                (chart_left, y),
-                (chart_right, y)
+                (left, y),
+                (right, y)
             ],
             fill=grid_color,
             width=2
         )
 
-    # Vertical grid
-
-    for i in range(12):
+    for i in range(13):
 
         x = int(
-            chart_left
+            left
             + (
-                chart_width / 11
+                chart_width / 12
             ) * i
         )
 
         draw.line(
             [
-                (x, chart_top),
-                (x, chart_bottom)
+                (x, top),
+                (x, bottom)
             ],
             fill=grid_color,
             width=2
         )
 
-    # -----------------------------------------------------
-    # HISTORICAL MARKET DATA
-    # -----------------------------------------------------
+    # =====================================================
+    # RANDOM HISTORY
+    # =====================================================
 
-    history = [
-        0.80,
-        0.61,
-        0.43,
-        0.25,
-        0.39,
-        0.55,
-        0.63,
-        0.47,
-        0.59,
-        0.44,
-        0.56,
-        0.38,
-        0.49,
-        0.35,
-        0.51,
-        0.63,
-        0.60,
-        0.69,
-    ]
+    history = generate_market_history()
 
     # -----------------------------------------------------
-    # COORDINATE FUNCTION
+    # Split chart into:
+    #
+    # 65% historical
+    # 35% future
     # -----------------------------------------------------
 
-    def point_xy(index, value):
+    history_end_x = int(
+        left
+        + chart_width * 0.64
+    )
 
-        x = (
-            chart_left
+    future_end_x = right
+
+    # -----------------------------------------------------
+    # Convert history values to coordinates
+    # -----------------------------------------------------
+
+    history_points = []
+
+    for i, value in enumerate(history):
+
+        x = int(
+            left
             + (
-                index / (len(history) - 1)
-            ) * chart_width
+                history_end_x - left
+            )
+            * (
+                i / (
+                    len(history) - 1
+                )
+            )
         )
 
-        y = (
-            chart_top
+        y = int(
+            top
             + (
                 1 - value
-            ) * chart_height
+            )
+            * chart_height
         )
 
-        return (
-            int(x),
-            int(y)
+        history_points.append(
+            (
+                x,
+                y
+            )
         )
 
-    # -----------------------------------------------------
-    # HISTORY POINTS
-    # -----------------------------------------------------
+    # =====================================================
+    # DRAW GREY HISTORY
+    # =====================================================
 
-    history_points = [
-        point_xy(
-            i,
-            value
-        )
-
-        for i, value in enumerate(history)
-    ]
-
-    # -----------------------------------------------------
-    # DRAW HISTORY
-    # -----------------------------------------------------
+    grey_line = (
+        135,
+        145,
+        162
+    )
 
     for i in range(
         len(history_points) - 1
@@ -1126,30 +1269,33 @@ def create_market_chart(direction=None):
                 history_points[i],
                 history_points[i + 1]
             ],
-            fill=(115, 137, 168),
+            fill=grey_line,
             width=5
         )
 
-    # -----------------------------------------------------
-    # LAST HISTORY POINT
-    # -----------------------------------------------------
-
-    last_x, last_y = history_points[-1]
-
-    future_start = last_x
-    future_end = chart_right
-
-    future_steps = 12
-
     # =====================================================
-    # HIDDEN STATE
+    # CURRENT POINT
     # =====================================================
 
-    if direction is None:
+    start_x, start_y = (
+        history_points[-1]
+    )
+
+    # =====================================================
+    # HIDDEN / PRE-REVEAL
+    # =====================================================
+
+    if result is None:
+
+        # -------------------------------------------------
+        # Hidden future line
+        # -------------------------------------------------
 
         hidden_points = []
 
-        current_y = last_y
+        current_y = start_y
+
+        future_steps = 16
 
         for i in range(
             1,
@@ -1157,10 +1303,10 @@ def create_market_chart(direction=None):
         ):
 
             x = int(
-                future_start
+                start_x
                 + (
-                    future_end
-                    - future_start
+                    future_end_x
+                    - start_x
                 )
                 * (
                     i / future_steps
@@ -1168,29 +1314,32 @@ def create_market_chart(direction=None):
             )
 
             current_y += random.randint(
-                -18,
-                18
+                -25,
+                25
             )
 
             current_y = max(
-                chart_top + 20,
+                top + 25,
                 min(
-                    chart_bottom - 20,
+                    bottom - 25,
                     current_y
                 )
             )
 
             hidden_points.append(
-                (x, current_y)
+                (
+                    x,
+                    current_y
+                )
             )
 
         # -------------------------------------------------
-        # GREY HIDDEN LINE
+        # Grey hidden line
         # -------------------------------------------------
 
         previous = (
-            last_x,
-            last_y
+            start_x,
+            start_y
         )
 
         for point in hidden_points:
@@ -1200,25 +1349,55 @@ def create_market_chart(direction=None):
                     previous,
                     point
                 ],
-                fill=(74, 78, 88),
+                fill=(
+                    66,
+                    70,
+                    80
+                ),
                 width=4
             )
 
             previous = point
 
         # -------------------------------------------------
+        # Hidden vertical divider
+        # -------------------------------------------------
+
+        draw.line(
+            [
+                (
+                    start_x,
+                    top
+                ),
+                (
+                    start_x,
+                    bottom
+                )
+            ],
+            fill=(
+                55,
+                59,
+                69
+            ),
+            width=2
+        )
+
+        # -------------------------------------------------
         # QUESTION MARK
         # -------------------------------------------------
 
         question_font = market_font(
-            105,
+            115,
             True
         )
 
         question = "?"
 
         bbox = draw.textbbox(
-            (0, 0),
+            (
+                0,
+                0
+            ),
             question,
             font=question_font
         )
@@ -1231,57 +1410,73 @@ def create_market_chart(direction=None):
             bbox[3] - bbox[1]
         )
 
-        q_x = (
-            future_start
+        center_x = int(
+            start_x
             + (
-                future_end
-                - future_start
-            ) // 2
-            - q_width // 2
+                future_end_x
+                - start_x
+            ) / 2
+        )
+
+        center_y = int(
+            top
+            + chart_height / 2
+        )
+
+        q_x = (
+            center_x
+            - q_width / 2
         )
 
         q_y = (
-            HEIGHT // 2
-            - q_height // 2
+            center_y
+            - q_height / 2
         )
 
         # Shadow
 
         draw.text(
             (
-                q_x + 5,
-                q_y + 5
+                int(q_x + 5),
+                int(q_y + 6)
             ),
             question,
             font=question_font,
             fill=(0, 0, 0)
         )
 
-        # Question mark
+        # Main ?
 
         draw.text(
             (
-                q_x,
-                q_y
+                int(q_x),
+                int(q_y)
             ),
             question,
             font=question_font,
-            fill=(155, 160, 170)
+            fill=(
+                155,
+                160,
+                170
+            )
         )
 
         # -------------------------------------------------
-        # PREDICTION LABEL
+        # PREDICT LABEL
         # -------------------------------------------------
 
         label_font = market_font(
             18,
-            False
+            True
         )
 
-        label = "PREDICT THE MARKET"
+        label = "CHOOSE THE MARKET DIRECTION"
 
         bbox = draw.textbbox(
-            (0, 0),
+            (
+                0,
+                0
+            ),
             label,
             font=label_font
         )
@@ -1292,80 +1487,37 @@ def create_market_chart(direction=None):
 
         draw.text(
             (
-                future_start
-                + (
-                    future_end
-                    - future_start
-                ) // 2
-                - label_width // 2,
-                chart_bottom - 35
+                center_x
+                - label_width / 2,
+                bottom - 38
             ),
             label,
             font=label_font,
-            fill=(105, 110, 120)
+            fill=(
+                100,
+                105,
+                115
+            )
         )
 
     # =====================================================
-    # REVEALED STATE
+    # REVEAL
     # =====================================================
 
     else:
 
-        if direction == "UP":
-
-            future_values = [
-                0.58,
-                0.64,
-                0.55,
-                0.70,
-                0.77,
-                0.69,
-                0.84,
-                0.91,
-                0.87,
-                0.96,
-                0.91,
-                0.99
-            ]
-
-            line_color = (
-                72,
-                190,
-                255
-            )
-
-            result_text = "▲ MARKET UP"
-
-        else:
-
-            future_values = [
-                0.48,
-                0.40,
-                0.45,
-                0.31,
-                0.38,
-                0.25,
-                0.19,
-                0.29,
-                0.15,
-                0.10,
-                0.18,
-                0.08
-            ]
-
-            line_color = (
-                255,
-                72,
-                82
-            )
-
-            result_text = "▼ MARKET DOWN"
-
         # -------------------------------------------------
-        # REVEALED POINTS
+        # Generate random future based on result
         # -------------------------------------------------
 
-        revealed_points = []
+        future_values = (
+            generate_market_future(
+                history[-1],
+                result
+            )
+        )
+
+        future_points = []
 
         for i, value in enumerate(
             future_values,
@@ -1373,40 +1525,81 @@ def create_market_chart(direction=None):
         ):
 
             x = int(
-                future_start
+                start_x
                 + (
-                    future_end
-                    - future_start
+                    future_end_x
+                    - start_x
                 )
                 * (
-                    i / future_steps
+                    i / len(
+                        future_values
+                    )
                 )
             )
 
             y = int(
-                chart_top
+                top
                 + (
                     1 - value
                 )
                 * chart_height
             )
 
-            revealed_points.append(
-                (x, y)
+            future_points.append(
+                (
+                    x,
+                    y
+                )
             )
 
         all_points = [
             history_points[-1]
-        ] + revealed_points
+        ] + future_points
 
         # -------------------------------------------------
-        # GLOW LAYER
+        # RESULT COLOR
+        # -------------------------------------------------
+
+        if result == "UP":
+
+            line_color = (
+                45,
+                230,
+                125
+            )
+
+            result_label = (
+                "▲ MARKET WENT UP"
+            )
+
+        else:
+
+            line_color = (
+                255,
+                72,
+                82
+            )
+
+            result_label = (
+                "▼ MARKET WENT DOWN"
+            )
+
+        # -------------------------------------------------
+        # GLOW
         # -------------------------------------------------
 
         glow = Image.new(
             "RGBA",
-            image.size,
-            (0, 0, 0, 0)
+            (
+                WIDTH,
+                HEIGHT
+            ),
+            (
+                0,
+                0,
+                0,
+                0
+            )
         )
 
         glow_draw = ImageDraw.Draw(
@@ -1426,14 +1619,14 @@ def create_market_chart(direction=None):
                     line_color[0],
                     line_color[1],
                     line_color[2],
-                    85
+                    100
                 ),
-                width=22
+                width=24
             )
 
         glow = glow.filter(
             ImageFilter.GaussianBlur(
-                12
+                13
             )
         )
 
@@ -1447,7 +1640,7 @@ def create_market_chart(direction=None):
         )
 
         # -------------------------------------------------
-        # MAIN RESULT LINE
+        # REVEALED LINE
         # -------------------------------------------------
 
         for i in range(
@@ -1464,10 +1657,26 @@ def create_market_chart(direction=None):
             )
 
         # -------------------------------------------------
-        # RESULT DOT
-        # -----------------------------------------------------
+        # START DOT
+        # -------------------------------------------------
 
-        final_x, final_y = all_points[-1]
+        draw.ellipse(
+            (
+                start_x - 6,
+                start_y - 6,
+                start_x + 6,
+                start_y + 6
+            ),
+            fill=line_color
+        )
+
+        # -------------------------------------------------
+        # FINAL DOT
+        # -------------------------------------------------
+
+        final_x, final_y = (
+            all_points[-1]
+        )
 
         draw.ellipse(
             (
@@ -1484,13 +1693,16 @@ def create_market_chart(direction=None):
         # -------------------------------------------------
 
         result_font = market_font(
-            28,
+            26,
             True
         )
 
         bbox = draw.textbbox(
-            (0, 0),
-            result_text,
+            (
+                0,
+                0
+            ),
+            result_label,
             font=result_font
         )
 
@@ -1498,24 +1710,28 @@ def create_market_chart(direction=None):
             bbox[2] - bbox[0]
         )
 
+        center_x = int(
+            start_x
+            + (
+                future_end_x
+                - start_x
+            ) / 2
+        )
+
         draw.text(
             (
-                future_start
-                + (
-                    future_end
-                    - future_start
-                ) // 2
-                - result_width // 2,
-                chart_bottom - 42
+                center_x
+                - result_width / 2,
+                bottom - 42
             ),
-            result_text,
+            result_label,
             font=result_font,
             fill=line_color
         )
 
-    # -----------------------------------------------------
-    # DISCORD FILE BUFFER
-    # -----------------------------------------------------
+    # =====================================================
+    # CONVERT TO DISCORD FILE
+    # =====================================================
 
     buffer = BytesIO()
 
@@ -1556,7 +1772,7 @@ class MarketView(discord.ui.View):
         self.message = None
 
     # =====================================================
-    # INTERACTION CHECK
+    # USER CHECK
     # =====================================================
 
     async def interaction_check(
@@ -1594,14 +1810,14 @@ class MarketView(discord.ui.View):
         self.finished = True
 
         # -------------------------------------------------
-        # DISABLE BUTTONS
+        # Disable buttons
         # -------------------------------------------------
 
         for child in self.children:
             child.disabled = True
 
         # -------------------------------------------------
-        # GENERATE RESULT
+        # Generate actual result
         # -------------------------------------------------
 
         market_result = random.choice(
@@ -1643,10 +1859,6 @@ class MarketView(discord.ui.View):
 
                 success = False
 
-            # -------------------------------------------------
-            # PAYOUT FAILED
-            # -------------------------------------------------
-
             if not success:
 
                 self.finished = False
@@ -1659,8 +1871,8 @@ class MarketView(discord.ui.View):
                         "Market Error",
                         (
                             "The payout could not be "
-                            "processed. Your game was not "
-                            "completed."
+                            "processed. Your game was "
+                            "not completed."
                         ),
                         0xED4245
                     ),
@@ -1708,17 +1920,42 @@ class MarketView(discord.ui.View):
             )
 
         # =================================================
-        # GENERATE RESULT IMAGE
+        # GENERATE REVEALED IMAGE
         # =================================================
 
-        chart = create_market_chart(
-            direction=market_result
-        )
+        try:
 
-        chart_file = discord.File(
-            chart,
-            filename="market_result.png"
-        )
+            chart = create_market_chart(
+                result=market_result
+            )
+
+            chart_file = discord.File(
+                chart,
+                filename="market_result.png"
+            )
+
+        except Exception as error:
+
+            print(
+                f"[MARKET] Result image error: {error}"
+            )
+
+            # Still show the result if image generation fails
+
+            embed = brand(
+                result_title,
+                result_text,
+                result_colour
+            )
+
+            await interaction.response.edit_message(
+                embed=embed,
+                view=self
+            )
+
+            self.stop()
+
+            return
 
         # =================================================
         # RESULT EMBED
@@ -1735,11 +1972,11 @@ class MarketView(discord.ui.View):
         )
 
         embed.set_footer(
-            text="Market"
+            text="Market Prediction"
         )
 
         # =================================================
-        # SHOW RESULT
+        # UPDATE MESSAGE
         # =================================================
 
         try:
@@ -1755,30 +1992,8 @@ class MarketView(discord.ui.View):
         except Exception as error:
 
             print(
-                f"[MARKET] Result edit error: {error}"
+                f"[MARKET] Result update error: {error}"
             )
-
-            # The result has already been processed,
-            # so do not attempt another payout here.
-
-            try:
-
-                await interaction.followup.send(
-                    embed=embed,
-                    file=discord.File(
-                        create_market_chart(
-                            direction=market_result
-                        ),
-                        filename="market_result.png"
-                    ),
-                    ephemeral=True
-                )
-
-            except Exception as followup_error:
-
-                print(
-                    f"[MARKET] Followup error: {followup_error}"
-                )
 
         self.stop()
 
@@ -1788,13 +2003,13 @@ class MarketView(discord.ui.View):
 
     @discord.ui.button(
         label="UP",
-        style=discord.ButtonStyle.primary,
+        style=discord.ButtonStyle.success,
         emoji="📈"
     )
     async def up_button(
         self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
+        interaction,
+        button
     ):
 
         await self.finish_game(
@@ -1808,13 +2023,13 @@ class MarketView(discord.ui.View):
 
     @discord.ui.button(
         label="DOWN",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.danger,
         emoji="📉"
     )
     async def down_button(
         self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
+        interaction,
+        button
     ):
 
         await self.finish_game(
@@ -1833,15 +2048,12 @@ class MarketView(discord.ui.View):
 
         self.finished = True
 
-        # -------------------------------------------------
-        # DISABLE BUTTONS
-        # -------------------------------------------------
-
+        # Disable buttons
         for child in self.children:
             child.disabled = True
 
         # -------------------------------------------------
-        # REFUND UNFINISHED GAME
+        # Refund bet
         # -------------------------------------------------
 
         try:
@@ -1859,7 +2071,7 @@ class MarketView(discord.ui.View):
             )
 
         # -------------------------------------------------
-        # UPDATE MESSAGE
+        # Update message
         # -------------------------------------------------
 
         if self.message:
@@ -1882,7 +2094,6 @@ class MarketView(discord.ui.View):
                 )
 
             except discord.HTTPException:
-
                 pass
 
         self.stop()
@@ -1916,8 +2127,8 @@ async def market(
                     f"{MINIMUM_BET:,.0f} points\n"
                     f"**Payout:** "
                     f"{MARKET_PAYOUT}x total\n\n"
-                    "Predict whether the market "
-                    "will go **UP** or **DOWN**."
+                    "Predict whether the hidden "
+                    "market will go **UP** or **DOWN**."
                 )
             )
         )
@@ -1950,7 +2161,7 @@ async def market(
         return
 
     # =====================================================
-    # FINITE CHECK
+    # VALIDATE
     # =====================================================
 
     if not bet.is_finite():
@@ -1965,10 +2176,6 @@ async def market(
 
         return
 
-    # =====================================================
-    # POSITIVE CHECK
-    # =====================================================
-
     if bet <= 0:
 
         await ctx.send(
@@ -1980,10 +2187,6 @@ async def market(
         )
 
         return
-
-    # =====================================================
-    # MINIMUM BET
-    # =====================================================
 
     if bet < MINIMUM_BET:
 
@@ -2026,10 +2229,6 @@ async def market(
 
         return
 
-    # =====================================================
-    # USER NOT FOUND
-    # =====================================================
-
     if not row:
 
         await ctx.send(
@@ -2043,7 +2242,7 @@ async def market(
         return
 
     # =====================================================
-    # GET BALANCE
+    # BALANCE
     # =====================================================
 
     try:
@@ -2052,11 +2251,7 @@ async def market(
             str(row["balance"])
         )
 
-    except Exception as error:
-
-        print(
-            f"[MARKET] Balance conversion error: {error}"
-        )
+    except Exception:
 
         await ctx.send(
             embed=brand(
@@ -2110,10 +2305,6 @@ async def market(
 
         deducted = False
 
-    # =====================================================
-    # DEDUCTION FAILED
-    # =====================================================
-
     if not deducted:
 
         await ctx.send(
@@ -2130,12 +2321,14 @@ async def market(
         return
 
     # =====================================================
-    # CREATE HIDDEN CHART
+    # GENERATE UNIQUE HIDDEN CHART
     # =====================================================
 
     try:
 
-        chart = create_market_chart()
+        chart = create_market_chart(
+            result=None
+        )
 
         chart_file = discord.File(
             chart,
@@ -2161,7 +2354,7 @@ async def market(
         except Exception as refund_error:
 
             print(
-                f"[MARKET] Image refund error: "
+                f"[MARKET] Refund error: "
                 f"{refund_error}"
             )
 
@@ -2169,7 +2362,7 @@ async def market(
             embed=brand(
                 "Market",
                 (
-                    "The market image could not be "
+                    "The market chart could not be "
                     "generated. Your bet was refunded."
                 ),
                 0xED4245
@@ -2187,9 +2380,8 @@ async def market(
         (
             f"**Bet:** {bet:,.2f} points\n"
             f"**Payout:** {MARKET_PAYOUT}x total\n\n"
-            "The market is hidden.\n"
-            "Predict whether it will move **UP** "
-            "or **DOWN**."
+            "The future market movement is hidden.\n"
+            "Study the chart and predict **UP** or **DOWN**."
         )
     )
 
@@ -2198,11 +2390,11 @@ async def market(
     )
 
     embed.set_footer(
-        text="Choose carefully • Market Prediction"
+        text="Market Prediction • Choose your direction"
     )
 
     # =====================================================
-    # CREATE VIEW
+    # VIEW
     # =====================================================
 
     view = MarketView(
@@ -2211,7 +2403,7 @@ async def market(
     )
 
     # =====================================================
-    # SEND GAME
+    # SEND
     # =====================================================
 
     try:
@@ -2231,7 +2423,7 @@ async def market(
         )
 
         # -------------------------------------------------
-        # REFUND BET
+        # REFUND
         # -------------------------------------------------
 
         try:
@@ -2245,8 +2437,7 @@ async def market(
         except Exception as refund_error:
 
             print(
-                f"[MARKET] Refund error: "
-                f"{refund_error}"
+                f"[MARKET] Refund error: {refund_error}"
             )
 
         return
