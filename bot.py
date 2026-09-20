@@ -4649,7 +4649,6 @@ async def help(ctx, command: str = None):
 # COINFLIP
 # =========================================================
 
-import asyncio
 import random
 from decimal import Decimal, InvalidOperation
 
@@ -4692,7 +4691,32 @@ COINFLIP_IMAGES = {
 
 
 # =========================================================
-# COINFLIP WIN LOG HELPER
+# NEW RESULT IMAGES
+# =========================================================
+
+COINFLIP_RESULT_IMAGES = {
+    "heads": (
+        "https://media.discordapp.net/attachments/"
+        "1550767800698798080/"
+        "1551189074428301362/"
+        "image.png?ex=6ab110e7&is=6aafbf67&"
+        "hm=cd679a9f19985fcd0d603f3a8f90b3d74b65bc2786d4a76034b73aba95f7b89b"
+        "&=&format=webp&quality=lossless&width=640&height=521"
+    ),
+
+    "tails": (
+        "https://media.discordapp.net/attachments/"
+        "1550767800698798080/"
+        "1551189093201748068/"
+        "image.png?ex=6ab110eb&is=6aafbf6b&"
+        "hm=afd2095cd20d60f5d212a6808887698302c2df360d5957a1ed031ba1f98861a5"
+        "&=&format=webp&quality=lossless&width=640&height=525"
+    )
+}
+
+
+# =========================================================
+# COINFLIP WIN LOG
 # =========================================================
 
 async def send_coinflip_win_log(
@@ -4702,7 +4726,6 @@ async def send_coinflip_win_log(
     amount,
     payout
 ):
-
     global COINFLIP_WINLOG_CHANNEL_ID
 
     # No channel configured
@@ -4717,13 +4740,10 @@ async def send_coinflip_win_log(
 
         # Try fetching if it isn't cached
         if channel is None:
-
             try:
-
                 channel = await bot.fetch_channel(
                     COINFLIP_WINLOG_CHANNEL_ID
                 )
-
             except Exception:
                 return
 
@@ -4740,7 +4760,6 @@ async def send_coinflip_win_log(
                 f"**Player:** {ctx.author.mention}\n"
                 f"**Choice:** {player_choice.title()}\n"
                 f"**Result:** {result.title()}\n\n"
-
                 f"**Bet:** {amount:,.2f} points\n"
                 f"**Payout:** {payout:,.2f} points\n"
                 f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x"
@@ -4748,8 +4767,8 @@ async def send_coinflip_win_log(
             0x57F287
         )
 
-        # Show the actual result image
-        image_url = COINFLIP_IMAGES.get(result)
+        # Use the NEW result image
+        image_url = COINFLIP_RESULT_IMAGES.get(result)
 
         if image_url:
             log_embed.set_image(
@@ -4771,6 +4790,331 @@ async def send_coinflip_win_log(
         )
 
 
+# =========================================================
+# COINFLIP COMMAND
+# =========================================================
+
+@bot.command(name="cf", aliases=["coinflip"])
+@commands.cooldown(
+    1,
+    2,
+    commands.BucketType.user
+)
+async def cf(ctx, choice=None, *, bet=None):
+
+    # -----------------------------------------------------
+    # GAME CHANNEL CHECK
+    # -----------------------------------------------------
+
+    if not await bot.game_allowed(ctx):
+        return
+
+    # -----------------------------------------------------
+    # CHECK ARGUMENTS
+    # -----------------------------------------------------
+
+    if choice is None:
+        await ctx.send(
+            embed=brand(
+                "🪙 Coinflip",
+                (
+                    "Usage:\n"
+                    "`.cf heads 100`\n"
+                    "`.cf tails 100`\n"
+                    "`.cf heads half`\n"
+                    "`.cf tails all`\n"
+                    "`.cf heads max`"
+                )
+            )
+        )
+        return
+
+    choice = choice.lower().strip()
+
+    if choice not in ("heads", "tails"):
+        await ctx.send(
+            embed=brand(
+                "❌ Invalid Choice",
+                "Choose either **heads** or **tails**."
+            )
+        )
+        return
+
+    if bet is None:
+        await ctx.send(
+            embed=brand(
+                "❌ Missing Bet",
+                (
+                    "Please enter your bet amount.\n\n"
+                    "Example:\n"
+                    "`.cf heads 100`"
+                )
+            )
+        )
+        return
+
+    # -----------------------------------------------------
+    # GET USER BALANCE
+    # -----------------------------------------------------
+
+    row = await bot.db.user(ctx.author.id)
+
+    balance = Decimal(str(row["balance"]))
+
+    # -----------------------------------------------------
+    # PARSE BET
+    # -----------------------------------------------------
+
+    bet_text = bet.lower().strip()
+
+    if bet_text in ("all", "max"):
+
+        amount = balance
+
+    elif bet_text == "half":
+
+        amount = balance / Decimal("2")
+
+    else:
+
+        try:
+
+            parsed = parse_amount(bet_text)
+
+            amount = Decimal(str(parsed))
+
+        except (
+            ValueError,
+            TypeError,
+            InvalidOperation
+        ):
+
+            await ctx.send(
+                embed=brand(
+                    "❌ Invalid Bet",
+                    "Please enter a valid amount."
+                )
+            )
+            return
+
+    # -----------------------------------------------------
+    # ROUND AMOUNT
+    # -----------------------------------------------------
+
+    amount = amount.quantize(
+        Decimal("0.0001")
+    )
+
+    # -----------------------------------------------------
+    # VALIDATE BET
+    # -----------------------------------------------------
+
+    if amount <= 0:
+
+        await ctx.send(
+            embed=brand(
+                "❌ Invalid Bet",
+                "Your bet must be greater than `0`."
+            )
+        )
+        return
+
+    if amount < COINFLIP_MIN_BET:
+
+        await ctx.send(
+            embed=brand(
+                "❌ Bet Too Low",
+                (
+                    f"The minimum Coinflip bet is "
+                    f"**{COINFLIP_MIN_BET:,.0f} points**."
+                )
+            )
+        )
+        return
+
+    if amount > balance:
+
+        await ctx.send(
+            embed=brand(
+                "❌ Insufficient Balance",
+                (
+                    f"You only have "
+                    f"**{balance:,.2f} points**."
+                )
+            )
+        )
+        return
+
+    # -----------------------------------------------------
+    # TAKE BET
+    # -----------------------------------------------------
+
+    bet_taken = await bot.db.change_balance(
+        ctx.author.id,
+        -float(amount),
+        "coinflip_bet",
+        f"Coinflip {choice} bet"
+    )
+
+    if not bet_taken:
+
+        await ctx.send(
+            embed=brand(
+                "❌ Bet Failed",
+                "You don't have enough balance."
+            )
+        )
+        return
+
+    # -----------------------------------------------------
+    # GENERATE RESULT
+    # -----------------------------------------------------
+
+    result = random.choice(
+        ["heads", "tails"]
+    )
+
+    won = result == choice
+
+    # -----------------------------------------------------
+    # CALCULATE PAYOUT
+    # -----------------------------------------------------
+
+    payout = (
+        amount * COINFLIP_PAYOUT
+        if won
+        else Decimal("0")
+    )
+
+    payout = payout.quantize(
+        Decimal("0.0001")
+    )
+
+    # =====================================================
+    # WIN
+    # =====================================================
+
+    if won:
+
+        # IMPORTANT:
+        #
+        # DO NOT do:
+        #
+        # await bot.db.change_balance(
+        #     ctx.author.id,
+        #     float(payout)
+        # )
+        #
+        # record_game() already credits the payout.
+        #
+        # This is the fix for the 2x payout bug.
+        # =================================================
+
+        await bot.db.record_game(
+            ctx.author.id,
+            float(amount),
+            float(payout),
+            "coinflip"
+        )
+
+        # -------------------------------------------------
+        # WIN EMBED
+        # -------------------------------------------------
+
+        embed = brand(
+            "🪙 Coinflip — You Won!",
+            (
+                f"**Your Choice:** {choice.title()}\n"
+                f"**Result:** {result.title()}\n\n"
+                f"**Bet:** {amount:,.2f} points\n"
+                f"**Payout:** {payout:,.2f} points\n"
+                f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x\n\n"
+                f"🎉 **You won {payout:,.2f} points!**"
+            ),
+            0x57F287
+        )
+
+        # New result image
+        image_url = COINFLIP_RESULT_IMAGES.get(
+            result
+        )
+
+        if image_url:
+            embed.set_image(
+                url=image_url
+            )
+
+        embed.set_footer(
+            text="Coinflip"
+        )
+
+        await ctx.send(
+            embed=embed
+        )
+
+        # -------------------------------------------------
+        # WIN LOG
+        # -------------------------------------------------
+
+        await send_coinflip_win_log(
+            ctx,
+            choice,
+            result,
+            amount,
+            payout
+        )
+
+    # =====================================================
+    # LOSS
+    # =====================================================
+
+    else:
+
+        # Bet was already removed above.
+        #
+        # record_game(..., payout=0) records the loss.
+        #
+        # DO NOT subtract the bet again.
+        await bot.db.record_game(
+            ctx.author.id,
+            float(amount),
+            0,
+            "coinflip"
+        )
+
+        # -------------------------------------------------
+        # LOSS EMBED
+        # -------------------------------------------------
+
+        embed = brand(
+            "🪙 Coinflip — You Lost",
+            (
+                f"**Your Choice:** {choice.title()}\n"
+                f"**Result:** {result.title()}\n\n"
+                f"**Bet:** {amount:,.2f} points\n"
+                f"**Payout:** `0.00` points\n\n"
+                f"💥 **You lost {amount:,.2f} points.**"
+            ),
+            0xED4245
+        )
+
+        # New result image
+        image_url = COINFLIP_RESULT_IMAGES.get(
+            result
+        )
+
+        if image_url:
+            embed.set_image(
+                url=image_url
+            )
+
+        embed.set_footer(
+            text="Coinflip"
+        )
+
+        await ctx.send(
+            embed=embed
+        )
 # =========================================================
 # CFWINLOG COMMAND
 #
@@ -6082,692 +6426,566 @@ async def blackjack(ctx, bet: str):
         view=view
     )
         
-# =========================================================
-# HILO CARD SETTINGS
-# =========================================================
-
-import os
 import random
+import os
 import discord
-from decimal import Decimal
+from discord.ext import commands
 
 
-HILO_CARD_FOLDER = "."
+# ============================================================
+# HILO
+# ============================================================
 
-HILO_SUITS = [
-    "clubs",
-    "diamonds",
-    "hearts",
-    "spades"
-]
+HILO_CARD_DIR = "cards"
 
-HILO_RANKS = {
-    2: "2",
-    3: "3",
-    4: "4",
-    5: "5",
-    6: "6",
-    7: "7",
-    8: "8",
-    9: "9",
-    10: "10",
-    11: "jack",
-    12: "queen",
-    13: "king",
-    14: "ace"
+HILO_SUITS = {
+    "hearts": "♥",
+    "diamonds": "♦",
+    "clubs": "♣",
+    "spades": "♠",
 }
 
-
-# =========================================================
-# GET CARD PNG
-# =========================================================
-
-def hilo_card_file(rank, suit):
-
-    filename = f"{HILO_RANKS[rank]}_of_{suit}.png"
-
-    path = os.path.join(
-        HILO_CARD_FOLDER,
-        filename
-    )
-
-    if not os.path.exists(path):
-
-        raise FileNotFoundError(
-            f"Card image not found: {filename}"
-        )
-
-    return discord.File(
-        path,
-        filename="hilo_card.png"
-    )
+HILO_RANKS = [
+    ("2", 2),
+    ("3", 3),
+    ("4", 4),
+    ("5", 5),
+    ("6", 6),
+    ("7", 7),
+    ("8", 8),
+    ("9", 9),
+    ("10", 10),
+    ("J", 11),
+    ("Q", 12),
+    ("K", 13),
+    ("A", 14),
+]
 
 
-# =========================================================
-# HILO VIEW
-# =========================================================
+def hilo_random_card():
+    rank_name, rank_value = random.choice(HILO_RANKS)
+    suit_name, suit_symbol = random.choice(list(HILO_SUITS.items()))
+
+    return {
+        "rank": rank_name,
+        "value": rank_value,
+        "suit": suit_name,
+        "symbol": suit_symbol,
+    }
+
+
+def hilo_card_path(card):
+    """
+    Looks for card images in the cards/ folder.
+
+    Supported examples:
+        cards/7_hearts.png
+        cards/7-hearts.png
+        cards/7♥.png
+
+    If your existing card naming is different, the fallback
+    will simply use the text card display.
+    """
+
+    rank = card["rank"]
+    suit = card["suit"]
+
+    possible = [
+        os.path.join(HILO_CARD_DIR, f"{rank}_{suit}.png"),
+        os.path.join(HILO_CARD_DIR, f"{rank}-{suit}.png"),
+        os.path.join(HILO_CARD_DIR, f"{rank}{suit}.png"),
+        os.path.join(HILO_CARD_DIR, f"{rank}_{suit.lower()}.png"),
+    ]
+
+    for path in possible:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+def hilo_card_text(card):
+    return f"**{card['rank']}{card['symbol']}**"
+
 
 class HiloView(OwnerView):
+    def __init__(self, bot, owner_id, bet, current_card):
+        super().__init__(owner_id)
 
-    def __init__(self, owner, bet):
+        self.bot = bot
+        self.owner_id = owner_id
+        self.bet = float(bet)
 
-        super().__init__(
-            owner.id,
-            timeout=60
-        )
-
-        self.bet = bet
-
-        self.current_rank = random.randint(
-            2,
-            14
-        )
-
-        self.current_suit = random.choice(
-            HILO_SUITS
-        )
-
+        self.current_card = current_card
         self.rounds = 0
+
         self.finished = False
         self.message = None
 
-    # =====================================================
-    # RANK NAME
-    # =====================================================
+        self.timeout = 60
 
-    def rank_name(self, value):
-
-        return {
-            11: "Jack",
-            12: "Queen",
-            13: "King",
-            14: "Ace"
-        }.get(
-            value,
-            str(value)
-        )
-
-    # =====================================================
+    # --------------------------------------------------------
     # MULTIPLIER
-    # =====================================================
+    # --------------------------------------------------------
 
     def multiplier(self):
+        return 1 + (self.rounds * 0.14)
 
-        return 1 + (
-            self.rounds * 0.14
-        )
+    # --------------------------------------------------------
+    # PAYOUT
+    # --------------------------------------------------------
 
-    # =====================================================
-    # CURRENT CARD
-    # =====================================================
+    def payout(self):
+        return round(self.bet * self.multiplier(), 4)
 
-    def current_card_file(self):
+    # --------------------------------------------------------
+    # EMBED
+    # --------------------------------------------------------
 
-        return hilo_card_file(
-            self.current_rank,
-            self.current_suit
-        )
-
-    # =====================================================
-    # GAME EMBED
-    # =====================================================
-
-    def game_embed(self):
-
-        multiplier = self.multiplier()
-
-        payout = self.bet * multiplier
+    def make_embed(self):
+        current = hilo_card_text(self.current_card)
 
         embed = brand(
-            "HiLo",
+            "🃏 HiLo",
             (
-                f"**Current Card:** "
-                f"{self.rank_name(self.current_rank)}\n\n"
-
-                f"**Next Card:** ❓\n\n"
-
-                f"**Higher or Lower?**\n\n"
-
-                f"**Current Streak:** "
-                f"{self.rounds}\n"
-
-                f"**Current Multi:** "
-                f"{multiplier:.2f}x\n"
-
-                f"**Current Payout:** "
-                f"{money(payout)} points"
+                f"**Bet:** {money(self.bet)}\n"
+                f"**Current Card:** {current}\n"
+                f"**Round:** {self.rounds}\n"
+                f"**Multiplier:** `{self.multiplier():.2f}x`\n"
+                f"**Cashout:** {money(self.payout())}"
             )
-        )
-
-        embed.set_image(
-            url="attachment://hilo_card.png"
         )
 
         return embed
 
-    # =====================================================
-    # GUESS
-    # =====================================================
+    # --------------------------------------------------------
+    # DISABLE GAME
+    # --------------------------------------------------------
 
-    async def guess(
-        self,
-        interaction,
-        higher
-    ):
+    def disable_all(self):
+        for child in self.children:
+            child.disabled = True
 
+    # --------------------------------------------------------
+    # SETTLE LOSS
+    # --------------------------------------------------------
+
+    async def lose_game(self, interaction: discord.Interaction, new_card):
         if self.finished:
-
-            await interaction.response.send_message(
-                "This HiLo game has already ended.",
-                ephemeral=True
-            )
-
-            return
-
-        # -------------------------------------------------
-        # DRAW NEXT CARD
-        # -------------------------------------------------
-
-        next_rank = random.randint(
-            2,
-            14
-        )
-
-        next_suit = random.choice(
-            HILO_SUITS
-        )
-
-        # -------------------------------------------------
-        # CHECK GUESS
-        # -------------------------------------------------
-
-        if higher:
-
-            won = (
-                next_rank >
-                self.current_rank
-            )
-
-        else:
-
-            won = (
-                next_rank <
-                self.current_rank
-            )
-
-        # =================================================
-        # LOSS
-        # =================================================
-
-        if not won:
-
-            self.finished = True
-
-            for item in self.children:
-                item.disabled = True
-
-            await bot.db.record_game(
-                self.owner_id,
-                self.bet,
-                0,
-                "hilo"
-            )
-
-            embed = brand(
-                "HiLo — Lost",
-                (
-                    f"**Previous Card:** "
-                    f"{self.rank_name(self.current_rank)}\n"
-
-                    f"**Next Card:** "
-                    f"{self.rank_name(next_rank)}\n\n"
-
-                    f"**Final Streak:** "
-                    f"{self.rounds}\n"
-
-                    f"**Final Multi:** "
-                    f"{self.multiplier():.2f}x\n\n"
-
-                    f"You lost **{money(self.bet)} points**."
-                ),
-                0xED4245
-            )
-
-            embed.set_image(
-                url="attachment://hilo_card.png"
-            )
-
-            next_file = hilo_card_file(
-                next_rank,
-                next_suit
-            )
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[next_file],
-                view=self
-            )
-
-            self.stop()
-
-            return
-
-        # =================================================
-        # WON ROUND
-        # =================================================
-
-        self.rounds += 1
-
-        self.current_rank = next_rank
-        self.current_suit = next_suit
-
-        # =================================================
-        # AUTO FINISH AFTER 8 ROUNDS
-        # =================================================
-
-        if self.rounds >= 8:
-
-            self.finished = True
-
-            payout = round(
-                self.bet * self.multiplier(),
-                4
-            )
-
-            for item in self.children:
-                item.disabled = True
-
-            await bot.db.change_balance(
-                self.owner_id,
-                payout,
-                "hilo_win"
-            )
-
-            await bot.db.record_game(
-                self.owner_id,
-                self.bet,
-                payout,
-                "hilo"
-            )
-
-            embed = brand(
-                "HiLo — Won",
-                (
-                    f"**Current Card:** "
-                    f"{self.rank_name(self.current_rank)}\n\n"
-
-                    f"**Final Streak:** "
-                    f"{self.rounds}\n"
-
-                    f"**Final Multi:** "
-                    f"{self.multiplier():.2f}x\n\n"
-
-                    f"{config.E['win']} "
-                    f"You won **{money(payout)} points**!"
-                ),
-                0x57F287
-            )
-
-            embed.set_image(
-                url="attachment://hilo_card.png"
-            )
-
-            final_file = hilo_card_file(
-                self.current_rank,
-                self.current_suit
-            )
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[final_file],
-                view=self
-            )
-
-            self.stop()
-
-            return
-
-        # =================================================
-        # NEXT ROUND
-        # =================================================
-
-        await interaction.response.edit_message(
-            embed=self.game_embed(),
-            attachments=[
-                self.current_card_file()
-            ],
-            view=self
-        )
-
-    # =====================================================
-    # HIGHER
-    # =====================================================
-
-    @discord.ui.button(
-        label="Higher",
-        style=discord.ButtonStyle.success,
-        emoji="⬆️",
-        row=0
-    )
-    async def higher(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.guess(
-            interaction,
-            True
-        )
-
-    # =====================================================
-    # LOWER
-    # =====================================================
-
-    @discord.ui.button(
-        label="Lower",
-        style=discord.ButtonStyle.primary,
-        emoji="⬇️",
-        row=0
-    )
-    async def lower(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.guess(
-            interaction,
-            False
-        )
-
-    # =====================================================
-    # CASH OUT
-    # =====================================================
-
-    @discord.ui.button(
-        label="Cash Out",
-        style=discord.ButtonStyle.success,
-        emoji="💰",
-        row=1
-    )
-    async def cashout(
-        self,
-        interaction,
-        button
-    ):
-
-        if self.finished:
-
-            await interaction.response.send_message(
-                "This HiLo game has already ended.",
-                ephemeral=True
-            )
-
-            return
-
-        # Must win at least one round
-        if self.rounds <= 0:
-
-            await interaction.response.send_message(
-                "You need to win at least one round before cashing out.",
-                ephemeral=True
-            )
-
             return
 
         self.finished = True
+        self.disable_all()
 
-        payout = round(
-            self.bet * self.multiplier(),
-            4
-        )
+        self.current_card = new_card
 
-        # Disable buttons
-        for item in self.children:
-            item.disabled = True
-
-        # -------------------------------------------------
-        # PAYOUT
-        # -------------------------------------------------
-
-        await bot.db.change_balance(
+        # IMPORTANT:
+        # Bet was already removed when the game started.
+        #
+        # record_game(..., payout=0) records the loss.
+        #
+        # DO NOT call change_balance() here.
+        await self.bot.db.record_game(
             self.owner_id,
-            payout,
-            "hilo_cashout"
+            self.bet,
+            0,
+            "hilo"
         )
 
-        await bot.db.record_game(
+        embed = brand(
+            "💥 HiLo — Lost",
+            (
+                f"**Bet:** {money(self.bet)}\n"
+                f"**Final Card:** {hilo_card_text(self.current_card)}\n"
+                f"**Rounds:** {self.rounds}\n\n"
+                f"💥 **You lost {money(self.bet)}.**"
+            )
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self
+        )
+
+        self.stop()
+
+    # --------------------------------------------------------
+    # WIN
+    # --------------------------------------------------------
+
+    async def win_game(self, interaction: discord.Interaction):
+        if self.finished:
+            return
+
+        self.finished = True
+        self.disable_all()
+
+        payout = self.payout()
+
+        # IMPORTANT:
+        # record_game() itself adds payout to balance.
+        #
+        # DO NOT do:
+        # await self.bot.db.change_balance(..., payout)
+        #
+        # Doing both would double the payout.
+        await self.bot.db.record_game(
             self.owner_id,
             self.bet,
             payout,
             "hilo"
         )
 
-        # -------------------------------------------------
-        # CASHOUT EMBED
-        # -------------------------------------------------
-
         embed = brand(
-            "HiLo — Cashed Out",
+            "🎉 HiLo — Won",
             (
-                f"**Current Card:** "
-                f"{self.rank_name(self.current_rank)}\n\n"
-
-                f"**Streak:** "
-                f"{self.rounds}\n"
-
-                f"**Multiplier:** "
-                f"{self.multiplier():.2f}x\n\n"
-
-                f"{config.E['win']} "
-                f"You cashed out **{money(payout)} points**!"
-            ),
-            0x57F287
-        )
-
-        embed.set_image(
-            url="attachment://hilo_card.png"
-        )
-
-        final_file = hilo_card_file(
-            self.current_rank,
-            self.current_suit
+                f"**Bet:** {money(self.bet)}\n"
+                f"**Rounds:** {self.rounds}\n"
+                f"**Multiplier:** `{self.multiplier():.2f}x`\n"
+                f"**Payout:** {money(payout)}\n\n"
+                f"🎉 **You won {money(payout)}!**"
+            )
         )
 
         await interaction.response.edit_message(
             embed=embed,
-            attachments=[final_file],
             view=self
         )
 
         self.stop()
 
-    # =====================================================
+    # --------------------------------------------------------
+    # CASHOUT
+    # --------------------------------------------------------
+
+    async def cashout_message(self, interaction):
+        if self.finished:
+            return
+
+        if self.rounds <= 0:
+            await interaction.response.send_message(
+                "❌ You need to play at least one round before cashing out.",
+                ephemeral=True
+            )
+            return
+
+        await self.win_game(interaction)
+
+    # --------------------------------------------------------
+    # HIGHER / LOWER
+    # --------------------------------------------------------
+
+    async def guess(self, interaction: discord.Interaction, higher: bool):
+        if self.finished:
+            await interaction.response.send_message(
+                "❌ This HiLo game has already ended.",
+                ephemeral=True
+            )
+            return
+
+        new_card = hilo_random_card()
+
+        old_value = self.current_card["value"]
+        new_value = new_card["value"]
+
+        # Equal cards are treated as a loss.
+        if new_value == old_value:
+            await self.lose_game(interaction, new_card)
+            return
+
+        correct = (
+            new_value > old_value
+            if higher
+            else new_value < old_value
+        )
+
+        if not correct:
+            await self.lose_game(interaction, new_card)
+            return
+
+        # Correct guess
+        self.current_card = new_card
+        self.rounds += 1
+
+        # Automatic win at 8 rounds
+        if self.rounds >= 8:
+            await self.win_game(interaction)
+            return
+
+        # Continue game
+        await interaction.response.edit_message(
+            embed=self.make_embed(),
+            view=self
+        )
+
+    # --------------------------------------------------------
+    # HIGHER BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Higher",
+        style=discord.ButtonStyle.green,
+        emoji="⬆️",
+        row=0
+    )
+    async def higher_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.guess(interaction, True)
+
+    # --------------------------------------------------------
+    # LOWER BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Lower",
+        style=discord.ButtonStyle.red,
+        emoji="⬇️",
+        row=0
+    )
+    async def lower_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.guess(interaction, False)
+
+    # --------------------------------------------------------
+    # CASHOUT BUTTON
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="Cash Out",
+        style=discord.ButtonStyle.blurple,
+        emoji="💰",
+        row=1
+    )
+    async def cashout_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.cashout_message(interaction)
+
+    # --------------------------------------------------------
     # TIMEOUT
-    # =====================================================
+    # --------------------------------------------------------
 
     async def on_timeout(self):
-
         if self.finished:
             return
 
         self.finished = True
+        self.disable_all()
 
-        for item in self.children:
-            item.disabled = True
+        # The user already paid the bet.
+        #
+        # If they timeout without cashing out, treat it as a loss.
+        await self.bot.db.record_game(
+            self.owner_id,
+            self.bet,
+            0,
+            "hilo"
+        )
 
         if self.message:
-
             try:
+                embed = brand(
+                    "⏰ HiLo — Timed Out",
+                    (
+                        f"**Bet:** {money(self.bet)}\n"
+                        f"**Rounds:** {self.rounds}\n\n"
+                        f"⏰ **Game timed out. You lost {money(self.bet)}.**"
+                    )
+                )
 
                 await self.message.edit(
+                    embed=embed,
                     view=self
                 )
 
-            except discord.HTTPException:
+            except Exception:
                 pass
 
 
-# =========================================================
+# ============================================================
 # HILO COMMAND
-# =========================================================
+# ============================================================
 
-@bot.command()
-async def hilo(
-    ctx,
-    bet: str
-):
+@bot.command(name="hilo", aliases=["hl"])
+@commands.cooldown(1, 2, commands.BucketType.user)
+async def hilo(ctx, *, bet: str = None):
 
     if not await bot.game_allowed(ctx):
         return
 
-    # =====================================================
-    # DETERMINE BET
-    # =====================================================
-
-    try:
-
-        bet_lower = bet.lower().strip()
-
-        # -------------------------------------------------
-        # GET USER BALANCE FOR ALL / HALF
-        # -------------------------------------------------
-
-        if bet_lower in (
-            "all",
-            "max",
-            "half"
-        ):
-
-            row = await bot.db.user(
-                ctx.author.id
-            )
-
-            if not row:
-
-                await ctx.send(
-                    "Your account could not be found."
-                )
-
-                return
-
-            balance = Decimal(
-                str(row["balance"])
-            )
-
-            # ALL / MAX
-            if bet_lower in (
-                "all",
-                "max"
-            ):
-
-                amount = parse_amount(
-                    str(balance)
-                )
-
-            # HALF
-            else:
-
-                half_balance = (
-                    balance /
-                    Decimal("2")
-                )
-
-                amount = parse_amount(
-                    str(half_balance)
-                )
-
-        # -------------------------------------------------
-        # NORMAL AMOUNT
-        # -------------------------------------------------
-
-        else:
-
-            amount = parse_amount(
-                bet
-            )
-
-    except ValueError as error:
-
+    if not bet:
         await ctx.send(
-            str(error)
+            embed=brand(
+                "🃏 HiLo",
+                (
+                    "Use:\n"
+                    "`.hilo 100`\n"
+                    "`.hilo half`\n"
+                    "`.hilo all`\n"
+                    "`.hilo max`"
+                )
+            )
         )
-
         return
 
-    # =====================================================
-    # VALIDATE BET
-    # =====================================================
+    # --------------------------------------------------------
+    # GET BALANCE
+    # --------------------------------------------------------
+
+    row = await bot.db.user(ctx.author.id)
+
+    balance = float(row["balance"])
+
+    # --------------------------------------------------------
+    # PARSE BET
+    # --------------------------------------------------------
+
+    bet_lower = bet.lower().strip()
+
+    if bet_lower in ("all", "max"):
+        amount = balance
+
+    elif bet_lower == "half":
+        amount = balance / 2
+
+    else:
+        try:
+            amount = float(parse_amount(bet))
+        except Exception:
+            await ctx.send(
+                embed=brand(
+                    "❌ Invalid Bet",
+                    "Please enter a valid amount."
+                )
+            )
+            return
+
+    # --------------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------------
 
     if amount <= 0:
-
         await ctx.send(
-            "Bet must be greater than zero."
+            embed=brand(
+                "❌ Invalid Bet",
+                "Your bet must be greater than `0`."
+            )
         )
-
         return
 
-    # =====================================================
-    # TAKE BET
-    # =====================================================
+    if amount > balance:
+        await ctx.send(
+            embed=brand(
+                "❌ Insufficient Balance",
+                (
+                    f"You only have **{money(balance)}** "
+                    "available."
+                )
+            )
+        )
+        return
 
-    if not await bot.db.change_balance(
+    # --------------------------------------------------------
+    # ROUNDING
+    # --------------------------------------------------------
+
+    amount = round(amount, 4)
+
+    # --------------------------------------------------------
+    # TAKE BET
+    # --------------------------------------------------------
+
+    success = await bot.db.change_balance(
         ctx.author.id,
         -amount,
-        "hilo_bet"
-    ):
-
-        await ctx.send(
-            "Insufficient balance."
-        )
-
-        return
-
-    # =====================================================
-    # CREATE GAME
-    # =====================================================
-
-    view = HiloView(
-        ctx.author,
-        amount
+        "hilo_bet",
+        "HiLo bet"
     )
 
-    # =====================================================
-    # GET CARD
-    # =====================================================
+    if not success:
+        await ctx.send(
+            embed=brand(
+                "❌ Bet Failed",
+                "You don't have enough balance."
+            )
+        )
+        return
+
+    # --------------------------------------------------------
+    # CREATE FIRST CARD
+    # --------------------------------------------------------
+
+    first_card = hilo_random_card()
+
+    view = HiloView(
+        bot=bot,
+        owner_id=ctx.author.id,
+        bet=amount,
+        current_card=first_card
+    )
+
+    # --------------------------------------------------------
+    # CARD IMAGE
+    # --------------------------------------------------------
+
+    card_path = hilo_card_path(first_card)
+
+    file = None
+
+    if card_path:
+        try:
+            file = discord.File(
+                card_path,
+                filename="hilo_card.png"
+            )
+        except Exception:
+            file = None
+
+    # --------------------------------------------------------
+    # SEND GAME
+    # --------------------------------------------------------
+
+    embed = view.make_embed()
+
+    if file:
+        embed.set_image(url="attachment://hilo_card.png")
 
     try:
 
-        card_file = view.current_card_file()
+        if file:
+            message = await ctx.send(
+                embed=embed,
+                file=file,
+                view=view
+            )
+        else:
+            message = await ctx.send(
+                embed=embed,
+                view=view
+            )
 
-    except FileNotFoundError as error:
+        view.message = message
 
-        # Refund bet
+    except Exception:
+
+        # If Discord fails to send the game,
+        # refund the original bet.
         await bot.db.change_balance(
             ctx.author.id,
             amount,
-            "hilo_card_error_refund"
+            "hilo_refund",
+            "HiLo message failed"
         )
 
-        await ctx.send(
-            f"HiLo card error: `{error}`"
-        )
-
-        return
-
-    # =====================================================
-    # SEND GAME
-    # =====================================================
-
-    message = await ctx.send(
-        embed=view.game_embed(),
-        file=card_file,
-        view=view
-    )
-
-    # Save message
-    view.message = message
+        raise
 
 
 @bot.command()
