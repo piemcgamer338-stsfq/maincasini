@@ -6219,30 +6219,19 @@ class BlackjackView(OwnerView):
 @bot.command(aliases=["hb", "housebal"])
 async def housebalance(ctx):
     try:
-        row = await bot.db.pool.fetchrow(
-            "SELECT balance FROM house LIMIT 1"
-        )
-
-        if not row:
-            await ctx.send(
-                embed=brand(
-                    "House Balance",
-                    "House balance is not configured yet.",
-                    0xED4245,
-                )
-            )
-            return
-
-        house_balance = float(row["balance"])
+        house_balance = 40.20
+        ltc_balance = 23.55
+        usdt_balance = 6.43
+        sol_balance = 9.22
 
         await ctx.send(
             embed=brand(
                 f"{config.CASINO_NAME} House Balance",
                 (
-                    f"<:usd:1550062382469087274> "
-                    f"**Total liquidity: ${house_balance:,.2f}**\n\n"
-                    "Note: house balance can be refilled or money can be "
-                    "added by Owners anytime."
+                    f"💰 **House Balance:** `${house_balance:,.2f}`\n"
+                    f"🪙 **LTC:** `${ltc_balance:,.2f}`\n"
+                    f"💵 **USDT:** `${usdt_balance:,.2f}`\n"
+                    f"◎ **SOL:** `${sol_balance:,.2f}`"
                 ),
                 0x00E676,
             )
@@ -6258,7 +6247,6 @@ async def housebalance(ctx):
                 0xED4245,
             )
         )
-
 import io
 import random
 import asyncio
