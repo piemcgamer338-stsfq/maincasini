@@ -876,7 +876,7 @@ from PIL import Image, ImageDraw, ImageFont
 BACCARAT_MIN_BET = Decimal("20")
 BACCARAT_PAYOUT = Decimal("1.92")
 
-# Card images are in the SAME folder as bot.py
+# Card images are directly beside bot.py
 CARD_IMAGE_DIR = Path(__file__).parent
 
 
@@ -928,11 +928,6 @@ BACCARAT_VALUES = {
 # HELPERS
 # =========================
 
-def baccarat_card_name(card):
-    rank, suit = card
-    return f"{rank}_of_{suit}"
-
-
 def baccarat_card_display(card):
     rank, suit = card
 
@@ -954,7 +949,11 @@ def baccarat_card_display(card):
 
 
 def baccarat_total(cards):
-    total = sum(BACCARAT_VALUES[rank] for rank, suit in cards)
+    total = sum(
+        BACCARAT_VALUES[rank]
+        for rank, suit in cards
+    )
+
     return total % 10
 
 
@@ -968,16 +967,17 @@ def baccarat_deck():
 
 def get_card_image(card):
     """
-    Loads images directly from the same directory as bot.py.
+    Card files are directly beside bot.py.
 
     Example:
-    bot.py
-    ace_of_clubs.png
-    10_of_clubs.png
-    jack_of_clubs.png
+        bot.py
+        ace_of_clubs.png
+        10_of_clubs.png
+        jack_of_clubs.png
     """
 
     rank, suit = card
+
     filename = f"{rank}_of_{suit}.png"
     path = CARD_IMAGE_DIR / filename
 
@@ -1002,7 +1002,7 @@ def format_points(value):
 
 
 # =========================
-# CREATE BACCARAT IMAGE
+# BACCARAT IMAGE
 # =========================
 
 def create_baccarat_image(
@@ -1023,7 +1023,7 @@ def create_baccarat_image(
 
     draw = ImageDraw.Draw(img)
 
-    # Border
+    # Gold border
     draw.rounded_rectangle(
         (15, 15, WIDTH - 15, HEIGHT - 15),
         radius=30,
@@ -1037,21 +1037,22 @@ def create_baccarat_image(
             "arialbd.ttf",
             42
         )
+
         section_font = ImageFont.truetype(
             "arialbd.ttf",
             30
         )
-        total_font = ImageFont.truetype(
-            "arialbd.ttf",
-            28
-        )
+
     except Exception:
         title_font = ImageFont.load_default()
         section_font = ImageFont.load_default()
-        total_font = ImageFont.load_default()
 
-    # Title
+    # =========================
+    # TITLE
+    # =========================
+
     title = "BACCARAT"
+
     bbox = draw.textbbox(
         (0, 0),
         title,
@@ -1069,10 +1070,11 @@ def create_baccarat_image(
     )
 
     # =========================
-    # CARD DRAWER
+    # CARD DRAWING
     # =========================
 
     def draw_cards(cards, y):
+
         card_width = 150
         card_height = 210
         gap = 25
@@ -1082,38 +1084,50 @@ def create_baccarat_image(
             + (len(cards) - 1) * gap
         )
 
-        start_x = (WIDTH - total_width) // 2
+        start_x = (
+            WIDTH - total_width
+        ) // 2
 
         for i, card in enumerate(cards):
-            x = start_x + i * (card_width + gap)
+
+            x = (
+                start_x
+                + i * (card_width + gap)
+            )
+
+            # White card background
+            draw.rounded_rectangle(
+                (
+                    x,
+                    y,
+                    x + card_width,
+                    y + card_height
+                ),
+                radius=12,
+                fill="white",
+                outline=(30, 30, 30),
+                width=2
+            )
 
             try:
+
                 card_img = get_card_image(card)
+
                 card_img.thumbnail(
-                    (card_width, card_height)
-                )
-
-                # White card background
-                draw.rounded_rectangle(
                     (
-                        x,
-                        y,
-                        x + card_width,
-                        y + card_height
-                    ),
-                    radius=12,
-                    fill="white",
-                    outline=(30, 30, 30),
-                    width=2
+                        card_width - 10,
+                        card_height - 10
+                    )
                 )
 
-                # Center image
                 px = x + (
-                    card_width - card_img.width
+                    card_width
+                    - card_img.width
                 ) // 2
 
                 py = y + (
-                    card_height - card_img.height
+                    card_height
+                    - card_img.height
                 ) // 2
 
                 img.paste(
@@ -1123,21 +1137,10 @@ def create_baccarat_image(
                 )
 
             except Exception:
-                # Fallback if image is missing
-                draw.rounded_rectangle(
-                    (
-                        x,
-                        y,
-                        x + card_width,
-                        y + card_height
-                    ),
-                    radius=12,
-                    fill="white",
-                    outline=(30, 30, 30),
-                    width=2
-                )
 
-                text = baccarat_card_display(card)
+                text = baccarat_card_display(
+                    card
+                )
 
                 tb = draw.textbbox(
                     (0, 0),
@@ -1148,10 +1151,10 @@ def create_baccarat_image(
                 draw.text(
                     (
                         x + (
-                            card_width -
-                            (tb[2] - tb[0])
+                            card_width
+                            - (tb[2] - tb[0])
                         ) / 2,
-                        y + 75
+                        y + 80
                     ),
                     text,
                     fill="black",
@@ -1162,11 +1165,9 @@ def create_baccarat_image(
     # DEALER
     # =========================
 
-    dealer_label = f"DEALER  •  TOTAL {dealer_total}"
-
     draw.text(
         (45, 100),
-        dealer_label,
+        f"DEALER  •  TOTAL {dealer_total}",
         fill="white",
         font=section_font
     )
@@ -1180,11 +1181,9 @@ def create_baccarat_image(
     # PLAYER
     # =========================
 
-    player_label = f"PLAYER  •  TOTAL {player_total}"
-
     draw.text(
         (45, 385),
-        player_label,
+        f"PLAYER  •  TOTAL {player_total}",
         fill="white",
         font=section_font
     )
@@ -1194,7 +1193,10 @@ def create_baccarat_image(
         425
     )
 
-    # Save
+    # =========================
+    # SAVE IMAGE
+    # =========================
+
     output = io.BytesIO()
 
     img.save(
@@ -1227,6 +1229,7 @@ async def bacc(ctx, bet=None, choice=None):
     # =========================
 
     try:
+
         allowed = await bot.game_allowed(ctx)
 
         if not allowed:
@@ -1236,10 +1239,11 @@ async def bacc(ctx, bet=None, choice=None):
         pass
 
     # =========================
-    # ARGUMENT CHECK
+    # USAGE
     # =========================
 
     if bet is None or choice is None:
+
         embed = brand(
             "🎴 Baccarat",
             (
@@ -1256,11 +1260,14 @@ async def bacc(ctx, bet=None, choice=None):
                 "**Player** = bet on Player\n"
                 "**Dealer** = bet on Dealer\n\n"
 
-                f"Minimum bet: **{format_points(BACCARAT_MIN_BET)} points**"
+                f"Minimum bet: "
+                f"**{format_points(BACCARAT_MIN_BET)} points**"
             )
         )
 
-        return await ctx.send(embed=embed)
+        return await ctx.send(
+            embed=embed
+        )
 
     # =========================
     # CHOICE
@@ -1280,6 +1287,7 @@ async def bacc(ctx, bet=None, choice=None):
     }
 
     if choice not in choice_aliases:
+
         embed = brand(
             "🎴 Baccarat",
             (
@@ -1290,35 +1298,53 @@ async def bacc(ctx, bet=None, choice=None):
             )
         )
 
-        return await ctx.send(embed=embed)
+        return await ctx.send(
+            embed=embed
+        )
 
     choice = choice_aliases[choice]
 
     # =========================
-    # GET BALANCE
+    # BALANCE
     # =========================
 
-    row = await bot.db.user(ctx.author.id)
+    row = await bot.db.user(
+        ctx.author.id
+    )
 
-    balance = Decimal(str(row["balance"]))
+    balance = Decimal(
+        str(row["balance"])
+    )
 
     # =========================
     # PARSE BET
     # =========================
 
-    bet_text = str(bet).lower().strip()
+    bet_text = str(
+        bet
+    ).lower().strip()
 
     try:
 
         if bet_text in ("all", "max"):
+
             amount = balance
 
         elif bet_text == "half":
-            amount = balance / Decimal("2")
+
+            amount = (
+                balance
+                / Decimal("2")
+            )
 
         else:
+
             amount = Decimal(
-                str(parse_amount(bet_text))
+                str(
+                    parse_amount(
+                        bet_text
+                    )
+                )
             )
 
     except Exception:
@@ -1328,7 +1354,9 @@ async def bacc(ctx, bet=None, choice=None):
             "Invalid bet amount."
         )
 
-        return await ctx.send(embed=embed)
+        return await ctx.send(
+            embed=embed
+        )
 
     amount = amount.quantize(
         Decimal("0.01"),
@@ -1336,7 +1364,7 @@ async def bacc(ctx, bet=None, choice=None):
     )
 
     # =========================
-    # BET VALIDATION
+    # VALIDATE BET
     # =========================
 
     if amount < BACCARAT_MIN_BET:
@@ -1349,7 +1377,9 @@ async def bacc(ctx, bet=None, choice=None):
             )
         )
 
-        return await ctx.send(embed=embed)
+        return await ctx.send(
+            embed=embed
+        )
 
     if amount > balance:
 
@@ -1361,80 +1391,9 @@ async def bacc(ctx, bet=None, choice=None):
             )
         )
 
-        return await ctx.send(embed=embed)
-
-    # =========================
-    # PROVABLY FAIR SEEDS
-    # =========================
-
-    server_seed = secrets.token_hex(32)
-
-    server_seed_hash = hashlib.sha256(
-        server_seed.encode()
-    ).hexdigest()
-
-    # User ID is used as client seed
-    client_seed = str(ctx.author.id)
-
-    # Create deterministic RNG
-    combined_seed = (
-        f"{server_seed}:{client_seed}"
-    )
-
-    seed_hash = hashlib.sha256(
-        combined_seed.encode()
-    ).hexdigest()
-
-    rng = random.Random(
-        int(seed_hash, 16)
-    )
-
-    # =========================
-    # CREATE DECK
-    # =========================
-
-    deck = baccarat_deck()
-
-    rng.shuffle(deck)
-
-    # =========================
-    # DEAL CARDS
-    # =========================
-
-    player_cards = [
-        deck[0],
-        deck[2]
-    ]
-
-    dealer_cards = [
-        deck[1],
-        deck[3]
-    ]
-
-    # =========================
-    # CALCULATE TOTALS
-    # =========================
-
-    player_total = baccarat_total(
-        player_cards
-    )
-
-    dealer_total = baccarat_total(
-        dealer_cards
-    )
-
-    # =========================
-    # DETERMINE WINNER
-    # =========================
-
-    if player_total > dealer_total:
-        winner = "player"
-
-    elif dealer_total > player_total:
-        winner = "dealer"
-
-    else:
-        winner = "tie"
+        return await ctx.send(
+            embed=embed
+        )
 
     # =========================
     # DEDUCT BET
@@ -1454,15 +1413,116 @@ async def bacc(ctx, bet=None, choice=None):
             "Your balance changed before the bet could be placed."
         )
 
-        return await ctx.send(embed=embed)
+        return await ctx.send(
+            embed=embed
+        )
 
     # =========================
-    # PAYOUT
+    # PROVABLY FAIR
+    # =========================
+
+    server_seed = secrets.token_hex(32)
+
+    server_seed_hash = hashlib.sha256(
+        server_seed.encode()
+    ).hexdigest()
+
+    client_seed = str(
+        ctx.author.id
+    )
+
+    combined_seed = (
+        f"{server_seed}:{client_seed}"
+    )
+
+    seed_hash = hashlib.sha256(
+        combined_seed.encode()
+    ).hexdigest()
+
+    rng = random.Random(
+        int(seed_hash, 16)
+    )
+
+    # =========================
+    # DEAL
+    # =========================
+
+    deck = baccarat_deck()
+
+    rng.shuffle(deck)
+
+    player_cards = [
+        deck[0],
+        deck[2]
+    ]
+
+    dealer_cards = [
+        deck[1],
+        deck[3]
+    ]
+
+    player_total = baccarat_total(
+        player_cards
+    )
+
+    dealer_total = baccarat_total(
+        dealer_cards
+    )
+
+    # =========================
+    # DETERMINE WINNER
+    # =========================
+
+    if player_total > dealer_total:
+
+        winner = "player"
+
+    elif dealer_total > player_total:
+
+        winner = "dealer"
+
+    else:
+
+        winner = "tie"
+
+    # =========================
+    # DEALING EMBED
+    # =========================
+
+    dealing_embed = brand(
+        "🎴 Baccarat - Higher Card Wins",
+        (
+            f"**Bet:** {format_points(amount)} points\n"
+            f"**Choice:** {choice.title()}\n\n"
+            "🃏 **Dealing Card...**"
+        )
+    )
+
+    # Grey embed
+    dealing_embed.color = discord.Color.light_grey()
+
+    # Send initial message
+    message = await ctx.send(
+        embed=dealing_embed
+    )
+
+    # =========================
+    # 3 SECOND DEALING DELAY
+    # =========================
+
+    await discord.utils.sleep_until(
+        discord.utils.utcnow()
+        + __import__("datetime").timedelta(
+            seconds=3
+        )
+    )
+
+    # =========================
+    # RESULT / PAYOUT
     # =========================
 
     if winner == "tie":
 
-        # Tie = return original bet
         payout = amount
 
         await bot.db.record_game(
@@ -1472,36 +1532,8 @@ async def bacc(ctx, bet=None, choice=None):
             "baccarat"
         )
 
-        result_text = (
-            f"**Baccarat Results - TIE!**\n\n"
-            f"Player: **{baccarat_card_display(player_cards[0])}, "
-            f"{baccarat_card_display(player_cards[1])}** "
-            f"(Total: **{player_total}**)\n\n"
-            f"Dealer: **{baccarat_card_display(dealer_cards[0])}, "
-            f"{baccarat_card_display(dealer_cards[1])}** "
-            f"(Total: **{dealer_total}**)\n\n"
-            f"Your choice: **{choice.title()}**\n\n"
-            f"Your bet was returned: **{format_points(payout)} points**"
-        )
-
-    elif winner == choice:
-
-        payout = (
-            amount * BACCARAT_PAYOUT
-        ).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_DOWN
-        )
-
-        # IMPORTANT:
-        # record_game() credits the payout itself.
-        # DO NOT call change_balance(+payout).
-
-        await bot.db.record_game(
-            ctx.author.id,
-            float(amount),
-            float(payout),
-            "baccarat"
+        result_title = (
+            "🎴 Baccarat - TIE"
         )
 
         result_text = (
@@ -1513,8 +1545,47 @@ async def bacc(ctx, bet=None, choice=None):
             f"{baccarat_card_display(dealer_cards[1])}** "
             f"(Total: **{dealer_total}**)\n\n"
             f"Your choice: **{choice.title()}**\n\n"
-            f"You won **{format_points(payout)} points**!"
+            f"🤝 **Tie! Your {format_points(payout)} point bet was returned.**"
         )
+
+        result_color = discord.Color.gold()
+
+    elif winner == choice:
+
+        payout = (
+            amount * BACCARAT_PAYOUT
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN
+        )
+
+        # record_game() credits payout.
+        # DO NOT change_balance(+payout).
+
+        await bot.db.record_game(
+            ctx.author.id,
+            float(amount),
+            float(payout),
+            "baccarat"
+        )
+
+        result_title = (
+            "🎴 Baccarat - WIN"
+        )
+
+        result_text = (
+            f"**Baccarat Results - HIGHER Wins!**\n\n"
+            f"Player: **{baccarat_card_display(player_cards[0])}, "
+            f"{baccarat_card_display(player_cards[1])}** "
+            f"(Total: **{player_total}**)\n\n"
+            f"Dealer: **{baccarat_card_display(dealer_cards[0])}, "
+            f"{baccarat_card_display(dealer_cards[1])}** "
+            f"(Total: **{dealer_total}**)\n\n"
+            f"Your choice: **{choice.title()}**\n\n"
+            f"🟢 You won **{format_points(payout)} points**!"
+        )
+
+        result_color = discord.Color.green()
 
     else:
 
@@ -1527,6 +1598,10 @@ async def bacc(ctx, bet=None, choice=None):
             "baccarat"
         )
 
+        result_title = (
+            "🎴 Baccarat - LOSS"
+        )
+
         result_text = (
             f"**Baccarat Results - HIGHER Wins!**\n\n"
             f"Player: **{baccarat_card_display(player_cards[0])}, "
@@ -1536,11 +1611,13 @@ async def bacc(ctx, bet=None, choice=None):
             f"{baccarat_card_display(dealer_cards[1])}** "
             f"(Total: **{dealer_total}**)\n\n"
             f"Your choice: **{choice.title()}**\n\n"
-            f"You lost **{format_points(amount)} points**."
+            f"🔴 You lost **{format_points(amount)} points**."
         )
 
+        result_color = discord.Color.red()
+
     # =========================
-    # CREATE IMAGE
+    # RESULT IMAGE
     # =========================
 
     try:
@@ -1566,7 +1643,7 @@ async def bacc(ctx, bet=None, choice=None):
         image_file = None
 
     # =========================
-    # EMBED
+    # FINAL EMBED
     # =========================
 
     result_text += (
@@ -1576,26 +1653,32 @@ async def bacc(ctx, bet=None, choice=None):
         f"**Client Seed:** `{client_seed}`"
     )
 
-    embed = brand(
-        "🎴 Baccarat",
+    result_embed = brand(
+        result_title,
         result_text
     )
 
+    # Green = win
+    # Red = loss
+    # Gold = tie
+    result_embed.color = result_color
+
     if image_file:
 
-        embed.set_image(
+        result_embed.set_image(
             url="attachment://baccarat.png"
         )
 
-        await ctx.send(
-            embed=embed,
-            file=image_file
+        # Edit the SAME dealing message
+        await message.edit(
+            embed=result_embed,
+            attachments=[image_file]
         )
 
     else:
 
-        await ctx.send(
-            embed=embed
+        await message.edit(
+            embed=result_embed
         )
         
 # ============================================================
