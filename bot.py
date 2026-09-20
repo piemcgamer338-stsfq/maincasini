@@ -861,32 +861,62 @@ from discord.ext import commands
 # MARKET GAME
 # =========================================================
 
+import random
+from decimal import Decimal, InvalidOperation
+
+
 MARKET_PAYOUT = Decimal("1.92")
+
+# Change this if you already have a different minimum bet.
+MINIMUM_BET = Decimal("1")
 
 
 class MarketView(discord.ui.View):
+
     def __init__(self, ctx, bet):
         super().__init__(timeout=30)
+
         self.ctx = ctx
         self.bet = Decimal(str(bet))
         self.finished = False
+        self.message = None
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    # -----------------------------------------------------
+    # ONLY THE PLAYER WHO STARTED THE GAME CAN USE IT
+    # -----------------------------------------------------
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction
+    ) -> bool:
+
         if interaction.user.id != self.ctx.author.id:
+
             await interaction.response.send_message(
                 "This market game belongs to someone else.",
                 ephemeral=True
             )
+
             return False
 
         return True
 
-    async def finish_game(self, interaction: discord.Interaction, direction: str):
+    # -----------------------------------------------------
+    # FINISH GAME
+    # -----------------------------------------------------
+
+    async def finish_game(
+        self,
+        interaction: discord.Interaction,
+        direction: str
+    ):
+
         if self.finished:
             return
 
         self.finished = True
 
+        # Disable buttons immediately
         for child in self.children:
             child.disabled = True
 
@@ -894,24 +924,48 @@ class MarketView(discord.ui.View):
         # MARKET RESULT
         # -------------------------------------------------
 
-        market_result = random.choice(["UP", "DOWN"])
+        market_result = random.choice(
+            ["UP", "DOWN"]
+        )
+
         won = market_result == direction
 
-        if won:
-            # 1.92x is the TOTAL payout.
-            #
-            # 50 bet  = 96 total payout
-            # 100 bet = 192 total payout
+        # -------------------------------------------------
+        # WIN
+        # -------------------------------------------------
 
+        if won:
+
+            # Bet was already deducted.
+            #
+            # Example:
+            # Bet = 100
+            # 1.92x total payout = 192
+            #
             payout = self.bet * MARKET_PAYOUT
 
-            success = await bot.db.change_balance(
-                self.ctx.author.id,
-                payout,
-                "market_win"
-            )
+            try:
+
+                success = await bot.db.change_balance(
+                    self.ctx.author.id,
+                    float(payout),
+                    "market_win"
+                )
+
+            except Exception as error:
+
+                print(
+                    f"[MARKET] Payout error: {error}"
+                )
+
+                success = False
+
+            # -------------------------------------------------
+            # PAYOUT FAILED
+            # -------------------------------------------------
 
             if not success:
+
                 self.finished = False
 
                 for child in self.children:
@@ -920,12 +974,21 @@ class MarketView(discord.ui.View):
                 await interaction.response.send_message(
                     embed=brand(
                         "Market Error",
-                        "The payout could not be processed. Your game was not completed.",
+                        (
+                            "The payout could not be processed.\n\n"
+                            "Your game was not completed. "
+                            "Please try again."
+                        ),
                         0xED4245
                     ),
                     ephemeral=True
                 )
+
                 return
+
+            # -------------------------------------------------
+            # WIN RESULT
+            # -------------------------------------------------
 
             result_text = (
                 f"**Result:** {market_result}\n"
@@ -935,7 +998,16 @@ class MarketView(discord.ui.View):
                 f"**Multiplier:** {MARKET_PAYOUT}x"
             )
 
+            result_colour = 0x57F287
+
+            result_title = "📈 Market Won!"
+
+        # -------------------------------------------------
+        # LOSS
+        # -------------------------------------------------
+
         else:
+
             result_text = (
                 f"**Result:** {market_result}\n"
                 f"**Your Choice:** {direction}\n"
@@ -944,45 +1016,81 @@ class MarketView(discord.ui.View):
                 f"**Multiplier:** {MARKET_PAYOUT}x"
             )
 
+            result_colour = 0xED4245
+
+            result_title = "📉 Market Lost"
+
+        # -------------------------------------------------
+        # RESULT EMBED
+        # -------------------------------------------------
+
         embed = brand(
-            "Market",
-            result_text
+            result_title,
+            result_text,
+            result_colour
         )
+
+        embed.set_footer(
+            text="Market"
+        )
+
+        # -------------------------------------------------
+        # UPDATE MESSAGE
+        # -------------------------------------------------
 
         await interaction.response.edit_message(
             embed=embed,
             view=self
         )
 
+        self.stop()
+
+    # =====================================================
+    # UP BUTTON
+    # =====================================================
+
     @discord.ui.button(
         label="UP",
-        style=discord.ButtonStyle.primary
+        style=discord.ButtonStyle.primary,
+        emoji="📈"
     )
     async def up_button(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         await self.finish_game(
             interaction,
             "UP"
         )
 
+    # =====================================================
+    # DOWN BUTTON
+    # =====================================================
+
     @discord.ui.button(
         label="DOWN",
-        style=discord.ButtonStyle.secondary
+        style=discord.ButtonStyle.secondary,
+        emoji="📉"
     )
     async def down_button(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         await self.finish_game(
             interaction,
             "DOWN"
         )
 
+    # =====================================================
+    # TIMEOUT
+    # =====================================================
+
     async def on_timeout(self):
+
         if self.finished:
             return
 
@@ -991,30 +1099,50 @@ class MarketView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
+        if self.message:
+
+            try:
+
+                await self.message.edit(
+                    view=self
+                )
+
+            except discord.HTTPException:
+                pass
+
+        self.stop()
+
 
 # =========================================================
 # MARKET COMMAND
 # =========================================================
 
 @bot.command(name="market")
-async def market(ctx, amount: str = None):
+async def market(
+    ctx,
+    amount: str = None
+):
 
     # -----------------------------------------------------
     # USAGE
     # -----------------------------------------------------
 
     if amount is None:
+
         await ctx.send(
             embed=brand(
                 "Market",
                 (
-                    "Usage:\n"
+                    "**Usage:**\n"
                     "`.market <amount>`\n\n"
-                    f"Minimum bet: {MINIMUM_BET:,.0f} points\n"
-                    f"Payout: {MARKET_PAYOUT}x total"
+                    f"**Minimum Bet:** "
+                    f"{MINIMUM_BET:,.0f} points\n"
+                    f"**Payout:** "
+                    f"{MARKET_PAYOUT}x total"
                 )
             )
         )
+
         return
 
     # -----------------------------------------------------
@@ -1022,8 +1150,13 @@ async def market(ctx, amount: str = None):
     # -----------------------------------------------------
 
     try:
-        bet = Decimal(str(amount))
-    except Exception:
+
+        bet = Decimal(
+            str(amount)
+        )
+
+    except (InvalidOperation, ValueError):
+
         await ctx.send(
             embed=brand(
                 "Market",
@@ -1031,13 +1164,27 @@ async def market(ctx, amount: str = None):
                 0xED4245
             )
         )
+
         return
 
     # -----------------------------------------------------
     # VALIDATE BET
     # -----------------------------------------------------
 
+    if not bet.is_finite():
+
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Enter a valid bet amount.",
+                0xED4245
+            )
+        )
+
+        return
+
     if bet <= 0:
+
         await ctx.send(
             embed=brand(
                 "Market",
@@ -1045,25 +1192,52 @@ async def market(ctx, amount: str = None):
                 0xED4245
             )
         )
+
         return
 
     if bet < MINIMUM_BET:
+
         await ctx.send(
             embed=brand(
                 "Market",
-                f"Minimum bet is {MINIMUM_BET:,.0f} points.",
+                (
+                    f"Minimum bet is "
+                    f"**{MINIMUM_BET:,.0f} points**."
+                ),
                 0xED4245
             )
         )
+
         return
 
     # -----------------------------------------------------
     # GET USER
     # -----------------------------------------------------
 
-    row = await bot.db.user(ctx.author.id)
+    try:
+
+        row = await bot.db.user(
+            ctx.author.id
+        )
+
+    except Exception as error:
+
+        print(
+            f"[MARKET] Database error: {error}"
+        )
+
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Database error. Please try again.",
+                0xED4245
+            )
+        )
+
+        return
 
     if not row:
+
         await ctx.send(
             embed=brand(
                 "Market",
@@ -1071,46 +1245,86 @@ async def market(ctx, amount: str = None):
                 0xED4245
             )
         )
+
         return
 
-    balance = Decimal(str(row["balance"]))
+    # -----------------------------------------------------
+    # BALANCE
+    # -----------------------------------------------------
+
+    try:
+
+        balance = Decimal(
+            str(row["balance"])
+        )
+
+    except Exception:
+
+        await ctx.send(
+            embed=brand(
+                "Market",
+                "Your balance could not be read.",
+                0xED4245
+            )
+        )
+
+        return
 
     # -----------------------------------------------------
     # BALANCE CHECK
     # -----------------------------------------------------
 
     if balance < bet:
+
         await ctx.send(
             embed=brand(
                 "Market",
                 (
-                    "Insufficient balance.\n\n"
-                    f"**Balance:** {balance:,.2f} points\n"
-                    f"**Bet:** {bet:,.2f} points"
+                    "**Insufficient balance.**\n\n"
+                    f"**Balance:** "
+                    f"{balance:,.2f} points\n"
+                    f"**Bet:** "
+                    f"{bet:,.2f} points"
                 ),
                 0xED4245
             )
         )
+
         return
 
     # -----------------------------------------------------
     # DEDUCT BET
     # -----------------------------------------------------
 
-    deducted = await bot.db.change_balance(
-        ctx.author.id,
-        -bet,
-        "market_bet"
-    )
+    try:
+
+        deducted = await bot.db.change_balance(
+            ctx.author.id,
+            -float(bet),
+            "market_bet"
+        )
+
+    except Exception as error:
+
+        print(
+            f"[MARKET] Bet deduction error: {error}"
+        )
+
+        deducted = False
 
     if not deducted:
+
         await ctx.send(
             embed=brand(
                 "Market",
-                "Your bet could not be processed. Please try again.",
+                (
+                    "Your bet could not be processed. "
+                    "Please try again."
+                ),
                 0xED4245
             )
         )
+
         return
 
     # -----------------------------------------------------
@@ -1118,7 +1332,7 @@ async def market(ctx, amount: str = None):
     # -----------------------------------------------------
 
     embed = brand(
-        "Market",
+        "📊 Market Prediction",
         (
             f"**Bet:** {bet:,.2f} points\n"
             f"**Payout:** {MARKET_PAYOUT}x total\n\n"
@@ -1126,15 +1340,52 @@ async def market(ctx, amount: str = None):
         )
     )
 
+    # -----------------------------------------------------
+    # CREATE VIEW
+    # -----------------------------------------------------
+
     view = MarketView(
         ctx,
         bet
     )
 
-    await ctx.send(
-        embed=embed,
-        view=view
-    )
+    # -----------------------------------------------------
+    # SEND GAME
+    # -----------------------------------------------------
+
+    try:
+
+        message = await ctx.send(
+            embed=embed,
+            view=view
+        )
+
+        view.message = message
+
+    except Exception as error:
+
+        print(
+            f"[MARKET] Message error: {error}"
+        )
+
+        # If Discord fails after the bet was deducted,
+        # refund the player.
+
+        try:
+
+            await bot.db.change_balance(
+                ctx.author.id,
+                float(bet),
+                "market_refund"
+            )
+
+        except Exception as refund_error:
+
+            print(
+                f"[MARKET] Refund error: {refund_error}"
+            )
+
+        return
 
 # =========================================================
 # CRAZY DICE
