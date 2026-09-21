@@ -852,18 +852,691 @@ async def gc(ctx):
 
     view.message = message
 
-# =========================================================
-# WAGER RACE
-# .race
-# =========================================================
+# ============================================================
+# WAGER RACE - IMAGE LEADERBOARD
+# ============================================================
+
+import io
+import aiohttp
+import discord
+from PIL import Image, ImageDraw, ImageFont
+
+
+# ------------------------------------------------------------
+# SETTINGS
+# ------------------------------------------------------------
+
+RACE_WIDTH = 1032
+RACE_HEIGHT = 570
+
+
+# ------------------------------------------------------------
+# FONT HELPER
+# ------------------------------------------------------------
+
+def race_font(size, bold=False):
+
+    paths = []
+
+    if bold:
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        ]
+    else:
+        paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ]
+
+    for path in paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+
+    return ImageFont.load_default()
+
+
+# ------------------------------------------------------------
+# CENTER TEXT
+# ------------------------------------------------------------
+
+def race_center_text(draw, xy, text, font, fill):
+
+    bbox = draw.textbbox(
+        (0, 0),
+        text,
+        font=font
+    )
+
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+
+    x = xy[0] - width / 2
+    y = xy[1] - height / 2
+
+    draw.text(
+        (x, y),
+        text,
+        font=font,
+        fill=fill
+    )
+
+
+# ------------------------------------------------------------
+# CIRCLE AVATAR
+# ------------------------------------------------------------
+
+def race_avatar(image, avatar, center, size):
+
+    avatar = avatar.convert("RGB")
+
+    avatar = avatar.resize(
+        (size, size),
+        Image.Resampling.LANCZOS
+    )
+
+    mask = Image.new(
+        "L",
+        (size, size),
+        0
+    )
+
+    mask_draw = ImageDraw.Draw(mask)
+
+    mask_draw.ellipse(
+        (0, 0, size, size),
+        fill=255
+    )
+
+    x = int(center[0] - size / 2)
+    y = int(center[1] - size / 2)
+
+    image.paste(
+        avatar,
+        (x, y),
+        mask
+    )
+
+
+# ------------------------------------------------------------
+# GLOW CIRCLE
+# ------------------------------------------------------------
+
+def race_circle_glow(
+    image,
+    center,
+    radius
+):
+
+    glow = Image.new(
+        "RGBA",
+        image.size,
+        (0, 0, 0, 0)
+    )
+
+    draw = ImageDraw.Draw(glow)
+
+    for i in range(18, 0, -1):
+
+        r = radius + i * 2
+
+        alpha = max(
+            5,
+            80 - i * 4
+        )
+
+        draw.ellipse(
+            (
+                center[0] - r,
+                center[1] - r,
+                center[0] + r,
+                center[1] + r
+            ),
+            outline=(60, 170, 255, alpha),
+            width=3
+        )
+
+    image.alpha_composite(glow)
+
+
+# ------------------------------------------------------------
+# CROWN
+# ------------------------------------------------------------
+
+def draw_crown(
+    draw,
+    center_x,
+    center_y,
+    width,
+    height,
+    number
+):
+
+    x1 = center_x - width // 2
+    x2 = center_x + width // 2
+    y1 = center_y
+    y2 = center_y + height
+
+    gold = (225, 240, 255)
+    gold_dark = (120, 170, 225)
+
+    # Crown shape
+    points = [
+        (x1, y2),
+        (x1 + width * 0.10, y1 + height * 0.30),
+        (x1 + width * 0.28, y1 + height * 0.55),
+        (center_x, y1),
+        (x1 + width * 0.52, y1 + height * 0.52),
+        (x2 - width * 0.10, y1 + height * 0.25),
+        (x2, y1 + height * 0.55),
+        (x2 - width * 0.10, y2),
+    ]
+
+    draw.polygon(
+        points,
+        fill=gold,
+        outline=(180, 220, 255)
+    )
+
+    draw.line(
+        [
+            (x1, y2),
+            (x2 - width * 0.10, y2)
+        ],
+        fill=gold_dark,
+        width=5
+    )
+
+    race_center_text(
+        draw,
+        (center_x, y1 + height * 0.55),
+        str(number),
+        race_font(30, True),
+        (35, 100, 180)
+    )
+
+
+# ------------------------------------------------------------
+# PODIUM
+# ------------------------------------------------------------
+
+def draw_podium(
+    draw,
+    center_x,
+    top_y,
+    width,
+    height,
+    rank
+):
+
+    x1 = center_x - width // 2
+    x2 = center_x + width // 2
+    bottom = RACE_HEIGHT - 18
+
+    # Podium gradient-style layers
+    draw.polygon(
+        [
+            (x1, bottom),
+            (x1 + 28, top_y + 20),
+            (x2 - 28, top_y + 20),
+            (x2, bottom)
+        ],
+        fill=(15, 75, 140)
+    )
+
+    draw.polygon(
+        [
+            (x1 + 28, top_y + 20),
+            (center_x, top_y),
+            (x2 - 28, top_y + 20)
+        ],
+        fill=(30, 105, 190)
+    )
+
+    draw.line(
+        [
+            (x1 + 28, top_y + 20),
+            (center_x, top_y),
+            (x2 - 28, top_y + 20)
+        ],
+        fill=(90, 190, 255),
+        width=3
+    )
+
+    # Rank number
+    race_center_text(
+        draw,
+        (center_x, top_y + 35),
+        str(rank),
+        race_font(25, True),
+        (220, 240, 255)
+    )
+
+
+# ------------------------------------------------------------
+# DOWNLOAD AVATAR
+# ------------------------------------------------------------
+
+async def get_race_avatar(user):
+
+    try:
+
+        avatar = user.display_avatar
+
+        data = await avatar.read()
+
+        image = Image.open(
+            io.BytesIO(data)
+        ).convert("RGBA")
+
+        return image
+
+    except Exception as error:
+
+        print(
+            f"[RACE AVATAR ERROR] {error}"
+        )
+
+        # Default avatar
+        image = Image.new(
+            "RGBA",
+            (256, 256),
+            (35, 65, 100, 255)
+        )
+
+        draw = ImageDraw.Draw(image)
+
+        race_center_text(
+            draw,
+            (128, 128),
+            "?",
+            race_font(100, True),
+            (220, 240, 255)
+        )
+
+        return image
+
+
+# ------------------------------------------------------------
+# CREATE RACE IMAGE
+# ------------------------------------------------------------
+
+async def create_race_image(rows):
+
+    image = Image.new(
+        "RGBA",
+        (RACE_WIDTH, RACE_HEIGHT),
+        (4, 20, 40, 255)
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # --------------------------------------------------------
+    # BACKGROUND
+    # --------------------------------------------------------
+
+    # Dark blue gradient
+    for y in range(RACE_HEIGHT):
+
+        ratio = y / RACE_HEIGHT
+
+        r = int(4 + ratio * 5)
+        g = int(20 + ratio * 20)
+        b = int(40 + ratio * 50)
+
+        draw.line(
+            (0, y, RACE_WIDTH, y),
+            fill=(r, g, b)
+        )
+
+    # --------------------------------------------------------
+    # ABSTRACT BLUE WAVES
+    # --------------------------------------------------------
+
+    for offset in range(0, 700, 90):
+
+        points = []
+
+        for x in range(-100, RACE_WIDTH + 100, 20):
+
+            y = (
+                300
+                + offset * 0.08
+                + 45 * __import__("math").sin(
+                    x / 150
+                )
+            )
+
+            points.append(
+                (x, y + offset * 0.15)
+            )
+
+        draw.line(
+            points,
+            fill=(8, 65, 125, 110),
+            width=45
+        )
+
+    # Decorative diagonal streaks
+    for x in range(-300, RACE_WIDTH, 160):
+
+        draw.line(
+            [
+                (x, 0),
+                (x + 300, 0),
+                (x + 80, 220)
+            ],
+            fill=(15, 90, 175, 80),
+            width=3
+        )
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    casino_name = str(
+        getattr(
+            config,
+            "CASINO_NAME",
+            "CASINO"
+        )
+    ).upper()
+
+    race_center_text(
+        draw,
+        (170, 82),
+        casino_name,
+        race_font(42, True),
+        (235, 245, 255)
+    )
+
+    race_center_text(
+        draw,
+        (170, 125),
+        "WAGER RACE",
+        race_font(16, False),
+        (160, 200, 240)
+    )
+
+    # Small divider
+    draw.line(
+        (315, 48, 315, 145),
+        fill=(55, 140, 230),
+        width=2
+    )
+
+    # Decorative diamonds
+    for x, y, size in [
+        (840, 85, 32),
+        (945, 145, 20),
+        (905, 42, 13),
+    ]:
+
+        draw.polygon(
+            [
+                (x, y - size),
+                (x + size * 0.65, y),
+                (x, y + size),
+                (x - size * 0.65, y)
+            ],
+            fill=(45, 145, 245, 170),
+            outline=(130, 210, 255)
+        )
+
+    # --------------------------------------------------------
+    # PODIUM POSITIONS
+    # --------------------------------------------------------
+
+    podium_data = [
+        {
+            "x": 515,
+            "top": 300,
+            "width": 300,
+            "height": 230,
+            "avatar_y": 355,
+            "avatar_size": 125,
+        },
+        {
+            "x": 235,
+            "top": 380,
+            "width": 255,
+            "height": 150,
+            "avatar_y": 420,
+            "avatar_size": 105,
+        },
+        {
+            "x": 800,
+            "top": 380,
+            "width": 255,
+            "height": 150,
+            "avatar_y": 420,
+            "avatar_size": 105,
+        }
+    ]
+
+    # --------------------------------------------------------
+    # DRAW PODIUMS
+    # --------------------------------------------------------
+
+    draw_podium(
+        draw,
+        515,
+        300,
+        300,
+        230,
+        1
+    )
+
+    draw_podium(
+        draw,
+        235,
+        380,
+        255,
+        150,
+        2
+    )
+
+    draw_podium(
+        draw,
+        800,
+        380,
+        255,
+        150,
+        3
+    )
+
+    # --------------------------------------------------------
+    # PROCESS TOP 3
+    # --------------------------------------------------------
+
+    for index in range(3):
+
+        if index >= len(rows):
+            continue
+
+        row = rows[index]
+
+        user_id = int(
+            row["user_id"]
+        )
+
+        wagered = float(
+            row["wagered"]
+        )
+
+        user = bot.get_user(
+            user_id
+        )
+
+        if user is None:
+
+            try:
+                user = await bot.fetch_user(
+                    user_id
+                )
+            except Exception:
+                user = None
+
+        if user:
+
+            username = user.name
+
+            # Prevent extremely long names
+            if len(username) > 15:
+                username = username[:14] + "…"
+
+            avatar = await get_race_avatar(
+                user
+            )
+
+        else:
+
+            username = "Unknown User"
+
+            avatar = Image.new(
+                "RGBA",
+                (256, 256),
+                (30, 60, 100, 255)
+            )
+
+        data = podium_data[index]
+
+        # ----------------------------------------------------
+        # AVATAR GLOW
+        # ----------------------------------------------------
+
+        race_circle_glow(
+            image,
+            (
+                data["x"],
+                data["avatar_y"]
+            ),
+            data["avatar_size"] // 2 + 5
+        )
+
+        # Avatar border
+        draw.ellipse(
+            (
+                data["x"] - data["avatar_size"] // 2 - 5,
+                data["avatar_y"] - data["avatar_size"] // 2 - 5,
+                data["x"] + data["avatar_size"] // 2 + 5,
+                data["avatar_y"] + data["avatar_size"] // 2 + 5
+            ),
+            outline=(70, 175, 255),
+            width=5
+        )
+
+        race_avatar(
+            image,
+            avatar,
+            (
+                data["x"],
+                data["avatar_y"]
+            ),
+            data["avatar_size"]
+        )
+
+        # ----------------------------------------------------
+        # CROWN
+        # ----------------------------------------------------
+
+        crown_width = (
+            105 if index == 0 else 85
+        )
+
+        crown_height = (
+            75 if index == 0 else 60
+        )
+
+        draw_crown(
+            draw,
+            data["x"],
+            data["avatar_y"] - data["avatar_size"] // 2 - 55,
+            crown_width,
+            crown_height,
+            index + 1
+        )
+
+        # ----------------------------------------------------
+        # USERNAME
+        # ----------------------------------------------------
+
+        username_y = (
+            data["avatar_y"]
+            + data["avatar_size"] // 2
+            + 30
+        )
+
+        race_center_text(
+            draw,
+            (
+                data["x"],
+                username_y
+            ),
+            f"@{username}",
+            race_font(
+                25 if index == 0 else 21,
+                True
+            ),
+            (235, 245, 255)
+        )
+
+        # ----------------------------------------------------
+        # WAGERED AMOUNT
+        # ----------------------------------------------------
+
+        amount_y = username_y + 38
+
+        race_center_text(
+            draw,
+            (
+                data["x"],
+                amount_y
+            ),
+            f"${wagered:,.2f}",
+            race_font(
+                29 if index == 0 else 25,
+                True
+            ),
+            (225, 240, 255)
+        )
+
+    # --------------------------------------------------------
+    # FINAL BORDER
+    # --------------------------------------------------------
+
+    draw.rounded_rectangle(
+        (
+            2,
+            2,
+            RACE_WIDTH - 3,
+            RACE_HEIGHT - 3
+        ),
+        radius=10,
+        outline=(35, 115, 200),
+        width=3
+    )
+
+    return image
+
+
+# ============================================================
+# .RACE COMMAND
+# ============================================================
 
 @bot.command(name="race")
 async def race(ctx):
 
     try:
+
+        # ----------------------------------------------------
+        # GET TOP 3 WAGERERS
+        # ----------------------------------------------------
+
         rows = await bot.db.top_wager_race(3)
 
         if not rows:
+
             await ctx.send(
                 embed=brand(
                     "🏁 Wager Race",
@@ -871,49 +1544,53 @@ async def race(ctx):
                     0xED4245
                 )
             )
+
             return
 
-        medals = ["🥇", "🥈", "🥉"]
+        # ----------------------------------------------------
+        # CREATE IMAGE
+        # ----------------------------------------------------
 
-        text = ""
-
-        for i, row in enumerate(rows):
-
-            user_id = row["user_id"]
-            wagered = float(row["wagered"])
-
-            user = bot.get_user(user_id)
-
-            if user:
-                name = user.name
-            else:
-                name = f"User {user_id}"
-
-            text += (
-                f"{medals[i]} **{name}**\n"
-                f"💰 Wagered: **{money(wagered)} points**\n\n"
-            )
-
-        embed = brand(
-            "🏁 Wager Race",
-            text,
-            0x3498DB
+        race_image = await create_race_image(
+            rows
         )
 
-        embed.set_footer(
-            text="Top 3 players by total wagered amount"
+        # ----------------------------------------------------
+        # SAVE TO MEMORY
+        # ----------------------------------------------------
+
+        buffer = io.BytesIO()
+
+        race_image.save(
+            buffer,
+            format="PNG"
         )
 
-        await ctx.send(embed=embed)
+        buffer.seek(0)
+
+        # ----------------------------------------------------
+        # SEND IMAGE
+        # ----------------------------------------------------
+
+        file = discord.File(
+            buffer,
+            filename="wager_race.png"
+        )
+
+        await ctx.send(
+            file=file
+        )
 
     except Exception as error:
 
-        print(f"RACE ERROR: {error}")
+        print(
+            f"[RACE ERROR] {error}"
+        )
 
         await ctx.send(
             embed=brand(
                 "Race Error",
-                "Something went wrong.",
+                "Something went wrong while creating the wager race.",
                 0xED4245
             )
         )
