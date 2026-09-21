@@ -852,6 +852,72 @@ async def gc(ctx):
 
     view.message = message
 
+# =========================================================
+# WAGER RACE
+# .race
+# =========================================================
+
+@bot.command(name="race")
+async def race(ctx):
+
+    try:
+        rows = await bot.db.top_wager_race(3)
+
+        if not rows:
+            await ctx.send(
+                embed=brand(
+                    "🏁 Wager Race",
+                    "No wagers have been recorded yet.",
+                    0xED4245
+                )
+            )
+            return
+
+        medals = ["🥇", "🥈", "🥉"]
+
+        text = ""
+
+        for i, row in enumerate(rows):
+
+            user_id = row["user_id"]
+            wagered = float(row["wagered"])
+
+            user = bot.get_user(user_id)
+
+            if user:
+                name = user.name
+            else:
+                name = f"User {user_id}"
+
+            text += (
+                f"{medals[i]} **{name}**\n"
+                f"💰 Wagered: **{money(wagered)} points**\n\n"
+            )
+
+        embed = brand(
+            "🏁 Wager Race",
+            text,
+            0x3498DB
+        )
+
+        embed.set_footer(
+            text="Top 3 players by total wagered amount"
+        )
+
+        await ctx.send(embed=embed)
+
+    except Exception as error:
+
+        print(f"RACE ERROR: {error}")
+
+        await ctx.send(
+            embed=brand(
+                "Race Error",
+                "Something went wrong.",
+                0xED4245
+            )
+        )
+        
 # =========================
 # BACCARAT
 # .bacc / .baccarat
