@@ -1493,7 +1493,7 @@ async def create_race_image(rows):
                 data["x"],
                 amount_y
             ),
-            f"${wagered:,.2f}",
+            f"{wagered:,.2f}",
             race_font(
                 29 if index == 0 else 25,
                 True
