@@ -6962,8 +6962,8 @@ class BlackjackView(OwnerView):
 @bot.command(aliases=["hb", "housebal"])
 async def housebalance(ctx):
     try:
-        house_balance = 40.20
-        ltc_balance = 23.55
+        house_balance = 43.56
+        ltc_balance = 27.91
         usdt_balance = 6.43
         sol_balance = 9.22
 
