@@ -2290,69 +2290,6 @@ def format_history_row(
     )
 
 
-# ============================================================
-# /HISTORY
-# ============================================================
-
-@bot.tree.command(
-    name="history",
-    description="View your last 10 games.",
-)
-async def history_command(
-    interaction: discord.Interaction,
-):
-
-    if not await require_database(interaction):
-        return
-
-    rows = []
-
-    if hasattr(
-        bot.db,
-        "game_history",
-    ):
-
-        rows = await bot.db.game_history(
-            interaction.user.id,
-            10,
-        )
-
-    elif hasattr(
-        bot.db,
-        "history",
-    ):
-
-        rows = await bot.db.history(
-            interaction.user.id,
-            10,
-        )
-
-    if not rows:
-
-        description = (
-            "You have no recorded games yet."
-        )
-
-    else:
-
-        description = "\n".join(
-            format_history_row(row)
-            for row in rows
-        )
-
-    embed = base_embed(
-        title="Game History",
-        description=description,
-    )
-
-    embed.set_footer(
-        text="last 10 Games history"
-    )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True,
-    )
 
 
 # ============================================================
