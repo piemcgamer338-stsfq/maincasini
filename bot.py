@@ -3789,3 +3789,1734 @@ async def leaderboard_command(
             0x00E676,
         ),
     )
+
+# ============================================================
+# bot.py — PART 4 / 10
+# ============================================================
+
+# ============================================================
+# MINES
+# ============================================================
+
+def mines_embed(
+    game: MinesGame,
+    *,
+    revealed: bool = False,
+    result: Optional[str] = None,
+) -> discord.Embed:
+
+    if game.finished:
+        title = "💣 Mines — Game Over"
+    else:
+        title = "💣 Mines"
+
+    lines = [
+        f"**Bet:** {money(game.amount)}",
+        f"**Mines:** {game.mines}",
+        f"**Safe Tiles:** {len(game.opened)}/"
+        f"{25 - game.mines}",
+        f"**Multiplier:** {game.multiplier:.2f}x",
+    ]
+
+    if not game.finished and len(game.opened) > 0:
+        lines.append(
+            f"**Cashout:** {money(game.payout)}"
+        )
+
+    if result:
+        lines.append("")
+        lines.append(result)
+
+    embed = base_embed(
+        title,
+        "\n".join(lines),
+        0x00E676 if not game.finished else 0xED4245,
+    )
+
+    embed.set_footer(
+        text=(
+            f"Game #{game.game_id} • "
+            "Provably fair"
+        )
+    )
+
+    return embed
+
+
+async def mines_reveal_all(
+    game: MinesGame,
+    view: MinesView,
+):
+
+    for item in view.children:
+
+        if not isinstance(
+            item,
+            discord.ui.Button,
+        ):
+            continue
+
+        custom_id = item.custom_id or ""
+
+        if not custom_id.startswith("mine:"):
+            continue
+
+        try:
+            index = int(
+                custom_id.split(":")[1]
+            )
+        except (ValueError, IndexError):
+            continue
+
+        if index in game.bombs:
+            item.label = "💣"
+            item.style = discord.ButtonStyle.danger
+        elif index in game.opened:
+            item.label = "💎"
+            item.style = discord.ButtonStyle.success
+        else:
+            item.label = "·"
+            item.style = discord.ButtonStyle.secondary
+
+        item.disabled = True
+
+    for item in view.children:
+
+        if (
+            isinstance(item, discord.ui.Button)
+            and item.custom_id == "mine_cashout"
+        ):
+            item.disabled = True
+
+
+async def mines_click_impl(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    index: int,
+    view: MinesView,
+):
+
+    if game.finished:
+
+        await interaction.response.send_message(
+            "This Mines game has already ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    if index in game.opened:
+
+        await interaction.response.send_message(
+            "That tile is already open.",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.defer()
+
+    if index in game.bombs:
+
+        game.finished = True
+
+        button = next(
+            (
+                item
+                for item in view.children
+                if isinstance(item, discord.ui.Button)
+                and item.custom_id == f"mine:{index}"
+            ),
+            None,
+        )
+
+        if button:
+            button.label = "💣"
+            button.style = discord.ButtonStyle.danger
+            button.disabled = True
+
+        await mines_reveal_all(
+            game,
+            view,
+        )
+
+        await bot_instance.settle_loss(
+            game.user_id,
+            game.amount,
+            "mines",
+        )
+
+        bot_instance.active_mines.pop(
+            game.user_id,
+            None,
+        )
+
+        embed = mines_embed(
+            game,
+            revealed=True,
+            result=(
+                f"💥 You hit a mine and lost "
+                f"**{money(game.amount)}**."
+            ),
+        )
+
+        await interaction.edit_original_response(
+            embed=embed,
+            view=view,
+        )
+
+        return
+
+    game.opened.add(index)
+
+    button = next(
+        (
+            item
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+            and item.custom_id == f"mine:{index}"
+        ),
+        None,
+    )
+
+    if button:
+        button.label = "💎"
+        button.style = discord.ButtonStyle.success
+        button.disabled = True
+
+    safe_count = 25 - game.mines
+
+    if len(game.opened) >= safe_count:
+
+        game.finished = True
+
+        payout = game.payout
+
+        await bot_instance.settle_win(
+            game.user_id,
+            game.amount,
+            payout,
+            "mines",
+        )
+
+        bot_instance.active_mines.pop(
+            game.user_id,
+            None,
+        )
+
+        await mines_reveal_all(
+            game,
+            view,
+        )
+
+        embed = mines_embed(
+            game,
+            revealed=True,
+            result=(
+                f"🎉 All safe tiles cleared!\n"
+                f"**Won:** {money(payout)}"
+            ),
+        )
+
+        await interaction.edit_original_response(
+            embed=embed,
+            view=view,
+        )
+
+        await bot_instance.check_rank_up(
+            game.user_id,
+        )
+
+        return
+
+    embed = mines_embed(
+        game
+    )
+
+    await interaction.edit_original_response(
+        embed=embed,
+        view=view,
+    )
+
+
+async def mines_cashout_impl(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    view: MinesView,
+):
+
+    if game.finished:
+
+        await interaction.response.send_message(
+            "This Mines game has already ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    if not game.opened:
+
+        await interaction.response.send_message(
+            "Open at least one safe tile before cashing out.",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.defer()
+
+    game.finished = True
+
+    payout = game.payout
+
+    await bot_instance.settle_win(
+        game.user_id,
+        game.amount,
+        payout,
+        "mines",
+    )
+
+    bot_instance.active_mines.pop(
+        game.user_id,
+        None,
+    )
+
+    await mines_reveal_all(
+        game,
+        view,
+    )
+
+    embed = mines_embed(
+        game,
+        revealed=True,
+        result=(
+            f"💰 Cashed out for **{money(payout)}**."
+        ),
+    )
+
+    await interaction.edit_original_response(
+        embed=embed,
+        view=view,
+    )
+
+    await bot_instance.check_rank_up(
+        game.user_id,
+    )
+
+
+async def mines_timeout(
+    game: MinesGame,
+    view: MinesView,
+):
+
+    if game.finished:
+        return
+
+    game.finished = True
+
+    await mines_reveal_all(
+        game,
+        view,
+    )
+
+    game.bot.active_mines.pop(
+        game.user_id,
+        None,
+    )
+
+
+async def casino_mines_click(
+    self: CasinoBot,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    index: int,
+    view: MinesView,
+):
+
+    await mines_click_impl(
+        self,
+        interaction,
+        game,
+        index,
+        view,
+    )
+
+
+async def casino_mines_cashout(
+    self: CasinoBot,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    view: MinesView,
+):
+
+    await mines_cashout_impl(
+        self,
+        interaction,
+        game,
+        view,
+    )
+
+
+CasinoBot.mines_click = casino_mines_click
+CasinoBot.mines_cashout = casino_mines_cashout
+
+
+@bot.tree.command(
+    name="mines",
+    description="Play Mines.",
+)
+@app_commands.describe(
+    amount="Bet amount in USD.",
+    mines="Number of mines (1-20).",
+)
+async def mines_command(
+    interaction: discord.Interaction,
+    amount: str,
+    mines: app_commands.Range[int, 1, 20],
+):
+
+    cooldown = bot.check_game_cooldown(
+        interaction.user.id,
+        "mines",
+    )
+
+    if cooldown:
+        await bot.safe_send(
+            interaction,
+            content=(
+                f"Please wait **{cooldown:.1f}s** "
+                "before starting another game."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    bet = normalize_amount(amount)
+
+    if bet is None or bet < MIN_MINES_BET:
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Bet",
+                f"Minimum bet is {money(MIN_MINES_BET)}.",
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    balance = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if bet > balance:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds"
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    if interaction.user.id in bot.active_mines:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                "You already have an active Mines game."
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    if mines >= 25:
+        await bot.safe_send(
+            interaction,
+            content="Choose between 1 and 20 mines.",
+            ephemeral=True,
+        )
+        return
+
+    deducted = await bot.deduct_bet(
+        interaction.user.id,
+        bet,
+        "mines",
+    )
+
+    if not deducted:
+
+        await bot.safe_send(
+            interaction,
+            content="Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+
+        return
+
+    game_id = bot.next_game_id()
+
+    server_seed = bot.create_server_seed()
+    server_hash = bot.server_hash(
+        server_seed
+    )
+    client_seed = bot.create_client_seed(
+        interaction.user.id
+    )
+
+    nonce = 0
+
+    game = MinesGame(
+        bot=bot,
+        user_id=interaction.user.id,
+        amount=bet,
+        mines=int(mines),
+        game_id=game_id,
+        server_hash=server_hash,
+        server_seed=server_seed,
+        client_seed=client_seed,
+        nonce=nonce,
+    )
+
+    bot.active_mines[
+        interaction.user.id
+    ] = game
+
+    view = MinesView(game)
+
+    await interaction.response.send_message(
+        embed=mines_embed(game),
+        view=view,
+    )
+
+    message = await interaction.original_response()
+
+    game.message_id = message.id
+    game.channel_id = interaction.channel_id
+
+
+# ============================================================
+# COINFLIP
+# ============================================================
+
+def coinflip_roll(
+    bot_instance: CasinoBot,
+    server_seed: str,
+    client_seed: str,
+    nonce: int,
+) -> Decimal:
+
+    return bot_instance.fair_roll(
+        server_seed,
+        client_seed,
+        nonce,
+        "coinflip",
+    )
+
+
+async def coinflip_finish(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    *,
+    user_id: int,
+    bet: Decimal,
+    choice: str,
+    game_id: int,
+    server_seed: str,
+    server_hash: str,
+    client_seed: str,
+    nonce: int,
+):
+
+    roll = coinflip_roll(
+        bot_instance,
+        server_seed,
+        client_seed,
+        nonce,
+    )
+
+    result = (
+        "red"
+        if roll < Decimal("50")
+        else "blue"
+    )
+
+    won = (
+        result == choice
+    )
+
+    if won:
+
+        payout = (
+            bet * COINFLIP_MULTIPLIER
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        await bot_instance.settle_win(
+            user_id,
+            bet,
+            payout,
+            "coinflip",
+        )
+
+        color = 0x57F287
+
+        title = (
+            f"## Coinflip — "
+            f"{result.title()} wins!"
+        )
+
+        description = (
+            f"**Roll:** `{roll:.2f}`\n"
+            f"**Result:** **{result.title()}**\n"
+            f"**Bet:** {money(bet)}\n"
+            f"**Payout:** {money(payout)} "
+            f"({COINFLIP_MULTIPLIER:.2f}x)"
+        )
+
+    else:
+
+        await bot_instance.settle_loss(
+            user_id,
+            bet,
+            "coinflip",
+        )
+
+        color = 0xED4245
+
+        title = (
+            f"## Coinflip — "
+            f"{result.title()} wins!"
+        )
+
+        description = (
+            f"**Roll:** `{roll:.2f}`\n"
+            f"**Result:** **{result.title()}**\n"
+            f"**Bet:** {money(bet)}\n"
+            f"**Lost:** {money(bet)}"
+        )
+
+    embed = base_embed(
+        title,
+        description,
+        color,
+    )
+
+    embed.add_field(
+        name="Provably Fair",
+        value=(
+            f"**Server Hash:** `{server_hash}`\n"
+            f"**Client Seed:** `{client_seed}`\n"
+            f"**Nonce:** `{nonce}`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Game",
+        value=f"`#{game_id}`",
+        inline=True,
+    )
+
+    await interaction.edit_original_response(
+        embed=embed,
+    )
+
+    await bot_instance.check_rank_up(
+        user_id
+    )
+
+
+@bot.tree.command(
+    name="coinflip",
+    description="Bet on Red or Blue in a coinflip.",
+)
+@app_commands.describe(
+    amount="Bet amount in USD.",
+    color="Choose red or blue.",
+)
+@app_commands.choices(
+    color=[
+        app_commands.Choice(
+            name="Red",
+            value="red",
+        ),
+        app_commands.Choice(
+            name="Blue",
+            value="blue",
+        ),
+    ]
+)
+async def coinflip_command(
+    interaction: discord.Interaction,
+    amount: str,
+    color: app_commands.Choice[str],
+):
+
+    cooldown = bot.check_game_cooldown(
+        interaction.user.id,
+        "coinflip",
+    )
+
+    if cooldown:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                f"Please wait **{cooldown:.1f}s**."
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    bet = normalize_amount(amount)
+
+    if bet is None or bet < MIN_BET:
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Bet",
+                f"Minimum bet is {money(MIN_BET)}.",
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    balance = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if bet > balance:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds"
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    deducted = await bot.deduct_bet(
+        interaction.user.id,
+        bet,
+        "coinflip",
+    )
+
+    if not deducted:
+
+        await bot.safe_send(
+            interaction,
+            content="Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+
+        return
+
+    game_id = bot.next_game_id()
+
+    server_seed = bot.create_server_seed()
+    server_hash = bot.server_hash(
+        server_seed
+    )
+
+    client_seed = bot.create_client_seed(
+        interaction.user.id
+    )
+
+    nonce = 0
+
+    selected = color.value.lower()
+
+    embed = base_embed(
+        "## Flipping…",
+        (
+            f"{interaction.user.mention} "
+            f"({selected.title()}) vs Bot "
+            f"({('Blue' if selected == 'red' else 'Red')})\n\n"
+            f"**Bet:** {money(bet)} · "
+            f"**Game #{game_id}**"
+        ),
+        0x5865F2,
+    )
+
+    embed.add_field(
+        name="Provably Fair",
+        value=(
+            f"Server Hash: `{server_hash}`"
+        ),
+        inline=False,
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+    await asyncio.sleep(2)
+
+    await coinflip_finish(
+        bot,
+        interaction,
+        user_id=interaction.user.id,
+        bet=bet,
+        choice=selected,
+        game_id=game_id,
+        server_seed=server_seed,
+        server_hash=server_hash,
+        client_seed=client_seed,
+        nonce=nonce,
+    )
+
+
+# ============================================================
+# COINFLIP STICKER CONFIG
+# ============================================================
+
+@bot.tree.command(
+    name="cfred",
+    description="Configure the Red coinflip sticker ID.",
+)
+@app_commands.describe(
+    sticker_id="Discord sticker ID.",
+)
+async def cfred_command(
+    interaction: discord.Interaction,
+    sticker_id: str,
+):
+
+    if interaction.user.id not in config.ADMIN_USER_IDS:
+
+        await bot.safe_send(
+            interaction,
+            content="You are not authorized to use this command.",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.set_setting(
+        "coinflip_sticker_red",
+        sticker_id.strip(),
+    )
+
+    await bot.safe_send(
+        interaction,
+        content=(
+            f"Red coinflip sticker saved: `{sticker_id}`"
+        ),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="cfblue",
+    description="Configure the Blue coinflip sticker ID.",
+)
+@app_commands.describe(
+    sticker_id="Discord sticker ID.",
+)
+async def cfblue_command(
+    interaction: discord.Interaction,
+    sticker_id: str,
+):
+
+    if interaction.user.id not in config.ADMIN_USER_IDS:
+
+        await bot.safe_send(
+            interaction,
+            content="You are not authorized to use this command.",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.set_setting(
+        "coinflip_sticker_blue",
+        sticker_id.strip(),
+    )
+
+    await bot.safe_send(
+        interaction,
+        content=(
+            f"Blue coinflip sticker saved: `{sticker_id}`"
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# DICE
+# ============================================================
+
+def dice_mode_name(
+    mode: str,
+    count: int,
+) -> str:
+
+    if mode == "crazy":
+        return f"{count} Roll{'s' if count != 1 else ''} (Crazy)"
+
+    return f"{count} Roll{'s' if count != 1 else ''} (Normal)"
+
+
+def dice_game_embed(
+    game: dict,
+    *,
+    final: bool = False,
+) -> discord.Embed:
+
+    player_rolls = game.get(
+        "player_rolls",
+        [],
+    )
+
+    bot_rolls = game.get(
+        "bot_rolls",
+        [],
+    )
+
+    player_text = " + ".join(
+        "?" if value is None else str(value)
+        for value in player_rolls
+    )
+
+    bot_text = " + ".join(
+        "?" if value is None else str(value)
+        for value in bot_rolls
+    )
+
+    player_total = (
+        sum(
+            value
+            for value in player_rolls
+            if value is not None
+        )
+        if player_rolls
+        else 0
+    )
+
+    bot_total = (
+        sum(
+            value
+            for value in bot_rolls
+            if value is not None
+        )
+        if bot_rolls
+        else 0
+    )
+
+    title = (
+        "## Dice"
+        if not final
+        else "## Dice — Result"
+    )
+
+    if final:
+
+        if player_total > bot_total:
+            result = (
+                f"🎉 {game['user_mention']} wins!"
+            )
+            color = 0x57F287
+
+        elif player_total < bot_total:
+            result = "❌ Bot wins!"
+            color = 0xED4245
+
+        else:
+            result = "🤝 Tie!"
+            color = 0xFEE75C
+
+    else:
+
+        result = (
+            f"**{game['user_mention']}** vs Bot"
+        )
+
+        color = 0x5865F2
+
+    description = (
+        f"**Mode:** "
+        f"{dice_mode_name(game['mode'], game['count'])}\n"
+        f"**Bet:** {money(game['bet'])}\n\n"
+        f"{game['user_mention']}: "
+        f"{player_text} = **{player_total}**\n"
+        f"Bot: {bot_text} = **{bot_total}**"
+    )
+
+    if final:
+        description += (
+            f"\n\n{result}\n"
+            f"**Bet:** {money(game['bet'])}"
+        )
+
+        if player_total > bot_total:
+            description += (
+                f"\n**Payout:** "
+                f"{money(game['payout'])}"
+            )
+
+        elif player_total < bot_total:
+            description += (
+                f"\n**Lost:** "
+                f"{money(game['bet'])}"
+            )
+
+    embed = base_embed(
+        title,
+        description,
+        color,
+    )
+
+    embed.set_footer(
+        text=(
+            f"Game #{game['game_id']} • "
+            "Provably fair"
+        )
+    )
+
+    if game.get("server_hash"):
+        embed.add_field(
+            name="Provably Fair",
+            value=(
+                f"Server hash: "
+                f"`{game['server_hash']}`"
+            ),
+            inline=False,
+        )
+
+    return embed
+
+
+@bot.tree.command(
+    name="dice",
+    description="Set up a Dice game.",
+)
+@app_commands.describe(
+    amount="Bet amount in USD.",
+)
+async def dice_command(
+    interaction: discord.Interaction,
+    amount: str,
+):
+
+    bet = normalize_amount(amount)
+
+    if bet is None or bet < MIN_BET:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                f"Minimum bet is {money(MIN_BET)}."
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    balance = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if bet > balance:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds"
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        (
+            "**Choose Dice Mode**\n\n"
+            "**Crazy Dice**\n"
+            "Lowest Wins\n\n"
+            "**Dice**\n"
+            "Highest Wins"
+        ),
+        view=DiceSetupView(
+            bot,
+            interaction.user.id,
+            bet,
+        ),
+        ephemeral=True,
+    )
+
+
+async def start_dice_game(
+    self: CasinoBot,
+    interaction: discord.Interaction,
+    user_id: int,
+    amount: Decimal,
+    mode: str,
+    count: int,
+):
+
+    if user_id in self.active_dice:
+
+        await interaction.followup.send(
+            "You already have an active Dice game.",
+            ephemeral=True,
+        )
+
+        return
+
+    deducted = await self.deduct_bet(
+        user_id,
+        amount,
+        "dice",
+    )
+
+    if not deducted:
+
+        await interaction.followup.send(
+            "Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+
+        return
+
+    game_id = self.next_game_id()
+
+    server_seed = self.create_server_seed()
+    server_hash = self.server_hash(
+        server_seed
+    )
+
+    client_seed = self.create_client_seed(
+        user_id
+    )
+
+    game = {
+        "user_id": user_id,
+        "user_mention": interaction.user.mention,
+        "bet": amount,
+        "mode": mode,
+        "count": count,
+        "game_id": game_id,
+        "server_seed": server_seed,
+        "server_hash": server_hash,
+        "client_seed": client_seed,
+        "nonce": 0,
+        "player_rolls": [None] * count,
+        "bot_rolls": [None] * count,
+        "current_roll": 0,
+        "channel_id": interaction.channel_id,
+        "message_id": None,
+        "payout": Decimal("0"),
+    }
+
+    self.active_dice[user_id] = game
+
+    await interaction.followup.send(
+        embed=dice_game_embed(game),
+        view=DiceRollView(
+            self,
+            user_id,
+        ),
+    )
+
+    message = await interaction.original_response()
+
+    game["message_id"] = message.id
+
+
+CasinoBot.start_dice_game = start_dice_game
+
+
+class DiceRollView(ButtonView):
+
+    def __init__(
+        self,
+        bot_instance: CasinoBot,
+        user_id: int,
+    ):
+
+        super().__init__(timeout=300)
+
+        self.bot_instance = bot_instance
+        self.user_id = user_id
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                "This Dice game belongs to another player.",
+                ephemeral=True,
+            )
+
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Roll",
+        style=discord.ButtonStyle.success,
+        custom_id="dice_roll_button",
+    )
+    async def roll(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.bot_instance.roll_dice_game(
+            interaction,
+            self.user_id,
+        )
+
+
+async def roll_dice_game(
+    self: CasinoBot,
+    interaction: discord.Interaction,
+    user_id: int,
+):
+
+    game = self.active_dice.get(
+        user_id
+    )
+
+    if not game:
+
+        await interaction.response.send_message(
+            "You don't have an active Dice game.",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.defer()
+
+    index = game["current_roll"]
+
+    if index >= game["count"]:
+        return
+
+    player_roll = self.fair_int(
+        game["server_seed"],
+        game["client_seed"],
+        game["nonce"] + index,
+        1,
+        6,
+        "dice-player",
+    )
+
+    game["player_rolls"][index] = player_roll
+
+    game["current_roll"] += 1
+
+    if game["current_roll"] < game["count"]:
+
+        await interaction.edit_original_response(
+            embed=dice_game_embed(game),
+            view=DiceRollView(
+                self,
+                user_id,
+            ),
+        )
+
+        return
+
+    for bot_index in range(
+        game["count"]
+    ):
+
+        game["bot_rolls"][bot_index] = self.fair_int(
+            game["server_seed"],
+            game["client_seed"],
+            game["nonce"] + 100 + bot_index,
+            1,
+            6,
+            "dice-bot",
+        )
+
+    player_total = sum(
+        game["player_rolls"]
+    )
+
+    bot_total = sum(
+        game["bot_rolls"]
+    )
+
+    if game["mode"] == "crazy":
+
+        won = player_total < bot_total
+
+    else:
+
+        won = player_total > bot_total
+
+    if player_total == bot_total:
+        won = False
+
+    if won:
+
+        payout = (
+            game["bet"]
+            * DICE_MULTIPLIER
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        game["payout"] = payout
+
+        await self.settle_win(
+            user_id,
+            game["bet"],
+            payout,
+            "dice",
+        )
+
+    else:
+
+        await self.settle_loss(
+            user_id,
+            game["bet"],
+            "dice",
+        )
+
+    game["finished"] = True
+
+    self.active_dice.pop(
+        user_id,
+        None,
+    )
+
+    await interaction.edit_original_response(
+        embed=dice_game_embed(
+            game,
+            final=True,
+        ),
+        view=None,
+    )
+
+    await self.check_rank_up(
+        user_id
+    )
+
+
+CasinoBot.roll_dice_game = roll_dice_game
+
+
+@bot.tree.command(
+    name="roll",
+    description="Roll your active Dice game.",
+)
+async def roll_command(
+    interaction: discord.Interaction,
+):
+
+    await bot.roll_dice_game(
+        interaction,
+        interaction.user.id,
+    )
+
+
+# ============================================================
+# RAIN
+# ============================================================
+
+async def rain_daily_wager(
+    bot_instance: CasinoBot,
+    user_id: int,
+) -> Decimal:
+
+    if hasattr(
+        bot_instance.db,
+        "get_daily_wager",
+    ):
+
+        return D(
+            await bot_instance.db.get_daily_wager(
+                user_id
+            )
+        )
+
+    row = await bot_instance.get_user(
+        user_id
+    )
+
+    if not row:
+        return Decimal("0")
+
+    return D(
+        row["wagered"]
+    )
+
+
+async def has_rain_role(
+    interaction: discord.Interaction,
+) -> bool:
+
+    role_id = getattr(
+        config,
+        "RAIN_ROLE_ID",
+        0,
+    )
+
+    if not role_id:
+        return True
+
+    if not isinstance(
+        interaction.user,
+        discord.Member,
+    ):
+        return False
+
+    return any(
+        role.id == role_id
+        for role in interaction.user.roles
+    )
+
+
+async def join_rain(
+    self: CasinoBot,
+    interaction: discord.Interaction,
+    rain_id: str,
+):
+
+    rain = self.active_rains.get(
+        rain_id
+    )
+
+    if not rain:
+
+        await interaction.response.send_message(
+            "This rain has already ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    if not await has_rain_role(
+        interaction
+    ):
+
+        await interaction.response.send_message(
+            "You need the verified role to join rain.",
+            ephemeral=True,
+        )
+
+        return
+
+    wagered = await rain_daily_wager(
+        self,
+        interaction.user.id,
+    )
+
+    if wagered < Decimal("1"):
+
+        await interaction.response.send_message(
+            "You need at least **$1** wagered today to join rain.",
+            ephemeral=True,
+        )
+
+        return
+
+    if interaction.user.id in rain["players"]:
+
+        await interaction.response.send_message(
+            "You already joined this rain.",
+            ephemeral=True,
+        )
+
+        return
+
+    rain["players"].add(
+        interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        "You joined the rain.",
+        ephemeral=True,
+    )
+
+
+CasinoBot.join_rain = join_rain
+
+
+async def finish_rain(
+    self: CasinoBot,
+    rain_id: str,
+):
+
+    rain = self.active_rains.pop(
+        rain_id,
+        None,
+    )
+
+    if not rain:
+        return
+
+    amount = D(
+        rain["amount"]
+    )
+
+    players = list(
+        rain["players"]
+    )
+
+    channel = self.get_channel(
+        rain["channel_id"]
+    )
+
+    if not channel:
+        return
+
+    if not players:
+
+        await self.db.change_balance(
+            rain["user_id"],
+            amount,
+            kind="rain_refund",
+            note=rain_id,
+        )
+
+        await channel.send(
+            f"## Rain Ended — {money(amount)}\n"
+            "Nobody joined the rain, so the full "
+            "amount was refunded."
+        )
+
+        return
+
+    share = (
+        amount
+        / Decimal(len(players))
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    distributed = share * len(players)
+
+    remainder = (
+        amount - distributed
+    ).quantize(
+        Decimal("0.01")
+    )
+
+    if remainder > 0:
+
+        share += (
+            remainder
+            / Decimal(len(players))
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+    successful = []
+
+    for user_id in players:
+
+        try:
+
+            credited = await self.db.change_balance(
+                user_id,
+                share,
+                kind="rain",
+                note=rain_id,
+            )
+
+            if credited:
+                successful.append(
+                    user_id
+                )
+
+        except Exception:
+            continue
+
+    count = len(successful)
+
+    if count <= 0:
+
+        await self.db.change_balance(
+            rain["user_id"],
+            amount,
+            kind="rain_refund",
+            note=rain_id,
+        )
+
+        await channel.send(
+            f"## Rain Ended — {money(amount)}\n"
+            "Nobody could be credited, so the rain "
+            "was refunded."
+        )
+
+        return
+
+    mention_text = " ".join(
+        f"<@{uid}>"
+        for uid in successful
+    )
+
+    await channel.send(
+        f"## Rain Ended — {money(amount)}\n"
+        f"## **{rain['owner_mention']}** rained on "
+        f"**{count}** players — **{money(share)}** each!\n\n"
+        f"{mention_text}"
+    )
+
+
+CasinoBot.finish_rain = finish_rain
+
+
+@bot.tree.command(
+    name="rain",
+    description="Start a rain giveaway.",
+)
+@app_commands.describe(
+    amount="Total amount to rain.",
+    duration="Rain duration in minutes: 1, 2, 5, or 10.",
+)
+@app_commands.choices(
+    duration=[
+        app_commands.Choice(
+            name="1 minute",
+            value=1,
+        ),
+        app_commands.Choice(
+            name="2 minutes",
+            value=2,
+        ),
+        app_commands.Choice(
+            name="5 minutes",
+            value=5,
+        ),
+        app_commands.Choice(
+            name="10 minutes",
+            value=10,
+        ),
+    ]
+)
+async def rain_command(
+    interaction: discord.Interaction,
+    amount: str,
+    duration: app_commands.Choice[int],
+):
+
+    bet = normalize_amount(
+        amount
+    )
+
+    if bet is None:
+
+        await bot.safe_send(
+            interaction,
+            content="Enter a valid rain amount.",
+            ephemeral=True,
+        )
+
+        return
+
+    balance = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if bet > balance:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds"
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    deducted = await bot.db.change_balance(
+        interaction.user.id,
+        -bet,
+        kind="rain_start",
+        note="rain",
+    )
+
+    if not deducted:
+
+        await bot.safe_send(
+            interaction,
+            content="Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+
+        return
+
+    rain_id = secrets.token_hex(8)
+
+    bot.active_rains[rain_id] = {
+        "amount": bet,
+        "user_id": interaction.user.id,
+        "owner_mention": interaction.user.mention,
+        "channel_id": interaction.channel_id,
+        "players": set(),
+    }
+
+    await interaction.response.send_message(
+        f"## Rain Started — **{money(bet)}**\n"
+        f"**{interaction.user.mention}** rained — "
+        f"**{money(bet)}**\n\n"
+        "Click on Button Below to Join",
+        view=RainView(
+            bot,
+            rain_id,
+        ),
+    )
+
+    seconds = RAIN_DURATIONS[
+        duration.value
+    ]
+
+    asyncio.create_task(
+        rain_timer(
+            bot,
+            rain_id,
+            seconds,
+        )
+    )
+
+
+async def rain_timer(
+    bot_instance: CasinoBot,
+    rain_id: str,
+    seconds: int,
+):
+
+    await asyncio.sleep(
+        seconds
+    )
+
+    await bot_instance.finish_rain(
+        rain_id
+    )
+
+
+# ============================================================
+# PART 4 END
+# ============================================================
