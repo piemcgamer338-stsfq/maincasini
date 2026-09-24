@@ -9095,9 +9095,20 @@ async def _finish_rain(
             for uid in joined
         )
 
+        owner = self.get_user(
+            rain_data["owner_id"]
+        )
+
+        if owner:
+            owner_mention = owner.mention
+        else:
+            owner_mention = (
+                f"<@{rain_data['owner_id']}>"
+            )
+
         await channel.send(
             f"## Rain Ended — **{money(total)}**\n\n"
-            f"## **{self.get_user(rain_data['owner_id']).mention if self.get_user(rain_data['owner_id']) else f'<@{rain_data[\"owner_id\"]}>'}** "
+            f"## **{owner_mention}** "
             f"rained on **{len(joined)}** players — "
             f"**{money(share)}** each!\n\n"
             f"{mentions}"
