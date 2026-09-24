@@ -1,7886 +1,461 @@
+# ============================================================
+# bot.py — PART 1 / 10
+# ZETHER CASINO — REGENERATED SLASH-COMMAND BOT
+# ============================================================
+
 from __future__ import annotations
 
-import asyncio, io, random, time
+import asyncio
+import hashlib
+import hmac
+import io
+import json
+import os
+import random
+import secrets
+import string
+import time
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
+from typing import Optional
 
 import aiohttp
 import discord
-from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from discord import app_commands
+from discord.ext import commands, tasks
 
 import config
 from database import Database
-from games import card_value, deck, hand_total, parse_amount, provably_fair
-
-import os
-
-print(
-    "OPENAI_API_KEY loaded:",
-    bool(os.getenv("OPENAI_API_KEY"))
-)
 
 
-def money(value) -> str: return f"{float(value):,.2f}"
-def usd(points) -> str: return f"${float(points) * config.POINT_USD:,.2f}"
-def brand(title: str, description: str = "", colour=0x2B2D31):
-    return discord.Embed(title=f"{config.CASINO_NAME} — {title}", description=description, colour=colour, timestamp=datetime.now(timezone.utc))
-def allowed_admin(ctx): return ctx.author.id in config.ADMIN_USER_IDS or ctx.author.guild_permissions.administrator
+# ============================================================
+# PATHS / CONSTANTS
+# ============================================================
 
-CARDS_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent
 
-def image_file(image: Image.Image, name: str) -> discord.File:
-    output = io.BytesIO()
-    image.save(output, "PNG")
-    output.seek(0)
-    return discord.File(output, filename=name)
+BOT_TOKEN = config.TOKEN
+DATABASE_URL = config.DATABASE_URL
 
-def card_image_name(card: str) -> str:
-    rank, suit = card[:-1], card[-1]
-    rank_name = {"A": "ace", "J": "jack", "Q": "queen", "K": "king"}.get(rank, rank)
-    suit_name = {"♣": "clubs", "♦": "diamonds", "♥": "hearts", "♠": "spades"}[suit]
-    return f"{rank_name}_of_{suit_name}.png"
+MIN_BET = Decimal("0.10")
+MIN_MINES_BET = Decimal("0.10")
+MIN_FROG_BET = Decimal("0.10")
 
-def blackjack_table(player, dealer, reveal=False) -> discord.File:
-    canvas = Image.new("RGB", (1200, 680), "#0a422d")
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((25, 25, 1175, 655), radius=35, outline="#d9b66b", width=5)
-    font = ImageFont.load_default()
-    draw.text((50, 55), "DEALER", fill="#f5e7c0", font=font)
-    draw.text((50, 385), "PLAYER", fill="#f5e7c0", font=font)
-    def paste_card(card, x, y, hidden=False):
-        if hidden:
-            draw.rounded_rectangle((x, y, x + 150, y + 220), radius=12, fill="#111827", outline="#d9b66b", width=4)
-            draw.text((x + 53, y + 105), "?", fill="#d9b66b", font=font)
-            return
-        path = CARDS_DIR / card_image_name(card)
-        if path.exists():
-            image = Image.open(path).convert("RGBA").resize((150, 220), Image.Resampling.LANCZOS)
-            canvas.paste(image, (x, y), image)
-        else:
-            draw.rounded_rectangle((x, y, x + 150, y + 220), radius=12, fill="#f7f7f7")
-            draw.text((x + 40, y + 105), card, fill="#111111", font=font)
-    for index, card in enumerate(dealer): paste_card(card, 50 + index * 175, 95, hidden=(index == 1 and not reveal))
-    for index, card in enumerate(player): paste_card(card, 50 + index * 175, 425)
-    return image_file(canvas, "blackjack_table.png")
+COINFLIP_MULTIPLIER = Decimal("1.92")
+DICE_MULTIPLIER = Decimal("1.92")
 
-COINFLIP_IMAGES = {
-    "tails": "https://cdn.bloxjack.com/assets/chip-tails-v2.webp?v=20260826-1",
-    "heads": "https://cdn.bloxjack.com/assets/chip-heads-v2.webp?v=20260826-1",}
+MAX_MINES = 20
+MAX_MINES_TILES = 25
 
-def _font(size=42, bold=False):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        str(CARDS_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")),
-    ]
-    for candidate in candidates:
-        try:
-            return ImageFont.truetype(candidate, size)
-        except OSError:
-            pass
-    return ImageFont.load_default()
+GAME_COOLDOWN = max(0, int(getattr(config, "GAME_COOLDOWN_SECONDS", 3)))
 
+RAKEBACK_RATE = Decimal("0.01")
 
-
-
-
-
-
-class CasinoBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default(); intents.message_content = True; intents.members = True
-        super().__init__(command_prefix=lambda bot, msg: (".", ","), intents=intents, help_command=None)
-        self.db = Database(config.DATABASE_URL) if config.DATABASE_URL else None
-        self.cooldowns: dict[int, float] = {}
-
-    async def setup_hook(self):
-        if not self.db: raise RuntimeError("DATABASE_URL is missing from Railway variables.")
-        await self.db.connect()
-
-    async def close(self):
-        if self.db: await self.db.close()
-        await super().close()
-
-    async def game_allowed(self, ctx) -> bool:
-        if await self.db.setting("frozen", "0") == "1":
-            await ctx.send(embed=brand("Games frozen", "Games are temporarily unavailable.", 0xED4245)); return False
-        now = time.monotonic(); previous = self.cooldowns.get(ctx.author.id, 0)
-        if now - previous < config.GAME_COOLDOWN_SECONDS:
-            await ctx.send(f"{config.E['lose']} Please wait {config.GAME_COOLDOWN_SECONDS - (now-previous):.1f}s before another game.", delete_after=4); return False
-        self.cooldowns[ctx.author.id] = now; return True
-
-
-bot = CasinoBot()
-
-
-class OwnerView(discord.ui.View):
-    def __init__(self, owner_id: int, timeout=180): super().__init__(timeout=timeout); self.owner_id = owner_id
-    async def interaction_check(self, interaction):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("This menu belongs to another user.", ephemeral=True); return False
-        return True
-
-
-HELP = {
-    "Games": "`.mines <bet> [mines]` — Find diamonds and cash out\n`.bj <bet>` / `.blackjack <bet>` — House blackjack\n`.cf <bet> [h/t/r]` — Coinflip\n`.hilo <bet>` — Higher or lower\n`.market <bet>` — Pick up or down\n`.baccarat/bacc <bet> <player/banker>` — Normal Baccarat with 1.95x Multi\n`.crazydice/cd <bet>` — Crazy Dice lower or higher choose dice amount and get 1.98x win",
-    "General": "`.whois [user]` — Detailed user information\n`.stats [user]` — Player statistics\n`.thread create|add|remove|delete` — Personal thread\n`.leaderboard` / `.lb` — Top gamblers\n`.help [command]` — Command help\n`.daily` — Claim 1 point every 24 hours\n`.rain <amount>` — Start a rain\n`.sos <amount>` — Split or steal event",
-    "Balance": "`.deposit` — LTC, SOL, or USDT deposits\n`.withdraw` — Request a withdrawal\n`.price <points>` — Convert points to USD\n`.ai <question>` — Ask the configured AI\n`.tip <user> <points>` — Send points\n`.vault deposit|withdraw <points>` — Personal vault\n`.balance [user]` / `.b` — Check balance\n`.claim <code>` — Claim a code\n`.rb`, `.weekly`, `.monthly` — Bonuses",
+RAIN_DURATIONS = {
+    1: 60,
+    2: 120,
+    5: 300,
+    10: 600,
 }
 
-
-class HelpView(OwnerView):
-    @discord.ui.select(placeholder="Select a category", options=[
-        discord.SelectOption(label="GAMES", value="Games", emoji=config.E["games"]),
-        discord.SelectOption(label="GENERAL", value="General", emoji=config.E["general"]),
-        discord.SelectOption(label="BALANCE", value="Balance", emoji=config.E["balance"]),
-    ])
-    async def choose(self, interaction, select):
-        category = select.values[0]
-        embed = brand(f"{category} Commands", HELP[category])
-        embed.set_footer(text=f"{config.CASINO_NAME} • Use .help <command> for details")
-        await interaction.response.edit_message(embed=embed, view=self)
-
-# ============================================================
-# GIFT CARD STORE
-# Paid + Fixed Rewards
-# ============================================================
-
-from io import BytesIO
-
-from PIL import Image, ImageDraw, ImageFont
-
-import discord
-
-
-# ============================================================
-# GIFT CARD PACK CONFIGURATION
-# ============================================================
-
-GC_PACKS = {
-    "gc_1": {
-        "label": "$1 Gift Card Pack",
-        "cost": 200.0,
-        "reward": 200.0,
-        "reward_usd": 1.00,
+RANKS = [
+    {
+        "name": "Bronze",
+        "stage": "I",
+        "wager": Decimal("50"),
+        "reward": Decimal("1"),
     },
-
-    "gc_5": {
-        "label": "$5 Gift Card Pack",
-        "cost": 1000.0,
-        "reward": 1000.0,
-        "reward_usd": 5.00,
+    {
+        "name": "Bronze",
+        "stage": "II",
+        "wager": Decimal("150"),
+        "reward": Decimal("2"),
     },
-
-    "gc_10": {
-        "label": "$10 Gift Card Pack",
-        "cost": 2000.0,
-        "reward": 2000.0,
-        "reward_usd": 10.00,
+    {
+        "name": "Bronze",
+        "stage": "III",
+        "wager": Decimal("300"),
+        "reward": Decimal("3"),
     },
-}
-
-
-# ============================================================
-# FONT HELPER
-# ============================================================
-
-def gc_font(size, bold=False):
-
-    if bold:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-
-    for path in paths:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            continue
-
-    return ImageFont.load_default()
-
-
-# ============================================================
-# ROUNDED RECTANGLE HELPER
-# ============================================================
-
-def gc_round_rect(
-    draw,
-    xy,
-    radius,
-    fill,
-    outline=None,
-    width=1
-):
-
-    draw.rounded_rectangle(
-        xy,
-        radius=radius,
-        fill=fill,
-        outline=outline,
-        width=width
-    )
-
-
-# ============================================================
-# GIFT CARD REWARD IMAGE
-# ============================================================
-
-def create_gc_reward_card(reward_usd: float):
-
-    WIDTH = 1000
-    HEIGHT = 500
-
-    # --------------------------------------------------------
-    # Base
-    # --------------------------------------------------------
-
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        (9, 13, 23)
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    # --------------------------------------------------------
-    # Background gradient
-    # --------------------------------------------------------
-
-    for y in range(HEIGHT):
-
-        ratio = y / HEIGHT
-
-        r = int(9 + (18 * ratio))
-        g = int(13 + (17 * ratio))
-        b = int(23 + (25 * ratio))
-
-        draw.line(
-            [(0, y), (WIDTH, y)],
-            fill=(r, g, b)
-        )
-
-    # --------------------------------------------------------
-    # Futuristic diagonal lines
-    # --------------------------------------------------------
-
-    for x in range(-HEIGHT, WIDTH, 80):
-
-        draw.line(
-            [
-                (x, HEIGHT),
-                (x + HEIGHT, 0)
-            ],
-            fill=(29, 37, 54),
-            width=2
-        )
-
-    # --------------------------------------------------------
-    # Outer card
-    # --------------------------------------------------------
-
-    card_x1 = 60
-    card_y1 = 50
-    card_x2 = WIDTH - 60
-    card_y2 = HEIGHT - 50
-
-    gc_round_rect(
-        draw,
-        (
-            card_x1,
-            card_y1,
-            card_x2,
-            card_y2
-        ),
-        38,
-        fill=(16, 22, 35),
-        outline=(68, 79, 103),
-        width=3
-    )
-
-    # --------------------------------------------------------
-    # Inner card
-    # --------------------------------------------------------
-
-    gc_round_rect(
-        draw,
-        (
-            card_x1 + 12,
-            card_y1 + 12,
-            card_x2 - 12,
-            card_y2 - 12
-        ),
-        30,
-        fill=(21, 28, 43),
-        outline=(38, 48, 69),
-        width=2
-    )
-
-    # --------------------------------------------------------
-    # Header
-    # --------------------------------------------------------
-
-    title_font = gc_font(
-        30,
-        True
-    )
-
-    draw.text(
-        (100, 82),
-        "GIFT CARD REVEAL",
-        font=title_font,
-        fill=(230, 234, 242)
-    )
-
-    # --------------------------------------------------------
-    # Subheader
-    # --------------------------------------------------------
-
-    small_font = gc_font(
-        19,
-        False
-    )
-
-    draw.text(
-        (100, 123),
-        "Your card contains",
-        font=small_font,
-        fill=(133, 146, 168)
-    )
-
-    # --------------------------------------------------------
-    # Reward box
-    # --------------------------------------------------------
-
-    reward_box = (
-        100,
-        165,
-        WIDTH - 100,
-        380
-    )
-
-    if reward_usd <= 0:
-
-        box_fill = (31, 32, 39)
-        box_outline = (84, 88, 100)
-        reward_color = (170, 174, 185)
-
-        reward_text = "$0"
-
-    else:
-
-        box_fill = (27, 35, 42)
-        box_outline = (72, 118, 91)
-        reward_color = (92, 232, 145)
-
-        if reward_usd == int(reward_usd):
-            reward_text = f"${int(reward_usd)}"
-        else:
-            reward_text = f"${reward_usd:,.2f}"
-
-    gc_round_rect(
-        draw,
-        reward_box,
-        25,
-        fill=box_fill,
-        outline=box_outline,
-        width=3
-    )
-
-    # --------------------------------------------------------
-    # Reward amount
-    # --------------------------------------------------------
-
-    reward_font = gc_font(
-        105,
-        True
-    )
-
-    bbox = draw.textbbox(
-        (0, 0),
-        reward_text,
-        font=reward_font
-    )
-
-    text_width = bbox[2] - bbox[0]
-
-    text_x = (
-        WIDTH - text_width
-    ) // 2
-
-    text_y = 205
-
-    draw.text(
-        (
-            text_x,
-            text_y
-        ),
-        reward_text,
-        font=reward_font,
-        fill=reward_color
-    )
-
-    # --------------------------------------------------------
-    # Bottom label
-    # --------------------------------------------------------
-
-    bottom_font = gc_font(
-        18,
-        False
-    )
-
-    bottom_text = "Gift Card Pack"
-
-    bbox = draw.textbbox(
-        (0, 0),
-        bottom_text,
-        font=bottom_font
-    )
-
-    bottom_width = (
-        bbox[2] - bbox[0]
-    )
-
-    draw.text(
-        (
-            (WIDTH - bottom_width) // 2,
-            417
-        ),
-        bottom_text,
-        font=bottom_font,
-        fill=(108, 119, 139)
-    )
-
-    # --------------------------------------------------------
-    # Convert image to memory
-    # --------------------------------------------------------
-
-    buffer = BytesIO()
-
-    image.save(
-        buffer,
-        format="PNG",
-        optimize=True
-    )
-
-    buffer.seek(0)
-
-    return buffer
-
-
-# ============================================================
-# GIFT CARD SELECT MENU
-# ============================================================
-
-class GiftCardSelect(discord.ui.Select):
-
-    def __init__(self, owner_id):
-
-        self.owner_id = owner_id
-
-        options = [
-            discord.SelectOption(
-                label="$1",
-                description="Purchase a $1 Gift Card Pack",
-                value="gc_1",
-                emoji="🎁"
-            ),
-
-            discord.SelectOption(
-                label="$5",
-                description="Purchase a $5 Gift Card Pack",
-                value="gc_5",
-                emoji="🎁"
-            ),
-
-            discord.SelectOption(
-                label="$10",
-                description="Purchase a $10 Gift Card Pack",
-                value="gc_10",
-                emoji="🎁"
-            ),
-        ]
-
-        super().__init__(
-            placeholder="Select a gift card pack...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-    # ========================================================
-    # DROPDOWN CALLBACK
-    # ========================================================
-
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        # ----------------------------------------------------
-        # User ownership check
-        # ----------------------------------------------------
-
-        if interaction.user.id != self.owner_id:
-
-            await interaction.response.send_message(
-                "This gift card menu belongs to someone else.",
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # Get selected pack
-        # ----------------------------------------------------
-
-        pack_id = self.values[0]
-
-        pack = GC_PACKS.get(
-            pack_id
-        )
-
-        if not pack:
-
-            await interaction.response.send_message(
-                "Invalid gift card pack.",
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # Get current balance
-        # ----------------------------------------------------
-
-        row = await bot.db.user(
-            interaction.user.id
-        )
-
-        if not row:
-
-            await interaction.response.send_message(
-                "Your account could not be found.",
-                ephemeral=True
-            )
-
-            return
-
-        current_balance = float(
-            row["balance"]
-        )
-
-        # ----------------------------------------------------
-        # Check balance
-        # ----------------------------------------------------
-
-        if current_balance < pack["cost"]:
-
-            await interaction.response.send_message(
-                embed=brand(
-                    "Not Enough Points",
-                    (
-                        f"You need **{money(pack['cost'])} points** "
-                        f"(${pack['reward_usd']:.2f}) to purchase "
-                        f"this pack.\n\n"
-                        f"Your balance: "
-                        f"**{money(current_balance)} points**"
-                    ),
-                    0xED4245
-                ),
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # Deduct purchase
-        # ----------------------------------------------------
-
-        success = await bot.db.change_balance(
-            interaction.user.id,
-            -pack["cost"],
-            "gc_purchase",
-            pack_id
-        )
-
-        if not success:
-
-            await interaction.response.send_message(
-                embed=brand(
-                    "Purchase Failed",
-                    (
-                        "Your balance could not be updated. "
-                        "Please try again."
-                    ),
-                    0xED4245
-                ),
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # Add fixed reward
-        # ----------------------------------------------------
-
-        reward_success = await bot.db.change_balance(
-            interaction.user.id,
-            pack["reward"],
-            "gc_reward",
-            pack_id
-        )
-
-        if not reward_success:
-
-            # Attempt to refund the purchase if the reward
-            # credit fails.
-
-            await bot.db.change_balance(
-                interaction.user.id,
-                pack["cost"],
-                "gc_refund",
-                pack_id
-            )
-
-            await interaction.response.send_message(
-                embed=brand(
-                    "Purchase Failed",
-                    (
-                        "The reward could not be credited, "
-                        "so your points were refunded."
-                    ),
-                    0xED4245
-                ),
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # Generate reward card
-        # ----------------------------------------------------
-
-        image_buffer = create_gc_reward_card(
-            pack["reward_usd"]
-        )
-
-        image_file = discord.File(
-            image_buffer,
-            filename="gift_card_reward.png"
-        )
-
-        # ----------------------------------------------------
-        # Result
-        # ----------------------------------------------------
-
-        result_title = "🍀 Lucky!"
-
-        result_description = (
-            f"Congratulations! Your card contained "
-            f"**${pack['reward_usd']:,.2f}**.\n\n"
-            f"• Reward: **{money(pack['reward'])} points** "
-            f"(${pack['reward_usd']:,.2f})\n"
-            f"• Cost: **{money(pack['cost'])} points** "
-            f"(${pack['cost'] / 200:.2f})"
-        )
-
-        result_embed = brand(
-            result_title,
-            result_description,
-            0x57F287
-        )
-
-        result_embed.set_image(
-            url="attachment://gift_card_reward.png"
-        )
-
-        result_embed.set_footer(
-            text="Gift Cards Store"
-        )
-
-        # ----------------------------------------------------
-        # Replace store message with result
-        # ----------------------------------------------------
-
-        await interaction.response.edit_message(
-            embed=result_embed,
-            view=None,
-            attachments=[image_file]
-        )
-
-        self.view.stop()
-
-
-# ============================================================
-# GIFT CARD VIEW
-# ============================================================
-
-class GiftCardView(discord.ui.View):
-
-    def __init__(self, owner_id):
-
-        super().__init__(
-            timeout=60
-        )
-
-        self.owner_id = owner_id
-
-        self.message = None
-
-        self.add_item(
-            GiftCardSelect(
-                owner_id
-            )
-        )
-
-    # ========================================================
-    # TIMEOUT
-    # ========================================================
-
-    async def on_timeout(self):
-
-        for item in self.children:
-
-            item.disabled = True
-
-        if self.message:
-
-            try:
-
-                await self.message.edit(
-                    view=self
-                )
-
-            except discord.HTTPException:
-
-                pass
-
-
-# ============================================================
-# .GC COMMAND
-# ============================================================
-
-@bot.command(
-    name="gc"
-)
-async def gc(ctx):
-
-    # --------------------------------------------------------
-    # Store embed
-    # --------------------------------------------------------
-
-    embed = brand(
-        "Gift Cards Store",
-        (
-            "Select a pack tier from the dropdown menu "
-            "below to get started!"
-        ),
-        0x3498DB
-    )
-
-    # --------------------------------------------------------
-    # $1
-    # --------------------------------------------------------
-
-    embed.add_field(
-        name="$1 Gift Card Pack",
-        value=(
-            "**Cost:** 200 points ($1.00)\n\n"
-            "**How It Works:**\n"
-            "• Purchase a pack using points.\n"
-            "• Reveal your gift card.\n"
-            "• Your reward is automatically credited "
-            "to your balance."
-        ),
-        inline=False
-    )
-
-    # --------------------------------------------------------
-    # $5
-    # --------------------------------------------------------
-
-    embed.add_field(
-        name="$5 Gift Card Pack",
-        value=(
-            "**Cost:** 1,000 points ($5.00)\n\n"
-            "**How It Works:**\n"
-            "• Purchase a pack using points.\n"
-            "• Reveal your gift card.\n"
-            "• Your reward is automatically credited "
-            "to your balance."
-        ),
-        inline=False
-    )
-
-    # --------------------------------------------------------
-    # $10
-    # --------------------------------------------------------
-
-    embed.add_field(
-        name="$10 Gift Card Pack",
-        value=(
-            "**Cost:** 2,000 points ($10.00)\n\n"
-            "**How It Works:**\n"
-            "• Purchase a pack using points.\n"
-            "• Reveal your gift card.\n"
-            "• Your reward is automatically credited "
-            "to your balance."
-        ),
-        inline=False
-    )
-
-    # --------------------------------------------------------
-    # Dropdown
-    # --------------------------------------------------------
-
-    view = GiftCardView(
-        ctx.author.id
-    )
-
-    message = await ctx.send(
-        embed=embed,
-        view=view
-    )
-
-    view.message = message
-
-# ============================================================
-# WAGER RACE - IMAGE LEADERBOARD
-# ============================================================
-
-import io
-import aiohttp
-import discord
-from PIL import Image, ImageDraw, ImageFont
-
-
-# ------------------------------------------------------------
-# SETTINGS
-# ------------------------------------------------------------
-
-RACE_WIDTH = 1032
-RACE_HEIGHT = 570
-
-
-# ------------------------------------------------------------
-# FONT HELPER
-# ------------------------------------------------------------
-
-def race_font(size, bold=False):
-
-    paths = []
-
-    if bold:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-        ]
-    else:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        ]
-
-    for path in paths:
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
-
-    return ImageFont.load_default()
-
-
-# ------------------------------------------------------------
-# CENTER TEXT
-# ------------------------------------------------------------
-
-def race_center_text(draw, xy, text, font, fill):
-
-    bbox = draw.textbbox(
-        (0, 0),
-        text,
-        font=font
-    )
-
-    width = bbox[2] - bbox[0]
-    height = bbox[3] - bbox[1]
-
-    x = xy[0] - width / 2
-    y = xy[1] - height / 2
-
-    draw.text(
-        (x, y),
-        text,
-        font=font,
-        fill=fill
-    )
-
-
-# ------------------------------------------------------------
-# CIRCLE AVATAR
-# ------------------------------------------------------------
-
-def race_avatar(image, avatar, center, size):
-
-    avatar = avatar.convert("RGB")
-
-    avatar = avatar.resize(
-        (size, size),
-        Image.Resampling.LANCZOS
-    )
-
-    mask = Image.new(
-        "L",
-        (size, size),
-        0
-    )
-
-    mask_draw = ImageDraw.Draw(mask)
-
-    mask_draw.ellipse(
-        (0, 0, size, size),
-        fill=255
-    )
-
-    x = int(center[0] - size / 2)
-    y = int(center[1] - size / 2)
-
-    image.paste(
-        avatar,
-        (x, y),
-        mask
-    )
-
-
-# ------------------------------------------------------------
-# GLOW CIRCLE
-# ------------------------------------------------------------
-
-def race_circle_glow(
-    image,
-    center,
-    radius
-):
-
-    glow = Image.new(
-        "RGBA",
-        image.size,
-        (0, 0, 0, 0)
-    )
-
-    draw = ImageDraw.Draw(glow)
-
-    for i in range(18, 0, -1):
-
-        r = radius + i * 2
-
-        alpha = max(
-            5,
-            80 - i * 4
-        )
-
-        draw.ellipse(
-            (
-                center[0] - r,
-                center[1] - r,
-                center[0] + r,
-                center[1] + r
-            ),
-            outline=(60, 170, 255, alpha),
-            width=3
-        )
-
-    image.alpha_composite(glow)
-
-
-# ------------------------------------------------------------
-# CROWN
-# ------------------------------------------------------------
-
-def draw_crown(
-    draw,
-    center_x,
-    center_y,
-    width,
-    height,
-    number
-):
-
-    x1 = center_x - width // 2
-    x2 = center_x + width // 2
-    y1 = center_y
-    y2 = center_y + height
-
-    gold = (225, 240, 255)
-    gold_dark = (120, 170, 225)
-
-    # Crown shape
-    points = [
-        (x1, y2),
-        (x1 + width * 0.10, y1 + height * 0.30),
-        (x1 + width * 0.28, y1 + height * 0.55),
-        (center_x, y1),
-        (x1 + width * 0.52, y1 + height * 0.52),
-        (x2 - width * 0.10, y1 + height * 0.25),
-        (x2, y1 + height * 0.55),
-        (x2 - width * 0.10, y2),
-    ]
-
-    draw.polygon(
-        points,
-        fill=gold,
-        outline=(180, 220, 255)
-    )
-
-    draw.line(
-        [
-            (x1, y2),
-            (x2 - width * 0.10, y2)
-        ],
-        fill=gold_dark,
-        width=5
-    )
-
-    race_center_text(
-        draw,
-        (center_x, y1 + height * 0.55),
-        str(number),
-        race_font(30, True),
-        (35, 100, 180)
-    )
-
-
-# ------------------------------------------------------------
-# PODIUM
-# ------------------------------------------------------------
-
-def draw_podium(
-    draw,
-    center_x,
-    top_y,
-    width,
-    height,
-    rank
-):
-
-    x1 = center_x - width // 2
-    x2 = center_x + width // 2
-    bottom = RACE_HEIGHT - 18
-
-    # Podium gradient-style layers
-    draw.polygon(
-        [
-            (x1, bottom),
-            (x1 + 28, top_y + 20),
-            (x2 - 28, top_y + 20),
-            (x2, bottom)
-        ],
-        fill=(15, 75, 140)
-    )
-
-    draw.polygon(
-        [
-            (x1 + 28, top_y + 20),
-            (center_x, top_y),
-            (x2 - 28, top_y + 20)
-        ],
-        fill=(30, 105, 190)
-    )
-
-    draw.line(
-        [
-            (x1 + 28, top_y + 20),
-            (center_x, top_y),
-            (x2 - 28, top_y + 20)
-        ],
-        fill=(90, 190, 255),
-        width=3
-    )
-
-    # Rank number
-    race_center_text(
-        draw,
-        (center_x, top_y + 35),
-        str(rank),
-        race_font(25, True),
-        (220, 240, 255)
-    )
-
-
-# ------------------------------------------------------------
-# DOWNLOAD AVATAR
-# ------------------------------------------------------------
-
-async def get_race_avatar(user):
-
-    try:
-
-        avatar = user.display_avatar
-
-        data = await avatar.read()
-
-        image = Image.open(
-            io.BytesIO(data)
-        ).convert("RGBA")
-
-        return image
-
-    except Exception as error:
-
-        print(
-            f"[RACE AVATAR ERROR] {error}"
-        )
-
-        # Default avatar
-        image = Image.new(
-            "RGBA",
-            (256, 256),
-            (35, 65, 100, 255)
-        )
-
-        draw = ImageDraw.Draw(image)
-
-        race_center_text(
-            draw,
-            (128, 128),
-            "?",
-            race_font(100, True),
-            (220, 240, 255)
-        )
-
-        return image
-
-
-# ------------------------------------------------------------
-# CREATE RACE IMAGE
-# ------------------------------------------------------------
-
-async def create_race_image(rows):
-
-    image = Image.new(
-        "RGBA",
-        (RACE_WIDTH, RACE_HEIGHT),
-        (4, 20, 40, 255)
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    # --------------------------------------------------------
-    # BACKGROUND
-    # --------------------------------------------------------
-
-    # Dark blue gradient
-    for y in range(RACE_HEIGHT):
-
-        ratio = y / RACE_HEIGHT
-
-        r = int(4 + ratio * 5)
-        g = int(20 + ratio * 20)
-        b = int(40 + ratio * 50)
-
-        draw.line(
-            (0, y, RACE_WIDTH, y),
-            fill=(r, g, b)
-        )
-
-    # --------------------------------------------------------
-    # ABSTRACT BLUE WAVES
-    # --------------------------------------------------------
-
-    for offset in range(0, 700, 90):
-
-        points = []
-
-        for x in range(-100, RACE_WIDTH + 100, 20):
-
-            y = (
-                300
-                + offset * 0.08
-                + 45 * __import__("math").sin(
-                    x / 150
-                )
-            )
-
-            points.append(
-                (x, y + offset * 0.15)
-            )
-
-        draw.line(
-            points,
-            fill=(8, 65, 125, 110),
-            width=45
-        )
-
-    # Decorative diagonal streaks
-    for x in range(-300, RACE_WIDTH, 160):
-
-        draw.line(
-            [
-                (x, 0),
-                (x + 300, 0),
-                (x + 80, 220)
-            ],
-            fill=(15, 90, 175, 80),
-            width=3
-        )
-
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
-
-    casino_name = str(
-        getattr(
-            config,
-            "CASINO_NAME",
-            "CASINO"
-        )
-    ).upper()
-
-    race_center_text(
-        draw,
-        (170, 82),
-        casino_name,
-        race_font(42, True),
-        (235, 245, 255)
-    )
-
-    race_center_text(
-        draw,
-        (170, 125),
-        "WAGER RACE",
-        race_font(16, False),
-        (160, 200, 240)
-    )
-
-    # Small divider
-    draw.line(
-        (315, 48, 315, 145),
-        fill=(55, 140, 230),
-        width=2
-    )
-
-    # Decorative diamonds
-    for x, y, size in [
-        (840, 85, 32),
-        (945, 145, 20),
-        (905, 42, 13),
-    ]:
-
-        draw.polygon(
-            [
-                (x, y - size),
-                (x + size * 0.65, y),
-                (x, y + size),
-                (x - size * 0.65, y)
-            ],
-            fill=(45, 145, 245, 170),
-            outline=(130, 210, 255)
-        )
-
-    # --------------------------------------------------------
-    # PODIUM POSITIONS
-    # --------------------------------------------------------
-
-    podium_data = [
-        {
-            "x": 515,
-            "top": 300,
-            "width": 300,
-            "height": 230,
-            "avatar_y": 355,
-            "avatar_size": 125,
-        },
-        {
-            "x": 235,
-            "top": 380,
-            "width": 255,
-            "height": 150,
-            "avatar_y": 420,
-            "avatar_size": 105,
-        },
-        {
-            "x": 800,
-            "top": 380,
-            "width": 255,
-            "height": 150,
-            "avatar_y": 420,
-            "avatar_size": 105,
-        }
-    ]
-
-    # --------------------------------------------------------
-    # DRAW PODIUMS
-    # --------------------------------------------------------
-
-    draw_podium(
-        draw,
-        515,
-        300,
-        300,
-        230,
-        1
-    )
-
-    draw_podium(
-        draw,
-        235,
-        380,
-        255,
-        150,
-        2
-    )
-
-    draw_podium(
-        draw,
-        800,
-        380,
-        255,
-        150,
-        3
-    )
-
-    # --------------------------------------------------------
-    # PROCESS TOP 3
-    # --------------------------------------------------------
-
-    for index in range(3):
-
-        if index >= len(rows):
-            continue
-
-        row = rows[index]
-
-        user_id = int(
-            row["user_id"]
-        )
-
-        wagered = float(
-            row["wagered"]
-        )
-
-        user = bot.get_user(
-            user_id
-        )
-
-        if user is None:
-
-            try:
-                user = await bot.fetch_user(
-                    user_id
-                )
-            except Exception:
-                user = None
-
-        if user:
-
-            username = user.name
-
-            # Prevent extremely long names
-            if len(username) > 15:
-                username = username[:14] + "…"
-
-            avatar = await get_race_avatar(
-                user
-            )
-
-        else:
-
-            username = "Unknown User"
-
-            avatar = Image.new(
-                "RGBA",
-                (256, 256),
-                (30, 60, 100, 255)
-            )
-
-        data = podium_data[index]
-
-        # ----------------------------------------------------
-        # AVATAR GLOW
-        # ----------------------------------------------------
-
-        race_circle_glow(
-            image,
-            (
-                data["x"],
-                data["avatar_y"]
-            ),
-            data["avatar_size"] // 2 + 5
-        )
-
-        # Avatar border
-        draw.ellipse(
-            (
-                data["x"] - data["avatar_size"] // 2 - 5,
-                data["avatar_y"] - data["avatar_size"] // 2 - 5,
-                data["x"] + data["avatar_size"] // 2 + 5,
-                data["avatar_y"] + data["avatar_size"] // 2 + 5
-            ),
-            outline=(70, 175, 255),
-            width=5
-        )
-
-        race_avatar(
-            image,
-            avatar,
-            (
-                data["x"],
-                data["avatar_y"]
-            ),
-            data["avatar_size"]
-        )
-
-        # ----------------------------------------------------
-        # CROWN
-        # ----------------------------------------------------
-
-        crown_width = (
-            105 if index == 0 else 85
-        )
-
-        crown_height = (
-            75 if index == 0 else 60
-        )
-
-        draw_crown(
-            draw,
-            data["x"],
-            data["avatar_y"] - data["avatar_size"] // 2 - 55,
-            crown_width,
-            crown_height,
-            index + 1
-        )
-
-        # ----------------------------------------------------
-        # USERNAME
-        # ----------------------------------------------------
-
-        username_y = (
-            data["avatar_y"]
-            + data["avatar_size"] // 2
-            + 30
-        )
-
-        race_center_text(
-            draw,
-            (
-                data["x"],
-                username_y
-            ),
-            f"@{username}",
-            race_font(
-                25 if index == 0 else 21,
-                True
-            ),
-            (235, 245, 255)
-        )
-
-        # ----------------------------------------------------
-        # WAGERED AMOUNT
-        # ----------------------------------------------------
-
-        amount_y = username_y + 38
-
-        race_center_text(
-            draw,
-            (
-                data["x"],
-                amount_y
-            ),
-            f"{wagered:,.2f}",
-            race_font(
-                29 if index == 0 else 25,
-                True
-            ),
-            (225, 240, 255)
-        )
-
-    # --------------------------------------------------------
-    # FINAL BORDER
-    # --------------------------------------------------------
-
-    draw.rounded_rectangle(
-        (
-            2,
-            2,
-            RACE_WIDTH - 3,
-            RACE_HEIGHT - 3
-        ),
-        radius=10,
-        outline=(35, 115, 200),
-        width=3
-    )
-
-    return image
-
-
-# ============================================================
-# .RACE COMMAND
-# ============================================================
-
-@bot.command(name="race")
-async def race(ctx):
-
-    try:
-
-        # ----------------------------------------------------
-        # GET TOP 3 WAGERERS
-        # ----------------------------------------------------
-
-        rows = await bot.db.top_wager_race(3)
-
-        if not rows:
-
-            await ctx.send(
-                embed=brand(
-                    "🏁 Wager Race",
-                    "No wagers have been recorded yet.",
-                    0xED4245
-                )
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # CREATE IMAGE
-        # ----------------------------------------------------
-
-        race_image = await create_race_image(
-            rows
-        )
-
-        # ----------------------------------------------------
-        # SAVE TO MEMORY
-        # ----------------------------------------------------
-
-        buffer = io.BytesIO()
-
-        race_image.save(
-            buffer,
-            format="PNG"
-        )
-
-        buffer.seek(0)
-
-        # ----------------------------------------------------
-        # SEND IMAGE
-        # ----------------------------------------------------
-
-        file = discord.File(
-            buffer,
-            filename="wager_race.png"
-        )
-
-        await ctx.send(
-            file=file
-        )
-
-    except Exception as error:
-
-        print(
-            f"[RACE ERROR] {error}"
-        )
-
-        await ctx.send(
-            embed=brand(
-                "Race Error",
-                "Something went wrong while creating the wager race.",
-                0xED4245
-            )
-        )
-        
-# =========================
-# BACCARAT
-# .bacc / .baccarat
-# =========================
-
-import io
-import hashlib
-import secrets
-import random
-from pathlib import Path
-from decimal import Decimal, ROUND_DOWN
-
-import discord
-from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
-
-
-# =========================
-# CONFIG
-# =========================
-
-BACCARAT_MIN_BET = Decimal("20")
-BACCARAT_PAYOUT = Decimal("1.92")
-
-# Card images are directly beside bot.py
-CARD_IMAGE_DIR = Path(__file__).parent
-
-
-# =========================
-# CARD DATA
-# =========================
-
-BACCARAT_RANKS = [
-    "ace",
-    "2",
-    "3",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-    "9",
-    "10",
-    "jack",
-    "queen",
-    "king",
+    {
+        "name": "Silver",
+        "stage": "I",
+        "wager": Decimal("400"),
+        "reward": Decimal("5"),
+    },
+    {
+        "name": "Silver",
+        "stage": "II",
+        "wager": Decimal("500"),
+        "reward": Decimal("8"),
+    },
+    {
+        "name": "Silver",
+        "stage": "III",
+        "wager": Decimal("600"),
+        "reward": Decimal("10"),
+    },
+    {
+        "name": "Diamond",
+        "stage": None,
+        "wager": Decimal("1000"),
+        "reward": Decimal("15"),
+    },
+    {
+        "name": "Amethyst",
+        "stage": None,
+        "wager": Decimal("1200"),
+        "reward": Decimal("20"),
+    },
+    {
+        "name": "Celestial",
+        "stage": None,
+        "wager": Decimal("1500"),
+        "reward": Decimal("30"),
+    },
 ]
 
-BACCARAT_SUITS = [
-    "clubs",
-    "diamonds",
-    "hearts",
-    "spades",
+AFFILIATE_TIERS = [
+    (1, Decimal("0.0010")),
+    (10, Decimal("0.0020")),
+    (25, Decimal("0.0035")),
+    (100, Decimal("0.0050")),
 ]
 
-BACCARAT_VALUES = {
-    "ace": 1,
-    "2": 2,
-    "3": 3,
-    "4": 4,
-    "5": 5,
-    "6": 6,
-    "7": 7,
-    "8": 8,
-    "9": 9,
-    "10": 0,
-    "jack": 0,
-    "queen": 0,
-    "king": 0,
+CODE_REQUIREMENTS = {
+    1: {
+        "name": "$1 Deposit",
+        "type": "deposit",
+        "amount": Decimal("1"),
+    },
+    2: {
+        "name": "$25 Deposit",
+        "type": "deposit",
+        "amount": Decimal("25"),
+    },
+    3: {
+        "name": "$10 Wagered",
+        "type": "wager",
+        "amount": Decimal("10"),
+    },
 }
 
 
-# =========================
-# HELPERS
-# =========================
+# ============================================================
+# MONEY HELPERS
+# ============================================================
 
-def baccarat_card_display(card):
-    rank, suit = card
+def D(value) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
 
-    rank_display = {
-        "ace": "A",
-        "jack": "J",
-        "queen": "Q",
-        "king": "K",
-    }.get(rank, rank)
+    if value is None:
+        return Decimal("0")
 
-    suit_display = {
-        "clubs": "♣",
-        "diamonds": "♦",
-        "hearts": "♥",
-        "spades": "♠",
-    }[suit]
-
-    return f"{rank_display}{suit_display}"
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
 
 
-def baccarat_total(cards):
-    total = sum(
-        BACCARAT_VALUES[rank]
-        for rank, suit in cards
-    )
-
-    return total % 10
-
-
-def baccarat_deck():
-    return [
-        (rank, suit)
-        for suit in BACCARAT_SUITS
-        for rank in BACCARAT_RANKS
-    ]
-
-
-def get_card_image(card):
-    """
-    Card files are directly beside bot.py.
-
-    Example:
-        bot.py
-        ace_of_clubs.png
-        10_of_clubs.png
-        jack_of_clubs.png
-    """
-
-    rank, suit = card
-
-    filename = f"{rank}_of_{suit}.png"
-    path = CARD_IMAGE_DIR / filename
-
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Missing card image: {path}"
-        )
-
-    return Image.open(path).convert("RGBA")
-
-
-def format_points(value):
-    value = Decimal(str(value)).quantize(
+def money(value) -> str:
+    amount = D(value).quantize(
         Decimal("0.01"),
-        rounding=ROUND_DOWN
+        rounding=ROUND_DOWN,
     )
+    return f"${amount:,.2f}"
 
-    if value == value.to_integral():
-        return f"{int(value):,}"
 
-    return f"{value:,.2f}"
-
-
-# =========================
-# BACCARAT IMAGE
-# =========================
-
-def create_baccarat_image(
-    player_cards,
-    dealer_cards,
-    player_total,
-    dealer_total
-):
-    WIDTH = 1000
-    HEIGHT = 650
-
-    # Green casino table
-    img = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        (18, 91, 58)
-    )
-
-    draw = ImageDraw.Draw(img)
-
-    # Gold border
-    draw.rounded_rectangle(
-        (15, 15, WIDTH - 15, HEIGHT - 15),
-        radius=30,
-        outline=(215, 170, 65),
-        width=5
-    )
-
-    # Fonts
-    try:
-        title_font = ImageFont.truetype(
-            "arialbd.ttf",
-            42
-        )
-
-        section_font = ImageFont.truetype(
-            "arialbd.ttf",
-            30
-        )
-
-    except Exception:
-        title_font = ImageFont.load_default()
-        section_font = ImageFont.load_default()
-
-    # =========================
-    # TITLE
-    # =========================
-
-    title = "BACCARAT"
-
-    bbox = draw.textbbox(
-        (0, 0),
-        title,
-        font=title_font
-    )
-
-    draw.text(
-        (
-            (WIDTH - (bbox[2] - bbox[0])) / 2,
-            35
-        ),
-        title,
-        fill=(255, 220, 120),
-        font=title_font
-    )
-
-    # =========================
-    # CARD DRAWING
-    # =========================
-
-    def draw_cards(cards, y):
-
-        card_width = 150
-        card_height = 210
-        gap = 25
-
-        total_width = (
-            len(cards) * card_width
-            + (len(cards) - 1) * gap
-        )
-
-        start_x = (
-            WIDTH - total_width
-        ) // 2
-
-        for i, card in enumerate(cards):
-
-            x = (
-                start_x
-                + i * (card_width + gap)
-            )
-
-            # White card background
-            draw.rounded_rectangle(
-                (
-                    x,
-                    y,
-                    x + card_width,
-                    y + card_height
-                ),
-                radius=12,
-                fill="white",
-                outline=(30, 30, 30),
-                width=2
-            )
-
-            try:
-
-                card_img = get_card_image(card)
-
-                card_img.thumbnail(
-                    (
-                        card_width - 10,
-                        card_height - 10
-                    )
-                )
-
-                px = x + (
-                    card_width
-                    - card_img.width
-                ) // 2
-
-                py = y + (
-                    card_height
-                    - card_img.height
-                ) // 2
-
-                img.paste(
-                    card_img,
-                    (px, py),
-                    card_img
-                )
-
-            except Exception:
-
-                text = baccarat_card_display(
-                    card
-                )
-
-                tb = draw.textbbox(
-                    (0, 0),
-                    text,
-                    font=section_font
-                )
-
-                draw.text(
-                    (
-                        x + (
-                            card_width
-                            - (tb[2] - tb[0])
-                        ) / 2,
-                        y + 80
-                    ),
-                    text,
-                    fill="black",
-                    font=section_font
-                )
-
-    # =========================
-    # DEALER
-    # =========================
-
-    draw.text(
-        (45, 100),
-        f"DEALER  •  TOTAL {dealer_total}",
-        fill="white",
-        font=section_font
-    )
-
-    draw_cards(
-        dealer_cards,
-        140
-    )
-
-    # =========================
-    # PLAYER
-    # =========================
-
-    draw.text(
-        (45, 385),
-        f"PLAYER  •  TOTAL {player_total}",
-        fill="white",
-        font=section_font
-    )
-
-    draw_cards(
-        player_cards,
-        425
-    )
-
-    # =========================
-    # SAVE IMAGE
-    # =========================
-
-    output = io.BytesIO()
-
-    img.save(
-        output,
-        format="PNG"
-    )
-
-    output.seek(0)
-
-    return output
-
-
-# =========================
-# BACCARAT COMMAND
-# =========================
-
-@bot.command(
-    name="bacc",
-    aliases=["baccarat"]
-)
-@commands.cooldown(
-    1,
-    2,
-    commands.BucketType.user
-)
-async def bacc(ctx, bet=None, choice=None):
-
-    # =========================
-    # GAME CHANNEL CHECK
-    # =========================
-
-    try:
-
-        allowed = await bot.game_allowed(ctx)
-
-        if not allowed:
-            return
-
-    except Exception:
-        pass
-
-    # =========================
-    # USAGE
-    # =========================
-
-    if bet is None or choice is None:
-
-        embed = brand(
-            "🎴 Baccarat",
-            (
-                "**Usage:**\n"
-                "`.bacc [amount] [player/dealer]`\n\n"
-
-                "**Examples:**\n"
-                "`.bacc 20 player`\n"
-                "`.bacc 20 dealer`\n"
-                "`.bacc 100 player`\n"
-                "`.bacc half dealer`\n"
-                "`.bacc all player`\n\n"
-
-                "**Player** = bet on Player\n"
-                "**Dealer** = bet on Dealer\n\n"
-
-                f"Minimum bet: "
-                f"**{format_points(BACCARAT_MIN_BET)} points**"
-            )
-        )
-
-        return await ctx.send(
-            embed=embed
-        )
-
-    # =========================
-    # CHOICE
-    # =========================
-
-    choice = choice.lower().strip()
-
-    choice_aliases = {
-        "p": "player",
-        "player": "player",
-        "players": "player",
-
-        "d": "dealer",
-        "dealer": "dealer",
-        "banker": "dealer",
-        "b": "dealer",
-    }
-
-    if choice not in choice_aliases:
-
-        embed = brand(
-            "🎴 Baccarat",
-            (
-                "Invalid choice.\n\n"
-                "Use:\n"
-                "`player` / `p`\n"
-                "`dealer` / `d`"
-            )
-        )
-
-        return await ctx.send(
-            embed=embed
-        )
-
-    choice = choice_aliases[choice]
-
-    # =========================
-    # BALANCE
-    # =========================
-
-    row = await bot.db.user(
-        ctx.author.id
-    )
-
-    balance = Decimal(
-        str(row["balance"])
-    )
-
-    # =========================
-    # PARSE BET
-    # =========================
-
-    bet_text = str(
-        bet
-    ).lower().strip()
-
-    try:
-
-        if bet_text in ("all", "max"):
-
-            amount = balance
-
-        elif bet_text == "half":
-
-            amount = (
-                balance
-                / Decimal("2")
-            )
-
-        else:
-
-            amount = Decimal(
-                str(
-                    parse_amount(
-                        bet_text
-                    )
-                )
-            )
-
-    except Exception:
-
-        embed = brand(
-            "🎴 Baccarat",
-            "Invalid bet amount."
-        )
-
-        return await ctx.send(
-            embed=embed
-        )
-
-    amount = amount.quantize(
+def plain_money(value) -> str:
+    amount = D(value).quantize(
         Decimal("0.01"),
-        rounding=ROUND_DOWN
+        rounding=ROUND_DOWN,
     )
+    return f"{amount:,.2f}"
 
-    # =========================
-    # VALIDATE BET
-    # =========================
 
-    if amount < BACCARAT_MIN_BET:
-
-        embed = brand(
-            "🎴 Baccarat",
-            (
-                f"Minimum bet is "
-                f"**{format_points(BACCARAT_MIN_BET)} points**."
-            )
-        )
-
-        return await ctx.send(
-            embed=embed
-        )
-
-    if amount > balance:
-
-        embed = brand(
-            "🎴 Baccarat",
-            (
-                f"You only have "
-                f"**{format_points(balance)} points**."
-            )
-        )
-
-        return await ctx.send(
-            embed=embed
-        )
-
-    # =========================
-    # DEDUCT BET
-    # =========================
-
-    deducted = await bot.db.change_balance(
-        ctx.author.id,
-        -float(amount),
-        "game_bet",
-        "baccarat"
-    )
-
-    if not deducted:
-
-        embed = brand(
-            "🎴 Baccarat",
-            "Your balance changed before the bet could be placed."
-        )
-
-        return await ctx.send(
-            embed=embed
-        )
-
-    # =========================
-    # PROVABLY FAIR
-    # =========================
-
-    server_seed = secrets.token_hex(32)
-
-    server_seed_hash = hashlib.sha256(
-        server_seed.encode()
-    ).hexdigest()
-
-    client_seed = str(
-        ctx.author.id
-    )
-
-    combined_seed = (
-        f"{server_seed}:{client_seed}"
-    )
-
-    seed_hash = hashlib.sha256(
-        combined_seed.encode()
-    ).hexdigest()
-
-    rng = random.Random(
-        int(seed_hash, 16)
-    )
-
-    # =========================
-    # DEAL
-    # =========================
-
-    deck = baccarat_deck()
-
-    rng.shuffle(deck)
-
-    player_cards = [
-        deck[0],
-        deck[2]
-    ]
-
-    dealer_cards = [
-        deck[1],
-        deck[3]
-    ]
-
-    player_total = baccarat_total(
-        player_cards
-    )
-
-    dealer_total = baccarat_total(
-        dealer_cards
-    )
-
-    # =========================
-    # DETERMINE WINNER
-    # =========================
-
-    if player_total > dealer_total:
-
-        winner = "player"
-
-    elif dealer_total > player_total:
-
-        winner = "dealer"
-
-    else:
-
-        winner = "tie"
-
-    # =========================
-    # DEALING EMBED
-    # =========================
-
-    dealing_embed = brand(
-        "🎴 Baccarat - Higher Card Wins",
-        (
-            f"**Bet:** {format_points(amount)} points\n"
-            f"**Choice:** {choice.title()}\n\n"
-            "🃏 **Dealing Card...**"
-        )
-    )
-
-    # Grey embed
-    dealing_embed.color = discord.Color.light_grey()
-
-    # Send initial message
-    message = await ctx.send(
-        embed=dealing_embed
-    )
-
-    # =========================
-    # 3 SECOND DEALING DELAY
-    # =========================
-
-    await discord.utils.sleep_until(
-        discord.utils.utcnow()
-        + __import__("datetime").timedelta(
-            seconds=3
-        )
-    )
-
-    # =========================
-    # RESULT / PAYOUT
-    # =========================
-
-    if winner == "tie":
-
-        payout = amount
-
-        await bot.db.record_game(
-            ctx.author.id,
-            float(amount),
-            float(payout),
-            "baccarat"
-        )
-
-        result_title = (
-            "🎴 Baccarat - TIE"
-        )
-
-        result_text = (
-            f"**Baccarat Results - HIGHER Wins!**\n\n"
-            f"Player: **{baccarat_card_display(player_cards[0])}, "
-            f"{baccarat_card_display(player_cards[1])}** "
-            f"(Total: **{player_total}**)\n\n"
-            f"Dealer: **{baccarat_card_display(dealer_cards[0])}, "
-            f"{baccarat_card_display(dealer_cards[1])}** "
-            f"(Total: **{dealer_total}**)\n\n"
-            f"Your choice: **{choice.title()}**\n\n"
-            f"🤝 **Tie! Your {format_points(payout)} point bet was returned.**"
-        )
-
-        result_color = discord.Color.gold()
-
-    elif winner == choice:
-
-        payout = (
-            amount * BACCARAT_PAYOUT
-        ).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_DOWN
-        )
-
-        # record_game() credits payout.
-        # DO NOT change_balance(+payout).
-
-        await bot.db.record_game(
-            ctx.author.id,
-            float(amount),
-            float(payout),
-            "baccarat"
-        )
-
-        result_title = (
-            "🎴 Baccarat - WIN"
-        )
-
-        result_text = (
-            f"**Baccarat Results - HIGHER Wins!**\n\n"
-            f"Player: **{baccarat_card_display(player_cards[0])}, "
-            f"{baccarat_card_display(player_cards[1])}** "
-            f"(Total: **{player_total}**)\n\n"
-            f"Dealer: **{baccarat_card_display(dealer_cards[0])}, "
-            f"{baccarat_card_display(dealer_cards[1])}** "
-            f"(Total: **{dealer_total}**)\n\n"
-            f"Your choice: **{choice.title()}**\n\n"
-            f"🟢 You won **{format_points(payout)} points**!"
-        )
-
-        result_color = discord.Color.green()
-
-    else:
-
-        payout = Decimal("0")
-
-        await bot.db.record_game(
-            ctx.author.id,
-            float(amount),
-            0,
-            "baccarat"
-        )
-
-        result_title = (
-            "🎴 Baccarat - LOSS"
-        )
-
-        result_text = (
-            f"**Baccarat Results - HIGHER Wins!**\n\n"
-            f"Player: **{baccarat_card_display(player_cards[0])}, "
-            f"{baccarat_card_display(player_cards[1])}** "
-            f"(Total: **{player_total}**)\n\n"
-            f"Dealer: **{baccarat_card_display(dealer_cards[0])}, "
-            f"{baccarat_card_display(dealer_cards[1])}** "
-            f"(Total: **{dealer_total}**)\n\n"
-            f"Your choice: **{choice.title()}**\n\n"
-            f"🔴 You lost **{format_points(amount)} points**."
-        )
-
-        result_color = discord.Color.red()
-
-    # =========================
-    # RESULT IMAGE
-    # =========================
-
-    try:
-
-        image_bytes = create_baccarat_image(
-            player_cards,
-            dealer_cards,
-            player_total,
-            dealer_total
-        )
-
-        image_file = discord.File(
-            image_bytes,
-            filename="baccarat.png"
-        )
-
-    except Exception as e:
-
-        print(
-            f"[Baccarat Image Error] {e}"
-        )
-
-        image_file = None
-
-    # =========================
-    # FINAL EMBED
-    # =========================
-
-    result_text += (
-        "\n\n"
-        "**Provably Fair**\n"
-        f"**Server Seed Hash:** `{server_seed_hash}`\n"
-        f"**Client Seed:** `{client_seed}`"
-    )
-
-    result_embed = brand(
-        result_title,
-        result_text
-    )
-
-    # Green = win
-    # Red = loss
-    # Gold = tie
-    result_embed.color = result_color
-
-    if image_file:
-
-        result_embed.set_image(
-            url="attachment://baccarat.png"
-        )
-
-        # Edit the SAME dealing message
-        await message.edit(
-            embed=result_embed,
-            attachments=[image_file]
-        )
-
-    else:
-
-        await message.edit(
-            embed=result_embed
-        )
-        
-# ============================================================
-# MINES GAME
-# ============================================================
-
-class MinesView(OwnerView):
-
-    def __init__(self, owner, bet, mines):
-        super().__init__(owner.id, timeout=120)
-
-        self.bet = bet
-        self.mines = mines
-        self.opened = 0
-
-        self.bombs = set(
-            random.sample(range(25), mines)
-        )
-
-        self.finished = False
-        self.message = None
-
-        # Track opened tiles
-        self.opened_tiles = set()
-
-        # Create 5x5 board
-        for index in range(25):
-
-            button = discord.ui.Button(
-                label="\u200b",
-                style=discord.ButtonStyle.secondary,
-                row=index // 5,
-                custom_id=f"mines_{index}",
-            )
-
-            button.callback = self.pick
-            self.add_item(button)
-
-    def multiplier(self):
-
-        return max(
-            1.0,
-            (25 / (25 - self.mines)) ** self.opened * 0.96
-        )
-
-    async def pick(self, interaction):
-
-        if self.finished:
-            await interaction.response.send_message(
-                "This Mines game has ended.",
-                ephemeral=True,
-            )
-            return
-
-        # OwnerView normally handles this, but keep it safe.
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "This is not your Mines game.",
-                ephemeral=True,
-            )
-            return
-
-        index = int(
-            interaction.data["custom_id"].split("_")[1]
-        )
-
-        # Already opened
-        if index in self.opened_tiles:
-            await interaction.response.send_message(
-                "You already opened this tile.",
-                ephemeral=True,
-            )
-            return
-
-        button = next(
-            x for x in self.children
-            if x.custom_id == f"mines_{index}"
-        )
-
-        # ====================================================
-        # MINE HIT
-        # ====================================================
-
-        if index in self.bombs:
-
-            self.finished = True
-
-            # Show clicked bomb
-            button.emoji = config.E["bomb"]
-            button.style = discord.ButtonStyle.danger
-            button.disabled = True
-
-            # Reveal every bomb
-            for x in self.children:
-
-                if (
-                    x.custom_id
-                    and x.custom_id.startswith("mines_")
-                ):
-
-                    tile_index = int(
-                        x.custom_id.split("_")[1]
-                    )
-
-                    if tile_index in self.bombs:
-
-                        x.emoji = config.E["bomb"]
-                        x.style = discord.ButtonStyle.danger
-
-            # Disable everything
-            for x in self.children:
-                x.disabled = True
-
-            await bot.db.record_game(
-                self.owner_id,
-                self.bet,
-                0,
-                "mines",
-            )
-
-            await interaction.response.edit_message(
-                embed=brand(
-                    "Mines — Lost",
-                    (
-                        f"You hit a mine and lost "
-                        f"**{money(self.bet)} points**."
-                    ),
-                    0xED4245,
-                ),
-                view=self,
-            )
-
-            # Remove cashout reaction
-            if self.message:
-
-                try:
-                    await self.message.clear_reactions()
-                except discord.HTTPException:
-                    pass
-
-            # Remove active game
-            if hasattr(bot, "active_mines"):
-                bot.active_mines.pop(
-                    self.message.id if self.message else 0,
-                    None,
-                )
-
-            return
-
-        # ====================================================
-        # SAFE TILE
-        # ====================================================
-
-        self.opened += 1
-        self.opened_tiles.add(index)
-
-        button.emoji = config.E["diamond"]
-        button.style = discord.ButtonStyle.success
-        button.disabled = True
-
-        # ====================================================
-        # ALL SAFE TILES OPENED
-        # ====================================================
-
-        if self.opened == 25 - self.mines:
-
-            await self.cashout_message(
-                interaction.message
-            )
-
-            return
-
-        # ====================================================
-        # UPDATE BOARD
-        # ====================================================
-
-        embed = brand(
-            "Mines",
-            (
-                f"Diamonds: **{self.opened}** • "
-                f"Current payout: "
-                f"**{money(self.bet * self.multiplier())} points**"
-            ),
-        )
-
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self,
-        )
-
-        # Add cashout reaction after first safe tile
-        if self.message and self.opened == 1:
-
-            try:
-                await self.message.add_reaction("💰")
-            except discord.HTTPException:
-                pass
-
-    # ========================================================
-    # CASHOUT
-    # ========================================================
-
-    async def cashout_message(self, message):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        payout = round(
-            self.bet * self.multiplier(),
-            4,
-        )
-
-        # Disable all tiles
-        for x in self.children:
-            x.disabled = True
-
-        await bot.db.record_game(
-            self.owner_id,
-            self.bet,
-            payout,
-            "mines",
-        )
-
-        embed = brand(
-            "Mines — Cashed out",
-            (
-                f"{config.E['win']} You won "
-                f"**{money(payout)} points** "
-                f"({self.multiplier():.2f}x)."
-            ),
-            0x57F287,
-        )
-
-        await message.edit(
-            embed=embed,
-            view=self,
-        )
-
-        # Remove reaction
-        try:
-            await message.clear_reactions()
-        except discord.HTTPException:
-            pass
-
-        # Remove active game
-        if hasattr(bot, "active_mines"):
-            bot.active_mines.pop(
-                message.id,
-                None,
-            )
-
-    # ========================================================
-    # TIMEOUT
-    # ========================================================
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        for x in self.children:
-            x.disabled = True
-
-        if self.message:
-
-            try:
-                await self.message.edit(view=self)
-                await self.message.clear_reactions()
-            except discord.HTTPException:
-                pass
-
-            if hasattr(bot, "active_mines"):
-                bot.active_mines.pop(
-                    self.message.id,
-                    None,
-                )
-
-
-# ============================================================
-# MINES REACTION CASHOUT
-# ============================================================
-
-@bot.event
-async def on_raw_reaction_add(payload):
-
-    # Ignore bot reactions
-    if payload.user_id == bot.user.id:
-        return
-
-    # Make sure active Mines games exist
-    if not hasattr(bot, "active_mines"):
-        return
-
-    # Find the Mines game using message ID
-    view = bot.active_mines.get(payload.message_id)
-
-    if view is None:
-        return
-
-    # Only 💰 can cash out
-    if str(payload.emoji) != "💰":
-        return
-
-    # Only the owner can cash out
-    if payload.user_id != view.owner_id:
-        return
-
-    # Game already ended
-    if view.finished:
-        return
-
-    # Fetch the actual Discord message
-    channel = bot.get_channel(payload.channel_id)
-
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(
-                payload.channel_id
-            )
-        except discord.HTTPException:
-            return
-
-    try:
-        message = await channel.fetch_message(
-            payload.message_id
-        )
-    except discord.HTTPException:
-        return
-
-    # Make sure this is still the correct game
-    if view.message is None:
-        view.message = message
-
-    # Cash out
-    await view.cashout_message(message)
-
-
-# ============================================================
-# MINES COMMAND
-# ============================================================
-
-@bot.command()
-async def mines(ctx, bet: str, mine_count: int = 3):
-
-    if not await bot.game_allowed(ctx):
-        return
-
-    try:
-
-        bet_lower = bet.lower().strip()
-
-        if bet_lower in ("half", "all", "max"):
-
-            row = await bot.db.user(ctx.author.id)
-
-            if not row:
-                await ctx.send(
-                    "Your account could not be found."
-                )
-                return
-
-            balance = row["balance"]
-
-            if bet_lower in ("all", "max"):
-
-                amount = parse_amount(
-                    str(balance)
-                )
-
-            else:
-
-                half_balance = (
-                    Decimal(str(balance))
-                    / Decimal("2")
-                )
-
-                amount = parse_amount(
-                    str(half_balance)
-                )
-
-        else:
-
-            amount = parse_amount(bet)
-
-    except ValueError as error:
-
-        await ctx.send(str(error))
-        return
-
-    # ========================================================
-    # MINIMUM BET
-    # ========================================================
-
-    if amount < Decimal("20"):
-
-        await ctx.send(
-            "The minimum bet is **20 points ($0.10)**."
-        )
-        return
-
-    # ========================================================
-    # MINE COUNT
-    # ========================================================
-
-    if not 1 <= mine_count <= 20:
-
-        await ctx.send(
-            "Choose from 1 to 20 mines."
-        )
-        return
-
-    # ========================================================
-    # TAKE BET
-    # ========================================================
-
-    if not await bot.db.change_balance(
-        ctx.author.id,
-        -amount,
-        "mines_bet",
-    ):
-
-        await ctx.send(
-            "Insufficient balance."
-        )
-        return
-
-    # ========================================================
-    # CREATE GAME
-    # ========================================================
-
-    view = MinesView(
-        ctx.author,
-        amount,
-        mine_count,
-    )
-
-    # ========================================================
-    # SEND GAME
-    # ========================================================
-
-    message = await ctx.send(
-        embed=brand(
-            "Mines",
-            (
-                f"Bet: **{money(amount)} points** • "
-                f"Mines: **{mine_count}**\n"
-                f"Find diamonds, then react with 💰 to cash out."
-            ),
-        ),
-        view=view,
-    )
-
-    # Save message
-    view.message = message
-
-    # ========================================================
-    # REGISTER ACTIVE GAME
-    # ========================================================
-
-    if not hasattr(bot, "active_mines"):
-        bot.active_mines = {}
-
-    bot.active_mines[message.id] = view
-
-import asyncio
-import random
-import discord
-from discord.ext import commands
-
-# =========================================================
-# MARKET GAME
-# =========================================================
-
-import random
-from decimal import Decimal, InvalidOperation
-from io import BytesIO
-
-from PIL import (
-    Image,
-    ImageDraw,
-    ImageFont,
-    ImageFilter
-)
-
-
-# =========================================================
-# MARKET CONFIG
-# =========================================================
-
-MARKET_PAYOUT = Decimal("1.92")
-
-MINIMUM_BET = Decimal("1")
-
-
-# =========================================================
-# MARKET IMAGE GENERATOR
-# =========================================================
-
-def market_font(size, bold=False):
-
-    if bold:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-
-    for path in paths:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            pass
-
-    return ImageFont.load_default()
-
-
-# =========================================================
-# RANDOM MARKET DATA
-# =========================================================
-
-def generate_market_history():
-
-    points = []
-
-    # Start somewhere around the middle
-    current = random.uniform(
-        0.42,
-        0.62
-    )
-
-    for _ in range(24):
-
-        # Random movement
-        movement = random.uniform(
-            -0.11,
-            0.11
-        )
-
-        current += movement
-
-        # Keep chart inside bounds
-        current = max(
-            0.12,
-            min(
-                0.88,
-                current
-            )
-        )
-
-        points.append(
-            current
-        )
-
-    return points
-
-
-# =========================================================
-# GENERATE FUTURE MARKET MOVEMENT
-# =========================================================
-
-def generate_market_future(
-    start_value,
-    result
-):
-
-    values = []
-
-    current = start_value
-
-    # -----------------------------------------------------
-    # UP RESULT
-    # -----------------------------------------------------
-
-    if result == "UP":
-
-        # Random total upward movement
-        target_change = random.uniform(
-            0.18,
-            0.42
-        )
-
-        target = min(
-            0.92,
-            current + target_change
-        )
-
-    # -----------------------------------------------------
-    # DOWN RESULT
-    # -----------------------------------------------------
-
-    else:
-
-        target_change = random.uniform(
-            0.18,
-            0.42
-        )
-
-        target = max(
-            0.08,
-            current - target_change
-        )
-
-    steps = 16
-
-    for i in range(steps):
-
-        remaining = steps - i
-
-        # Amount needed to eventually reach target
-        difference = target - current
-
-        # Stronger movement as the chart approaches result
-        base_step = (
-            difference / remaining
-        )
-
-        # Random noise
-        noise = random.uniform(
-            -0.055,
-            0.055
-        )
-
-        movement = (
-            base_step
-            + noise
-        )
-
-        current += movement
-
-        # Don't allow chart to leave boundaries
-        current = max(
-            0.06,
-            min(
-                0.94,
-                current
-            )
-        )
-
-        values.append(
-            current
-        )
-
-    # Force final point clearly toward result
-    if result == "UP":
-
-        values[-1] = random.uniform(
-            max(current, 0.72),
-            0.94
-        )
-
-    else:
-
-        values[-1] = random.uniform(
-            0.06,
-            min(current, 0.30)
-        )
-
-    return values
-
-
-# =========================================================
-# MARKET IMAGE
-# =========================================================
-
-def create_market_chart(
-    result=None
-):
-
-    WIDTH = 1200
-    HEIGHT = 675
-
-    # -----------------------------------------------------
-    # BASE IMAGE
-    # -----------------------------------------------------
-
-    image = Image.new(
-        "RGB",
-        (
-            WIDTH,
-            HEIGHT
-        ),
-        (7, 9, 13)
-    )
-
-    draw = ImageDraw.Draw(
-        image
-    )
-
-    # -----------------------------------------------------
-    # BACKGROUND GRADIENT
-    # -----------------------------------------------------
-
-    for y in range(HEIGHT):
-
-        ratio = y / HEIGHT
-
-        r = int(
-            7 + (8 * ratio)
-        )
-
-        g = int(
-            9 + (9 * ratio)
-        )
-
-        b = int(
-            13 + (13 * ratio)
-        )
-
-        draw.line(
-            [
-                (0, y),
-                (WIDTH, y)
-            ],
-            fill=(
-                r,
-                g,
-                b
-            )
-        )
-
-    # -----------------------------------------------------
-    # HEADER
-    # -----------------------------------------------------
-
-    title_font = market_font(
-        34,
-        True
-    )
-
-    draw.text(
-        (
-            60,
-            30
-        ),
-        "BETRUSH  |  MARKET PREDICTION",
-        font=title_font,
-        fill=(240, 242, 247)
-    )
-
-    # -----------------------------------------------------
-    # CHART AREA
-    # -----------------------------------------------------
-
-    left = 65
-    right = WIDTH - 55
-
-    top = 135
-    bottom = HEIGHT - 65
-
-    chart_width = (
-        right - left
-    )
-
-    chart_height = (
-        bottom - top
-    )
-
-    # -----------------------------------------------------
-    # GRID
-    # -----------------------------------------------------
-
-    grid_color = (
-        28,
-        31,
-        39
-    )
-
-    for i in range(7):
-
-        y = int(
-            top
-            + (
-                chart_height / 6
-            ) * i
-        )
-
-        draw.line(
-            [
-                (left, y),
-                (right, y)
-            ],
-            fill=grid_color,
-            width=2
-        )
-
-    for i in range(13):
-
-        x = int(
-            left
-            + (
-                chart_width / 12
-            ) * i
-        )
-
-        draw.line(
-            [
-                (x, top),
-                (x, bottom)
-            ],
-            fill=grid_color,
-            width=2
-        )
-
-    # =====================================================
-    # RANDOM HISTORY
-    # =====================================================
-
-    history = generate_market_history()
-
-    # -----------------------------------------------------
-    # Split chart into:
-    #
-    # 65% historical
-    # 35% future
-    # -----------------------------------------------------
-
-    history_end_x = int(
-        left
-        + chart_width * 0.64
-    )
-
-    future_end_x = right
-
-    # -----------------------------------------------------
-    # Convert history values to coordinates
-    # -----------------------------------------------------
-
-    history_points = []
-
-    for i, value in enumerate(history):
-
-        x = int(
-            left
-            + (
-                history_end_x - left
-            )
-            * (
-                i / (
-                    len(history) - 1
-                )
-            )
-        )
-
-        y = int(
-            top
-            + (
-                1 - value
-            )
-            * chart_height
-        )
-
-        history_points.append(
-            (
-                x,
-                y
-            )
-        )
-
-    # =====================================================
-    # DRAW GREY HISTORY
-    # =====================================================
-
-    grey_line = (
-        135,
-        145,
-        162
-    )
-
-    for i in range(
-        len(history_points) - 1
-    ):
-
-        draw.line(
-            [
-                history_points[i],
-                history_points[i + 1]
-            ],
-            fill=grey_line,
-            width=5
-        )
-
-    # =====================================================
-    # CURRENT POINT
-    # =====================================================
-
-    start_x, start_y = (
-        history_points[-1]
-    )
-
-    # =====================================================
-    # HIDDEN / PRE-REVEAL
-    # =====================================================
-
-    if result is None:
-
-        # -------------------------------------------------
-        # Hidden future line
-        # -------------------------------------------------
-
-        hidden_points = []
-
-        current_y = start_y
-
-        future_steps = 16
-
-        for i in range(
-            1,
-            future_steps + 1
-        ):
-
-            x = int(
-                start_x
-                + (
-                    future_end_x
-                    - start_x
-                )
-                * (
-                    i / future_steps
-                )
-            )
-
-            current_y += random.randint(
-                -25,
-                25
-            )
-
-            current_y = max(
-                top + 25,
-                min(
-                    bottom - 25,
-                    current_y
-                )
-            )
-
-            hidden_points.append(
-                (
-                    x,
-                    current_y
-                )
-            )
-
-        # -------------------------------------------------
-        # Grey hidden line
-        # -------------------------------------------------
-
-        previous = (
-            start_x,
-            start_y
-        )
-
-        for point in hidden_points:
-
-            draw.line(
-                [
-                    previous,
-                    point
-                ],
-                fill=(
-                    66,
-                    70,
-                    80
-                ),
-                width=4
-            )
-
-            previous = point
-
-        # -------------------------------------------------
-        # Hidden vertical divider
-        # -------------------------------------------------
-
-        draw.line(
-            [
-                (
-                    start_x,
-                    top
-                ),
-                (
-                    start_x,
-                    bottom
-                )
-            ],
-            fill=(
-                55,
-                59,
-                69
-            ),
-            width=2
-        )
-
-        # -------------------------------------------------
-        # QUESTION MARK
-        # -------------------------------------------------
-
-        question_font = market_font(
-            115,
-            True
-        )
-
-        question = "?"
-
-        bbox = draw.textbbox(
-            (
-                0,
-                0
-            ),
-            question,
-            font=question_font
-        )
-
-        q_width = (
-            bbox[2] - bbox[0]
-        )
-
-        q_height = (
-            bbox[3] - bbox[1]
-        )
-
-        center_x = int(
-            start_x
-            + (
-                future_end_x
-                - start_x
-            ) / 2
-        )
-
-        center_y = int(
-            top
-            + chart_height / 2
-        )
-
-        q_x = (
-            center_x
-            - q_width / 2
-        )
-
-        q_y = (
-            center_y
-            - q_height / 2
-        )
-
-        # Shadow
-
-        draw.text(
-            (
-                int(q_x + 5),
-                int(q_y + 6)
-            ),
-            question,
-            font=question_font,
-            fill=(0, 0, 0)
-        )
-
-        # Main ?
-
-        draw.text(
-            (
-                int(q_x),
-                int(q_y)
-            ),
-            question,
-            font=question_font,
-            fill=(
-                155,
-                160,
-                170
-            )
-        )
-
-        # -------------------------------------------------
-        # PREDICT LABEL
-        # -------------------------------------------------
-
-        label_font = market_font(
-            18,
-            True
-        )
-
-        label = "CHOOSE THE MARKET DIRECTION"
-
-        bbox = draw.textbbox(
-            (
-                0,
-                0
-            ),
-            label,
-            font=label_font
-        )
-
-        label_width = (
-            bbox[2] - bbox[0]
-        )
-
-        draw.text(
-            (
-                center_x
-                - label_width / 2,
-                bottom - 38
-            ),
-            label,
-            font=label_font,
-            fill=(
-                100,
-                105,
-                115
-            )
-        )
-
-    # =====================================================
-    # REVEAL
-    # =====================================================
-
-    else:
-
-        # -------------------------------------------------
-        # Generate random future based on result
-        # -------------------------------------------------
-
-        future_values = (
-            generate_market_future(
-                history[-1],
-                result
-            )
-        )
-
-        future_points = []
-
-        for i, value in enumerate(
-            future_values,
-            start=1
-        ):
-
-            x = int(
-                start_x
-                + (
-                    future_end_x
-                    - start_x
-                )
-                * (
-                    i / len(
-                        future_values
-                    )
-                )
-            )
-
-            y = int(
-                top
-                + (
-                    1 - value
-                )
-                * chart_height
-            )
-
-            future_points.append(
-                (
-                    x,
-                    y
-                )
-            )
-
-        all_points = [
-            history_points[-1]
-        ] + future_points
-
-        # -------------------------------------------------
-        # RESULT COLOR
-        # -------------------------------------------------
-
-        if result == "UP":
-
-            line_color = (
-                45,
-                230,
-                125
-            )
-
-            result_label = (
-                "▲ MARKET WENT UP"
-            )
-
-        else:
-
-            line_color = (
-                255,
-                72,
-                82
-            )
-
-            result_label = (
-                "▼ MARKET WENT DOWN"
-            )
-
-        # -------------------------------------------------
-        # GLOW
-        # -------------------------------------------------
-
-        glow = Image.new(
-            "RGBA",
-            (
-                WIDTH,
-                HEIGHT
-            ),
-            (
-                0,
-                0,
-                0,
-                0
-            )
-        )
-
-        glow_draw = ImageDraw.Draw(
-            glow
-        )
-
-        for i in range(
-            len(all_points) - 1
-        ):
-
-            glow_draw.line(
-                [
-                    all_points[i],
-                    all_points[i + 1]
-                ],
-                fill=(
-                    line_color[0],
-                    line_color[1],
-                    line_color[2],
-                    100
-                ),
-                width=24
-            )
-
-        glow = glow.filter(
-            ImageFilter.GaussianBlur(
-                13
-            )
-        )
-
-        image = Image.alpha_composite(
-            image.convert("RGBA"),
-            glow
-        ).convert("RGB")
-
-        draw = ImageDraw.Draw(
-            image
-        )
-
-        # -------------------------------------------------
-        # REVEALED LINE
-        # -------------------------------------------------
-
-        for i in range(
-            len(all_points) - 1
-        ):
-
-            draw.line(
-                [
-                    all_points[i],
-                    all_points[i + 1]
-                ],
-                fill=line_color,
-                width=6
-            )
-
-        # -------------------------------------------------
-        # START DOT
-        # -------------------------------------------------
-
-        draw.ellipse(
-            (
-                start_x - 6,
-                start_y - 6,
-                start_x + 6,
-                start_y + 6
-            ),
-            fill=line_color
-        )
-
-        # -------------------------------------------------
-        # FINAL DOT
-        # -------------------------------------------------
-
-        final_x, final_y = (
-            all_points[-1]
-        )
-
-        draw.ellipse(
-            (
-                final_x - 12,
-                final_y - 12,
-                final_x + 12,
-                final_y + 12
-            ),
-            fill=line_color
-        )
-
-        # -------------------------------------------------
-        # RESULT LABEL
-        # -------------------------------------------------
-
-        result_font = market_font(
-            26,
-            True
-        )
-
-        bbox = draw.textbbox(
-            (
-                0,
-                0
-            ),
-            result_label,
-            font=result_font
-        )
-
-        result_width = (
-            bbox[2] - bbox[0]
-        )
-
-        center_x = int(
-            start_x
-            + (
-                future_end_x
-                - start_x
-            ) / 2
-        )
-
-        draw.text(
-            (
-                center_x
-                - result_width / 2,
-                bottom - 42
-            ),
-            result_label,
-            font=result_font,
-            fill=line_color
-        )
-
-    # =====================================================
-    # CONVERT TO DISCORD FILE
-    # =====================================================
-
-    buffer = BytesIO()
-
-    image.save(
-        buffer,
-        format="PNG",
-        optimize=True
-    )
-
-    buffer.seek(0)
-
-    return buffer
-
-
-# =========================================================
-# MARKET VIEW
-# =========================================================
-
-class MarketView(discord.ui.View):
-
-    def __init__(
-        self,
-        ctx,
-        bet
-    ):
-
-        super().__init__(
-            timeout=30
-        )
-
-        self.ctx = ctx
-
-        self.bet = Decimal(
-            str(bet)
-        )
-
-        self.finished = False
-        self.message = None
-
-    # =====================================================
-    # USER CHECK
-    # =====================================================
-
-    async def interaction_check(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        if (
-            interaction.user.id
-            != self.ctx.author.id
-        ):
-
-            await interaction.response.send_message(
-                "This market game belongs to someone else.",
-                ephemeral=True
-            )
-
-            return False
-
-        return True
-
-    # =====================================================
-    # FINISH GAME
-    # =====================================================
-
-    async def finish_game(
-        self,
-        interaction,
-        direction
-    ):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        # -------------------------------------------------
-        # Disable buttons
-        # -------------------------------------------------
-
-        for child in self.children:
-            child.disabled = True
-
-        # -------------------------------------------------
-        # Generate actual result
-        # -------------------------------------------------
-
-        market_result = random.choice(
-            [
-                "UP",
-                "DOWN"
-            ]
-        )
-
-        won = (
-            market_result
-            == direction
-        )
-
-        # =================================================
-        # WIN
-        # =================================================
-
-        if won:
-
-            payout = (
-                self.bet
-                * MARKET_PAYOUT
-            )
-
-            try:
-
-                success = await bot.db.change_balance(
-                    self.ctx.author.id,
-                    float(payout),
-                    "market_win"
-                )
-
-            except Exception as error:
-
-                print(
-                    f"[MARKET] Payout error: {error}"
-                )
-
-                success = False
-
-            if not success:
-
-                self.finished = False
-
-                for child in self.children:
-                    child.disabled = False
-
-                await interaction.response.send_message(
-                    embed=brand(
-                        "Market Error",
-                        (
-                            "The payout could not be "
-                            "processed. Your game was "
-                            "not completed."
-                        ),
-                        0xED4245
-                    ),
-                    ephemeral=True
-                )
-
-                return
-
-            result_title = (
-                "📈 Market Won!"
-            )
-
-            result_colour = (
-                0x57F287
-            )
-
-            result_text = (
-                f"**Result:** {market_result}\n"
-                f"**Your Choice:** {direction}\n"
-                f"**Bet:** {self.bet:,.2f} points\n"
-                f"**Payout:** {payout:,.2f} points\n"
-                f"**Multiplier:** {MARKET_PAYOUT}x"
-            )
-
-        # =================================================
-        # LOSS
-        # =================================================
-
-        else:
-
-            result_title = (
-                "📉 Market Lost"
-            )
-
-            result_colour = (
-                0xED4245
-            )
-
-            result_text = (
-                f"**Result:** {market_result}\n"
-                f"**Your Choice:** {direction}\n"
-                f"**Bet:** {self.bet:,.2f} points\n"
-                f"**Payout:** 0.00 points\n"
-                f"**Multiplier:** {MARKET_PAYOUT}x"
-            )
-
-        # =================================================
-        # GENERATE REVEALED IMAGE
-        # =================================================
-
-        try:
-
-            chart = create_market_chart(
-                result=market_result
-            )
-
-            chart_file = discord.File(
-                chart,
-                filename="market_result.png"
-            )
-
-        except Exception as error:
-
-            print(
-                f"[MARKET] Result image error: {error}"
-            )
-
-            # Still show the result if image generation fails
-
-            embed = brand(
-                result_title,
-                result_text,
-                result_colour
-            )
-
-            await interaction.response.edit_message(
-                embed=embed,
-                view=self
-            )
-
-            self.stop()
-
-            return
-
-        # =================================================
-        # RESULT EMBED
-        # =================================================
-
-        embed = brand(
-            result_title,
-            result_text,
-            result_colour
-        )
-
-        embed.set_image(
-            url="attachment://market_result.png"
-        )
-
-        embed.set_footer(
-            text="Market Prediction"
-        )
-
-        # =================================================
-        # UPDATE MESSAGE
-        # =================================================
-
-        try:
-
-            await interaction.response.edit_message(
-                embed=embed,
-                view=self,
-                attachments=[
-                    chart_file
-                ]
-            )
-
-        except Exception as error:
-
-            print(
-                f"[MARKET] Result update error: {error}"
-            )
-
-        self.stop()
-
-    # =====================================================
-    # UP BUTTON
-    # =====================================================
-
-    @discord.ui.button(
-        label="UP",
-        style=discord.ButtonStyle.success,
-        emoji="📈"
-    )
-    async def up_button(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.finish_game(
-            interaction,
-            "UP"
-        )
-
-    # =====================================================
-    # DOWN BUTTON
-    # =====================================================
-
-    @discord.ui.button(
-        label="DOWN",
-        style=discord.ButtonStyle.danger,
-        emoji="📉"
-    )
-    async def down_button(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.finish_game(
-            interaction,
-            "DOWN"
-        )
-
-    # =====================================================
-    # TIMEOUT
-    # =====================================================
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        # Disable buttons
-        for child in self.children:
-            child.disabled = True
-
-        # -------------------------------------------------
-        # Refund bet
-        # -------------------------------------------------
-
-        try:
-
-            await bot.db.change_balance(
-                self.ctx.author.id,
-                float(self.bet),
-                "market_timeout_refund"
-            )
-
-        except Exception as error:
-
-            print(
-                f"[MARKET] Timeout refund error: {error}"
-            )
-
-        # -------------------------------------------------
-        # Update message
-        # -------------------------------------------------
-
-        if self.message:
-
-            try:
-
-                embed = brand(
-                    "Market Expired",
-                    (
-                        "The prediction window expired.\n\n"
-                        f"Your **{self.bet:,.2f} points** "
-                        "bet has been refunded."
-                    ),
-                    0x95A5A6
-                )
-
-                await self.message.edit(
-                    embed=embed,
-                    view=self
-                )
-
-            except discord.HTTPException:
-                pass
-
-        self.stop()
-
-
-# =========================================================
-# MARKET COMMAND
-# =========================================================
-
-@bot.command(
-    name="market"
-)
-async def market(
-    ctx,
-    amount: str = None
-):
-
-    # =====================================================
-    # USAGE
-    # =====================================================
-
-    if amount is None:
-
-        await ctx.send(
-            embed=brand(
-                "📊 Market Prediction",
-                (
-                    "**Usage:**\n"
-                    "`.market <amount>`\n\n"
-                    f"**Minimum Bet:** "
-                    f"{MINIMUM_BET:,.0f} points\n"
-                    f"**Payout:** "
-                    f"{MARKET_PAYOUT}x total\n\n"
-                    "Predict whether the hidden "
-                    "market will go **UP** or **DOWN**."
-                )
-            )
-        )
-
-        return
-
-    # =====================================================
-    # PARSE BET
-    # =====================================================
-
-    try:
-
-        bet = Decimal(
-            str(amount)
-        )
-
-    except (
-        InvalidOperation,
-        ValueError
-    ):
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                "Enter a valid bet amount.",
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # VALIDATE
-    # =====================================================
-
-    if not bet.is_finite():
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                "Enter a valid bet amount.",
-                0xED4245
-            )
-        )
-
-        return
-
-    if bet <= 0:
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                "Bet must be greater than 0.",
-                0xED4245
-            )
-        )
-
-        return
-
-    if bet < MINIMUM_BET:
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                (
-                    f"Minimum bet is "
-                    f"**{MINIMUM_BET:,.0f} points**."
-                ),
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # GET USER
-    # =====================================================
-
-    try:
-
-        row = await bot.db.user(
-            ctx.author.id
-        )
-
-    except Exception as error:
-
-        print(
-            f"[MARKET] Database error: {error}"
-        )
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                "Database error. Please try again.",
-                0xED4245
-            )
-        )
-
-        return
-
-    if not row:
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                "Your account could not be found.",
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # BALANCE
-    # =====================================================
-
-    try:
-
-        balance = Decimal(
-            str(row["balance"])
-        )
-
-    except Exception:
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                "Your balance could not be read.",
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # BALANCE CHECK
-    # =====================================================
-
-    if balance < bet:
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                (
-                    "**Insufficient balance.**\n\n"
-                    f"**Balance:** "
-                    f"{balance:,.2f} points\n"
-                    f"**Bet:** "
-                    f"{bet:,.2f} points"
-                ),
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # DEDUCT BET
-    # =====================================================
-
-    try:
-
-        deducted = await bot.db.change_balance(
-            ctx.author.id,
-            -float(bet),
-            "market_bet"
-        )
-
-    except Exception as error:
-
-        print(
-            f"[MARKET] Bet deduction error: {error}"
-        )
-
-        deducted = False
-
-    if not deducted:
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                (
-                    "Your bet could not be processed. "
-                    "Please try again."
-                ),
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # GENERATE UNIQUE HIDDEN CHART
-    # =====================================================
-
-    try:
-
-        chart = create_market_chart(
-            result=None
-        )
-
-        chart_file = discord.File(
-            chart,
-            filename="market.png"
-        )
-
-    except Exception as error:
-
-        print(
-            f"[MARKET] Image generation error: {error}"
-        )
-
-        # Refund if image generation fails
-
-        try:
-
-            await bot.db.change_balance(
-                ctx.author.id,
-                float(bet),
-                "market_image_refund"
-            )
-
-        except Exception as refund_error:
-
-            print(
-                f"[MARKET] Refund error: "
-                f"{refund_error}"
-            )
-
-        await ctx.send(
-            embed=brand(
-                "Market",
-                (
-                    "The market chart could not be "
-                    "generated. Your bet was refunded."
-                ),
-                0xED4245
-            )
-        )
-
-        return
-
-    # =====================================================
-    # GAME EMBED
-    # =====================================================
-
-    embed = brand(
-        "📊 Market Prediction",
-        (
-            f"**Bet:** {bet:,.2f} points\n"
-            f"**Payout:** {MARKET_PAYOUT}x total\n\n"
-            "The future market movement is hidden.\n"
-            "Study the chart and predict **UP** or **DOWN**."
-        )
-    )
-
-    embed.set_image(
-        url="attachment://market.png"
-    )
-
-    embed.set_footer(
-        text="Market Prediction • Choose your direction"
-    )
-
-    # =====================================================
-    # VIEW
-    # =====================================================
-
-    view = MarketView(
-        ctx,
-        bet
-    )
-
-    # =====================================================
-    # SEND
-    # =====================================================
-
-    try:
-
-        message = await ctx.send(
-            embed=embed,
-            file=chart_file,
-            view=view
-        )
-
-        view.message = message
-
-    except Exception as error:
-
-        print(
-            f"[MARKET] Message error: {error}"
-        )
-
-        # -------------------------------------------------
-        # REFUND
-        # -------------------------------------------------
-
-        try:
-
-            await bot.db.change_balance(
-                ctx.author.id,
-                float(bet),
-                "market_refund"
-            )
-
-        except Exception as refund_error:
-
-            print(
-                f"[MARKET] Refund error: {refund_error}"
-            )
-
-        return
-
-# ============================================================
-# HILO
-# ============================================================
-
-import os
-import random
-from pathlib import Path
-import discord
-
-
-# ------------------------------------------------------------
-# HILO SETTINGS
-# ------------------------------------------------------------
-
-HILO_CARD_DIR = Path(__file__).parent
-
-HILO_MAX_ROUNDS = 8
-HILO_ROUND_MULTIPLIER = 0.14
-
-
-# ------------------------------------------------------------
-# HILO CARDS
-# ------------------------------------------------------------
-
-HILO_SUITS = {
-    "hearts": "♥",
-    "diamonds": "♦",
-    "clubs": "♣",
-    "spades": "♠",
-}
-
-HILO_RANKS = [
-    ("2", 2),
-    ("3", 3),
-    ("4", 4),
-    ("5", 5),
-    ("6", 6),
-    ("7", 7),
-    ("8", 8),
-    ("9", 9),
-    ("10", 10),
-    ("J", 11),
-    ("Q", 12),
-    ("K", 13),
-    ("A", 14),
-]
-
-
-def hilo_random_card():
-    rank_name, rank_value = random.choice(HILO_RANKS)
-    suit_name, suit_symbol = random.choice(list(HILO_SUITS.items()))
-
-    return {
-        "rank": rank_name,
-        "value": rank_value,
-        "suit": suit_name,
-        "symbol": suit_symbol,
-    }
-
-
-def hilo_card_text(card):
-    return f"{card['rank']}{card['symbol']}"
-
-
-# ------------------------------------------------------------
-# HILO CARD IMAGE
-# ------------------------------------------------------------
-
-def hilo_card_path(card):
-    """
-    Card images are directly beside bot.py.
-
-    Examples:
-        2_of_hearts.png
-        10_of_clubs.png
-        jack_of_spades.png
-        ace_of_diamonds.png
-    """
-
-    rank = card["rank"].lower()
-    suit = card["suit"].lower()
-
-    # Convert J/Q/K/A to full filename names
-    rank_names = {
-        "j": "jack",
-        "q": "queen",
-        "k": "king",
-        "a": "ace",
-    }
-
-    rank = rank_names.get(rank, rank)
-
-    path = HILO_CARD_DIR / f"{rank}_of_{suit}.png"
-
-    if path.exists():
-        return path
-
-    print(f"[HiLo] Card image not found: {path}")
-    return None
-
-
-def hilo_card_file(card):
-    path = hilo_card_path(card)
-
-    if not path:
+def parse_money(value: str | int | float | Decimal) -> Optional[Decimal]:
+    if value is None:
         return None
 
-    try:
-        return discord.File(
-            path,
-            filename="hilo_card.png"
-        )
-    except Exception as e:
-        print(f"[HiLo Card Image Error] {e}")
-        return None
-
-
-# ------------------------------------------------------------
-# HILO VIEW
-# ------------------------------------------------------------
-
-class HiloView(OwnerView):
-
-    def __init__(
-        self,
-        bot,
-        owner_id,
-        bet,
-        current_card
-    ):
-        super().__init__(owner_id)
-
-        self.bot = bot
-        self.owner_id = owner_id
-        self.bet = float(bet)
-
-        self.current_card = current_card
-
-        self.rounds = 0
-        self.finished = False
-        self.message = None
-
-        self.timeout = 60
-
-
-    # --------------------------------------------------------
-    # MULTIPLIER
-    # --------------------------------------------------------
-
-    def multiplier(self):
-        return 1 + (
-            self.rounds * HILO_ROUND_MULTIPLIER
-        )
-
-
-    # --------------------------------------------------------
-    # PAYOUT
-    # --------------------------------------------------------
-
-    def payout(self):
-        return round(
-            self.bet * self.multiplier(),
-            4
-        )
-
-
-    # --------------------------------------------------------
-    # EMBED
-    # --------------------------------------------------------
-
-    def make_embed(self):
-
-        current = hilo_card_text(
-            self.current_card
-        )
-
-        embed = brand(
-            "🃏 HiLo",
-            (
-                f"**Bet:** {money(self.bet)}\n"
-                f"**Current Card:** `{current}`\n"
-                f"**Round:** `{self.rounds}/{HILO_MAX_ROUNDS}`\n"
-                f"**Multiplier:** `{self.multiplier():.2f}x`\n"
-                f"**Cashout:** {money(self.payout())}"
-            )
-        )
-
-        embed.set_image(
-            url="attachment://hilo_card.png"
-        )
-
-        return embed
-
-
-    # --------------------------------------------------------
-    # DISABLE BUTTONS
-    # --------------------------------------------------------
-
-    def disable_all(self):
-
-        for child in self.children:
-            child.disabled = True
-
-
-    # --------------------------------------------------------
-    # LOSE GAME
-    # --------------------------------------------------------
-
-    async def lose_game(
-        self,
-        interaction,
-        new_card
-    ):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        self.disable_all()
-
-        self.current_card = new_card
-
-        # Record loss.
-        #
-        # IMPORTANT:
-        # The bet was already removed when the game started.
-        # record_game(..., payout=0) does NOT add anything back.
-        await self.bot.db.record_game(
-            self.owner_id,
-            self.bet,
-            0,
-            "hilo"
-        )
-
-        card_text = hilo_card_text(
-            new_card
-        )
-
-        embed = brand(
-            "💥 HiLo — Lost",
-            (
-                f"**Card:** `{card_text}`\n"
-                f"**Rounds:** `{self.rounds}`\n"
-                f"**Lost:** {money(self.bet)}"
-            )
-        )
-
-        file = hilo_card_file(new_card)
-
-        if file:
-            embed.set_image(
-                url="attachment://hilo_card.png"
-            )
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[file],
-                view=self
-            )
-
-        else:
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[],
-                view=self
-            )
-
-        self.stop()
-
-
-    # --------------------------------------------------------
-    # WIN GAME
-    # --------------------------------------------------------
-
-    async def win_game(
-        self,
-        interaction
-    ):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        self.disable_all()
-
-        payout = self.payout()
-
-        # IMPORTANT:
-        #
-        # record_game() credits payout to the balance.
-        #
-        # DO NOT call change_balance(+payout) here.
-        #
-        await self.bot.db.record_game(
-            self.owner_id,
-            self.bet,
-            payout,
-            "hilo"
-        )
-
-        current = hilo_card_text(
-            self.current_card
-        )
-
-        embed = brand(
-            "🎉 HiLo — Won",
-            (
-                f"**Final Card:** `{current}`\n"
-                f"**Rounds:** `{self.rounds}`\n"
-                f"**Multiplier:** `{self.multiplier():.2f}x`\n"
-                f"**Payout:** {money(payout)}"
-            )
-        )
-
-        file = hilo_card_file(
-            self.current_card
-        )
-
-        if file:
-
-            embed.set_image(
-                url="attachment://hilo_card.png"
-            )
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[file],
-                view=self
-            )
-
-        else:
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[],
-                view=self
-            )
-
-        self.stop()
-
-
-    # --------------------------------------------------------
-    # CASH OUT
-    # --------------------------------------------------------
-
-    async def cashout_message(
-        self,
-        interaction
-    ):
-
-        if self.finished:
-            await interaction.response.send_message(
-                "❌ This HiLo game has already ended.",
-                ephemeral=True
-            )
-            return
-
-        if self.rounds <= 0:
-
-            await interaction.response.send_message(
-                "❌ You need to play at least one round before cashing out.",
-                ephemeral=True
-            )
-
-            return
-
-        await self.win_game(
-            interaction
-        )
-
-
-    # --------------------------------------------------------
-    # GUESS
-    # --------------------------------------------------------
-
-    async def guess(
-        self,
-        interaction,
-        higher
-    ):
-
-        if self.finished:
-
-            await interaction.response.send_message(
-                "❌ This HiLo game has already ended.",
-                ephemeral=True
-            )
-
-            return
-
-        # Generate next card
-        new_card = hilo_random_card()
-
-        old_value = self.current_card["value"]
-        new_value = new_card["value"]
-
-
-        # ----------------------------------------------------
-        # SAME VALUE = LOSS
-        # ----------------------------------------------------
-
-        if new_value == old_value:
-
-            await self.lose_game(
-                interaction,
-                new_card
-            )
-
-            return
-
-
-        # ----------------------------------------------------
-        # CHECK GUESS
-        # ----------------------------------------------------
-
-        if higher:
-
-            correct = new_value > old_value
-
-        else:
-
-            correct = new_value < old_value
-
-
-        # ----------------------------------------------------
-        # WRONG GUESS = LOSS
-        # ----------------------------------------------------
-
-        if not correct:
-
-            await self.lose_game(
-                interaction,
-                new_card
-            )
-
-            return
-
-
-        # ----------------------------------------------------
-        # CORRECT GUESS
-        # ----------------------------------------------------
-
-        self.current_card = new_card
-
-        self.rounds += 1
-
-
-        # ----------------------------------------------------
-        # MAX ROUND WIN
-        # ----------------------------------------------------
-
-        if self.rounds >= HILO_MAX_ROUNDS:
-
-            await self.win_game(
-                interaction
-            )
-
-            return
-
-
-        # ----------------------------------------------------
-        # UPDATE CARD
-        # ----------------------------------------------------
-
-        file = hilo_card_file(
-            new_card
-        )
-
-        embed = self.make_embed()
-
-
-        if file:
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[file],
-                view=self
-            )
-
-        else:
-
-            await interaction.response.edit_message(
-                embed=embed,
-                attachments=[],
-                view=self
-            )
-
-
-    # --------------------------------------------------------
-    # HIGHER BUTTON
-    # --------------------------------------------------------
-
-    @discord.ui.button(
-        label="Higher",
-        style=discord.ButtonStyle.green,
-        emoji="⬆️",
-        row=0
-    )
-    async def higher_button(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.guess(
-            interaction,
-            True
-        )
-
-
-    # --------------------------------------------------------
-    # LOWER BUTTON
-    # --------------------------------------------------------
-
-    @discord.ui.button(
-        label="Lower",
-        style=discord.ButtonStyle.red,
-        emoji="⬇️",
-        row=0
-    )
-    async def lower_button(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.guess(
-            interaction,
-            False
-        )
-
-
-    # --------------------------------------------------------
-    # CASH OUT BUTTON
-    # --------------------------------------------------------
-
-    @discord.ui.button(
-        label="Cash Out",
-        style=discord.ButtonStyle.blurple,
-        emoji="💰",
-        row=1
-    )
-    async def cashout_button(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.cashout_message(
-            interaction
-        )
-
-
-    # --------------------------------------------------------
-    # TIMEOUT
-    # --------------------------------------------------------
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        self.disable_all()
-
-        # Timeout counts as a loss.
-        await self.bot.db.record_game(
-            self.owner_id,
-            self.bet,
-            0,
-            "hilo"
-        )
-
-        if self.message:
-
-            try:
-
-                embed = brand(
-                    "⏰ HiLo — Timed Out",
-                    (
-                        f"**Rounds:** `{self.rounds}`\n"
-                        f"**Lost:** {money(self.bet)}\n\n"
-                        "The game timed out."
-                    )
-                )
-
-                file = hilo_card_file(
-                    self.current_card
-                )
-
-                if file:
-
-                    embed.set_image(
-                        url="attachment://hilo_card.png"
-                    )
-
-                    await self.message.edit(
-                        embed=embed,
-                        attachments=[file],
-                        view=self
-                    )
-
-                else:
-
-                    await self.message.edit(
-                        embed=embed,
-                        attachments=[],
-                        view=self
-                    )
-
-            except Exception as e:
-
-                print(
-                    f"[HiLo Timeout Error] {e}"
-                )
-
-        self.stop()
-
-
-# ============================================================
-# HILO COMMAND
-# ============================================================
-
-@bot.command(
-    name="hilo"
-)
-async def hilo(
-    ctx,
-    bet: str
-):
-
-    # --------------------------------------------------------
-    # GAME CHANNEL CHECK
-    # --------------------------------------------------------
-
-    if not bot.game_allowed(ctx):
-        return
-
-
-    # --------------------------------------------------------
-    # PARSE BET
-    # --------------------------------------------------------
-
-    try:
-
-        amount = parse_amount(
-            bet
-        )
-
-    except ValueError as e:
-
-        await ctx.send(
-            str(e)
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # MINIMUM BET
-    # --------------------------------------------------------
+    if isinstance(value, Decimal):
+        amount = value
+    else:
+        raw = str(value).strip().replace(",", "").replace("$", "")
+
+        if raw.lower() in {"all", "half"}:
+            return None
+
+        try:
+            amount = Decimal(raw)
+        except InvalidOperation:
+            return None
 
     if amount <= 0:
+        return None
 
-        await ctx.send(
-            "❌ Bet must be greater than 0."
+    return amount.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+
+def normalize_amount(value: str) -> Optional[Decimal]:
+    raw = str(value).strip().lower()
+
+    if raw.endswith("$"):
+        raw = raw[:-1]
+
+    return parse_money(raw)
+
+
+def amount_or_all(
+    raw: str,
+    balance: Decimal,
+) -> Optional[Decimal]:
+
+    value = str(raw).strip().lower()
+
+    if value == "all":
+        return balance
+
+    if value == "half":
+        return (
+            balance / Decimal("2")
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
         )
 
-        return
+    return normalize_amount(value)
 
 
-    # --------------------------------------------------------
-    # GET USER
-    # --------------------------------------------------------
+def valid_bet(amount: Decimal) -> bool:
+    return amount >= MIN_BET
 
-    user = await bot.db.user(
-        ctx.author.id
+
+# ============================================================
+# EMBEDS
+# ============================================================
+
+def base_embed(
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    color: int = 0x00E676,
+) -> discord.Embed:
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=datetime.now(timezone.utc),
     )
 
-    balance = float(
-        user["balance"]
+    return embed
+
+
+def success_embed(
+    title: str,
+    description: str,
+) -> discord.Embed:
+
+    return base_embed(
+        title=title,
+        description=description,
+        color=0x57F287,
     )
 
 
-    # --------------------------------------------------------
-    # BALANCE CHECK
-    # --------------------------------------------------------
+def error_embed(
+    title: str,
+    description: str,
+) -> discord.Embed:
 
-    if amount > balance:
+    return base_embed(
+        title=title,
+        description=description,
+        color=0xED4245,
+    )
 
-        await ctx.send(
-            "❌ You don't have enough points."
+
+def neutral_embed(
+    title: str,
+    description: str,
+) -> discord.Embed:
+
+    return base_embed(
+        title=title,
+        description=description,
+        color=0x5865F2,
+    )
+
+
+# ============================================================
+# COMPONENTS V2 HELPERS
+# ============================================================
+
+def components_v2_available() -> bool:
+    return all(
+        hasattr(discord.ui, name)
+        for name in (
+            "LayoutView",
+            "Container",
+            "TextDisplay",
+            "ActionRow",
         )
-
-        return
-
-
-    # --------------------------------------------------------
-    # REMOVE BET
-    # --------------------------------------------------------
-    #
-    # The bet is removed once at game start.
-    #
-    # record_game() later handles the game statistics
-    # and, on a win, credits the payout.
-    #
-
-    success = await bot.db.change_balance(
-        ctx.author.id,
-        -amount,
-        "game_bet",
-        "hilo"
-    )
-
-    if not success:
-
-        await ctx.send(
-            "❌ Failed to place your bet."
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # FIRST CARD
-    # --------------------------------------------------------
-
-    first_card = hilo_random_card()
-
-
-    # --------------------------------------------------------
-    # CREATE VIEW
-    # --------------------------------------------------------
-
-    view = HiloView(
-        bot=bot,
-        owner_id=ctx.author.id,
-        bet=amount,
-        current_card=first_card
     )
 
 
-    # --------------------------------------------------------
-    # CREATE EMBED
-    # --------------------------------------------------------
+def make_text_display(
+    text: str,
+):
+    return discord.ui.TextDisplay(text)
 
-    file = hilo_card_file(
-        first_card
+
+def make_container(
+    *items,
+    accent_color: Optional[int] = None,
+):
+    kwargs = {}
+
+    if accent_color is not None:
+        kwargs["accent_color"] = accent_color
+
+    return discord.ui.Container(
+        *items,
+        **kwargs,
     )
 
-    embed = view.make_embed()
+
+# ============================================================
+# CUSTOM COMPONENTS
+# ============================================================
+
+class V2LayoutView(discord.ui.LayoutView):
+
+    def __init__(
+        self,
+        *,
+        timeout: Optional[float] = 180,
+    ):
+        super().__init__(timeout=timeout)
 
 
-    # --------------------------------------------------------
-    # SEND GAME
-    # --------------------------------------------------------
+class ButtonView(discord.ui.View):
 
-    try:
-
-        if file:
-
-            message = await ctx.send(
-                embed=embed,
-                file=file,
-                view=view
-            )
-
-        else:
-
-            # Remove attachment image reference if the image
-            # could not be found.
-            embed.set_image(
-                url=None
-            )
-
-            message = await ctx.send(
-                embed=embed,
-                view=view
-            )
-
-        view.message = message
-
-    except Exception:
-
-        # If Discord fails to send the game message,
-        # refund the bet.
-        await bot.db.change_balance(
-            ctx.author.id,
-            amount,
-            "game_refund",
-            "hilo_send_failed"
-        )
-
-        raise
-
-# =========================================================
-# CRAZY DICE
-# =========================================================
-
-import hashlib
-import secrets
+    def __init__(
+        self,
+        *,
+        timeout: Optional[float] = 180,
+    ):
+        super().__init__(timeout=timeout)
 
 
-# =========================================================
-# CRAZY DICE VIEW
-# =========================================================
+class WalletView(ButtonView):
 
-class CrazyDiceView(discord.ui.View):
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+    ):
+        super().__init__(timeout=180)
 
-    def __init__(self, author, amount):
-        super().__init__(timeout=120)
-
-        self.author = author
-        self.amount = amount
-        self.modality = None
-        self.dice_count = None
-        self.finished = False
+        self.bot = bot
+        self.user_id = user_id
 
     async def interaction_check(
         self,
         interaction: discord.Interaction,
     ) -> bool:
 
-        if interaction.user.id != self.author.id:
-
+        if interaction.user.id != self.user_id:
             await interaction.response.send_message(
-                "This game belongs to someone else.",
+                "This wallet belongs to another user.",
                 ephemeral=True,
             )
-
             return False
 
         return True
 
-    # -----------------------------------------------------
-    # FIRST SCREEN
-    # -----------------------------------------------------
-
-    def first_embed(self):
-
-        return brand(
-            "Crazy Dice",
-            (
-                f"Bet: **{money(self.amount)} points**\n\n"
-                "**Choose your winning condition:**\n\n"
-                "📈 **Higher Wins** — Highest total wins\n"
-                "📉 **Lower Wins** — Lowest total wins\n"
-                "🤝 **Tie Wins** — Both totals must be equal"
-            ),
-        )
-
-    # -----------------------------------------------------
-    # SECOND SCREEN
-    # -----------------------------------------------------
-
-    def dice_embed(self):
-
-        if self.modality == "higher":
-            modality_name = "Higher Wins"
-
-        elif self.modality == "lower":
-            modality_name = "Lower Wins"
-
-        else:
-            modality_name = "Tie Wins"
-
-        return brand(
-            "Crazy Dice",
-            (
-                f"Bet: **{money(self.amount)} points**\n"
-                f"Modality: **{modality_name}**\n\n"
-                "**Choose your dice count:**\n\n"
-                "1 Dice\n"
-                "3 Dice\n"
-                "6 Dice"
-            ),
-        )
-
-    # -----------------------------------------------------
-    # CHANGE TO DICE SELECTION
-    # -----------------------------------------------------
-
-    def show_dice_buttons(self):
-
-        self.clear_items()
-
-        self.add_item(
-            CrazyDiceDiceButton(
-                "1 Dice",
-                1,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceDiceButton(
-                "3 Dice",
-                3,
-            )
-        )
-
-        self.add_item(
-            CrazyDiceDiceButton(
-                "6 Dice",
-                6,
-            )
-        )
-
-    # -----------------------------------------------------
-    # HIGHER
-    # -----------------------------------------------------
-
     @discord.ui.button(
-        label="Higher Wins",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def higher_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        if self.finished:
-            return
-
-        self.modality = "higher"
-
-        self.show_dice_buttons()
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-    # -----------------------------------------------------
-    # LOWER
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="Lower Wins",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def lower_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        if self.finished:
-            return
-
-        self.modality = "lower"
-
-        self.show_dice_buttons()
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-    # -----------------------------------------------------
-    # TIE
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="Tie Wins",
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def tie_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        if self.finished:
-            return
-
-        self.modality = "tie"
-
-        self.show_dice_buttons()
-
-        await interaction.response.edit_message(
-            embed=self.dice_embed(),
-            view=self,
-        )
-
-    # -----------------------------------------------------
-    # ACTUAL GAME
-    # -----------------------------------------------------
-
-    async def play(
-        self,
-        interaction: discord.Interaction,
-        dice_count: int,
-    ):
-
-        if self.finished:
-            return
-
-        self.finished = True
-        self.dice_count = dice_count
-
-        # =================================================
-        # SEND LOADING MESSAGE FIRST
-        # =================================================
-        #
-        # This is intentionally the FIRST thing we do.
-        # It prevents Discord's interaction timeout.
-        #
-
-        try:
-
-            await interaction.response.send_message(
-                "<a:m_Loading1:1550866495641223188>"
-            )
-
-            loading_message = (
-                await interaction.original_response()
-            )
-
-        except Exception:
-
-            self.finished = False
-
-            return
-
-        # Disable the old dice buttons.
-        for item in self.children:
-            item.disabled = True
-
-        # Update the original setup message.
-        try:
-
-            await interaction.message.edit(
-                embed=self.dice_embed(),
-                view=self,
-            )
-
-        except Exception:
-            pass
-
-        # =================================================
-        # WAIT 3 SECONDS
-        # =================================================
-
-        await asyncio.sleep(3)
-
-        # =================================================
-        # CREATE PROVABLY FAIR SEEDS
-        # =================================================
-
-        try:
-
-            server_seed = secrets.token_hex(32)
-
-            client_seed = str(
-                secrets.randbelow(10**18)
-            )
-
-            # =================================================
-            # DETERMINISTIC DICE ROLL
-            # =================================================
-
-            def generate_roll(
-                side: str,
-                index: int,
-            ):
-
-                data = (
-                    f"{server_seed}:"
-                    f"{client_seed}:"
-                    f"crazydice:"
-                    f"{side}:"
-                    f"{dice_count}:"
-                    f"{index}"
-                ).encode()
-
-                digest = hashlib.sha256(
-                    data
-                ).hexdigest()
-
-                number = int(
-                    digest[:16],
-                    16,
-                )
-
-                return (number % 6) + 1
-
-            player_dice = []
-
-            dealer_dice = []
-
-            for index in range(dice_count):
-
-                player_dice.append(
-                    generate_roll(
-                        "player",
-                        index,
-                    )
-                )
-
-                dealer_dice.append(
-                    generate_roll(
-                        "dealer",
-                        index,
-                    )
-                )
-
-            player_total = sum(
-                player_dice
-            )
-
-            dealer_total = sum(
-                dealer_dice
-            )
-
-            # =================================================
-            # DETERMINE MODALITY
-            # =================================================
-
-            if self.modality == "higher":
-
-                modality_name = "Higher Wins"
-
-                payout_multiplier = Decimal("1.96")
-
-                if player_total > dealer_total:
-
-                    result = "win"
-
-                elif player_total == dealer_total:
-
-                    result = "push"
-
-                else:
-
-                    result = "lose"
-
-            elif self.modality == "lower":
-
-                modality_name = "Lower Wins"
-
-                payout_multiplier = Decimal("1.96")
-
-                if player_total < dealer_total:
-
-                    result = "win"
-
-                elif player_total == dealer_total:
-
-                    result = "push"
-
-                else:
-
-                    result = "lose"
-
-            else:
-
-                modality_name = "Tie Wins"
-
-                if dice_count == 1:
-
-                    payout_multiplier = Decimal("5")
-
-                elif dice_count == 3:
-
-                    payout_multiplier = Decimal("7")
-
-                else:
-
-                    payout_multiplier = Decimal("9")
-
-                if player_total == dealer_total:
-
-                    result = "win"
-
-                else:
-
-                    result = "lose"
-
-            # =================================================
-            # PAYOUT
-            # =================================================
-
-            payout = Decimal("0")
-
-            if result == "win":
-
-                payout = (
-                    Decimal(str(self.amount))
-                    * payout_multiplier
-                )
-
-                await bot.db.change_balance(
-                    self.author.id,
-                    payout,
-                    "crazydice_win",
-                )
-
-            elif result == "push":
-
-                # Return the original bet.
-                payout = Decimal(
-                    str(self.amount)
-                )
-
-                await bot.db.change_balance(
-                    self.author.id,
-                    payout,
-                    "crazydice_push",
-                )
-
-            # =================================================
-            # RESULT TEXT
-            # =================================================
-
-            if result == "win":
-
-                result_text = (
-                    f"Congratulations! You won the "
-                    f"**{modality_name}** "
-                    f"({dice_count} Dice) modality. "
-                    f"You gained **{money(payout)}** points."
-                )
-
-            elif result == "push":
-
-                result_text = (
-                    f"**{modality_name}** "
-                    f"({dice_count} Dice) resulted in a tie. "
-                    "Your bet was returned."
-                )
-
-            else:
-
-                result_text = (
-                    f"You lost the "
-                    f"**{modality_name}** "
-                    f"({dice_count} Dice) game."
-                )
-
-            # =================================================
-            # FINAL RESULT
-            # =================================================
-
-            result_embed = brand(
-                "Crazy Dice",
-                (
-                    f"{result_text}\n\n"
-
-                    f"**Your Roll**\n"
-                    f"Dice: **"
-                    f"{', '.join(map(str, player_dice))}"
-                    f"**\n"
-                    f"Total: **{player_total}**\n\n"
-
-                    f"**Bot Rolled**\n"
-                    f"Dice: **"
-                    f"{', '.join(map(str, dealer_dice))}"
-                    f"**\n"
-                    f"Total: **{dealer_total}**\n\n"
-
-                    f"**Payout:** "
-                    f"{payout_multiplier}x\n\n"
-
-                    f"🔒 **Provably Fair**\n"
-                    f"**Server Seed:** "
-                    f"`{server_seed}`\n"
-                    f"**Client Seed:** "
-                    f"`{client_seed}`"
-                ),
-            )
-
-            # =================================================
-            # EDIT LOADING MESSAGE
-            # =================================================
-
-            await loading_message.edit(
-                content=None,
-                embed=result_embed,
-            )
-
-        except Exception as error:
-
-            # -------------------------------------------------
-            # NEVER LEAVE THE USER WITH A DEAD GAME
-            # -------------------------------------------------
-
-            try:
-
-                error_embed = brand(
-                    "Crazy Dice",
-                    (
-                        "An error occurred while processing "
-                        "the game.\n\n"
-                        "Your bet was not automatically "
-                        "returned by this error handler."
-                    ),
-                    0xED4245,
-                )
-
-                await loading_message.edit(
-                    content=None,
-                    embed=error_embed,
-                )
-
-            except Exception:
-                pass
-
-            print(
-                f"[Crazy Dice Error] "
-                f"{type(error).__name__}: {error}"
-            )
-
-        finally:
-
-            self.stop()
-
-
-# =========================================================
-# CRAZY DICE DICE BUTTON
-# =========================================================
-
-class CrazyDiceDiceButton(discord.ui.Button):
-
-    def __init__(
-        self,
-        label: str,
-        dice_count: int,
-    ):
-
-        super().__init__(
-            label=label,
-            style=discord.ButtonStyle.secondary,
-            row=0,
-        )
-
-        self.dice_count = dice_count
-
-    async def callback(
-        self,
-        interaction: discord.Interaction,
-    ):
-
-        view = self.view
-
-        if not isinstance(
-            view,
-            CrazyDiceView,
-        ):
-            return
-
-        if interaction.user.id != view.author.id:
-
-            await interaction.response.send_message(
-                "This game belongs to someone else.",
-                ephemeral=True,
-            )
-
-            return
-
-        await view.play(
-            interaction,
-            self.dice_count,
-        )
-
-
-# =========================================================
-# CRAZY DICE COMMAND
-# =========================================================
-
-@bot.command(
-    aliases=["cd"],
-)
-async def crazydice(
-    ctx,
-    bet: str,
-):
-
-    if not await bot.game_allowed(ctx):
-        return
-
-    # =====================================================
-    # PARSE BET
-    # =====================================================
-
-    try:
-
-        bet_lower = bet.lower().strip()
-
-        if bet_lower in (
-            "half",
-            "all",
-            "max",
-        ):
-
-            row = await bot.db.user(
-                ctx.author.id
-            )
-
-            if not row:
-
-                await ctx.send(
-                    "Your account could not be found."
-                )
-
-                return
-
-            balance = row["balance"]
-
-            if bet_lower in (
-                "all",
-                "max",
-            ):
-
-                amount = parse_amount(
-                    str(balance)
-                )
-
-            else:
-
-                half_balance = (
-                    Decimal(str(balance))
-                    / Decimal("2")
-                )
-
-                amount = parse_amount(
-                    str(half_balance)
-                )
-
-        else:
-
-            amount = parse_amount(
-                bet
-            )
-
-    except ValueError as error:
-
-        await ctx.send(
-            str(error)
-        )
-
-        return
-
-    # =====================================================
-    # MINIMUM BET
-    # =====================================================
-
-    if Decimal(str(amount)) < Decimal("20"):
-
-        await ctx.send(
-            "The minimum bet is **20 points ($0.10)**."
-        )
-
-        return
-
-    # =====================================================
-    # DEDUCT BET
-    # =====================================================
-
-    if not await bot.db.change_balance(
-        ctx.author.id,
-        -amount,
-        "crazydice_bet",
-    ):
-
-        await ctx.send(
-            "Insufficient balance."
-        )
-
-        return
-
-    # =====================================================
-    # START GAME
-    # =====================================================
-
-    view = CrazyDiceView(
-        ctx.author,
-        amount,
-    )
-
-    await ctx.send(
-        embed=view.first_embed(),
-        view=view,
-    )
-
-            
-import random
-import discord
-
-
-# =========================================================
-# SOS CONFIRMATION VIEW
-# =========================================================
-
-class SOSConfirmView(discord.ui.View):
-
-    def __init__(self, ctx, amount):
-        super().__init__(timeout=30)
-
-        self.ctx = ctx
-        self.amount = amount
-        self.message = None
-        self.finished = False
-
-    # -----------------------------------------------------
-    # ONLY HOST CAN USE CONFIRMATION BUTTONS
-    # -----------------------------------------------------
-
-    async def interaction_check(self, interaction: discord.Interaction):
-
-        if interaction.user.id != self.ctx.author.id:
-
-            await interaction.response.send_message(
-                "Only the event host can use these buttons.",
-                ephemeral=True
-            )
-
-            return False
-
-        return True
-
-    # -----------------------------------------------------
-    # START
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="Start",
+        label="Deposit",
         style=discord.ButtonStyle.success,
-        emoji="✅"
+        custom_id="wallet_deposit",
     )
-    async def start_button(
+    async def deposit_button(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button
+        button: discord.ui.Button,
     ):
 
-        if self.finished:
-            return
-
-        # Take money only when host actually starts
-        balance_changed = await bot.db.change_balance(
-            self.ctx.author.id,
-            -self.amount,
-            "sos_pot"
-        )
-
-        if not balance_changed:
-
-            await interaction.response.send_message(
-                "You do not have enough balance to start this event.",
-                ephemeral=True
-            )
-
-            return
-
-        self.finished = True
-        self.stop()
-
-        for child in self.children:
-            child.disabled = True
-
-        # First acknowledge the button
-        await interaction.response.edit_message(
-            content="",
-            embed=discord.Embed(
-                title="🟢 SOS Event Starting",
-                description=(
-                    f"{self.ctx.author.mention} started a "
-                    f"**{money(self.amount)}** Split or Steal event.\n\n"
-                    "Players can now join the event."
-                ),
-                color=discord.Color.green()
+        await interaction.response.send_message(
+            "Choose a currency Below",
+            view=DepositCurrencyView(
+                self.bot,
+                interaction.user.id,
             ),
-            view=None
+            ephemeral=True,
         )
-
-        # Create the actual JOIN view
-        join_view = SOSJoinView(
-            self.ctx,
-            self.amount
-        )
-
-        join_view.message = self.message
-
-        # Replace confirmation with JOIN event
-        await self.message.edit(
-            content="",
-            embed=join_view.make_embed(),
-            view=join_view
-        )
-
-    # -----------------------------------------------------
-    # DECLINE
-    # -----------------------------------------------------
 
     @discord.ui.button(
-        label="Decline",
-        style=discord.ButtonStyle.danger,
-        emoji="❌"
-    )
-    async def decline_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        await self.cancel(
-            interaction,
-            "The SOS event was declined."
-        )
-
-    # -----------------------------------------------------
-    # DON'T START
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="Don't Start",
+        label="Withdraw",
         style=discord.ButtonStyle.secondary,
-        emoji="🛑"
+        custom_id="wallet_withdraw",
     )
-    async def dont_start_button(
+    async def withdraw_button(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button
+        button: discord.ui.Button,
     ):
 
-        await self.cancel(
-            interaction,
-            "The SOS event was cancelled."
-        )
-
-    # -----------------------------------------------------
-    # CANCEL
-    # -----------------------------------------------------
-
-    async def cancel(
-        self,
-        interaction,
-        reason
-    ):
-
-        if self.finished:
-            return
-
-        self.finished = True
-        self.stop()
-
-        for child in self.children:
-            child.disabled = True
-
-        await interaction.response.edit_message(
-            content="",
-            embed=discord.Embed(
-                title="🛑 SOS Event Cancelled",
-                description=reason,
-                color=discord.Color.red()
-            ),
-            view=self
-        )
-
-    # -----------------------------------------------------
-    # CONFIRMATION TIMEOUT
-    # -----------------------------------------------------
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        for child in self.children:
-            child.disabled = True
-
-        if self.message:
-
-            await self.message.edit(
-                content="",
-                embed=discord.Embed(
-                    title="⌛ SOS Confirmation Expired",
-                    description=(
-                        "The event was not started in time."
-                    ),
-                    color=discord.Color.orange()
-                ),
-                view=self
+        await interaction.response.send_modal(
+            WithdrawModal(
+                self.bot,
+                interaction.user.id,
             )
+        )
 
 
-# =========================================================
-# SOS JOIN VIEW
-# =========================================================
-
-class SOSJoinView(discord.ui.View):
+class DepositCurrencyView(ButtonView):
 
     def __init__(
         self,
-        ctx,
-        amount
+        bot: "CasinoBot",
+        user_id: int,
     ):
-        super().__init__(timeout=28)
+        super().__init__(timeout=180)
 
-        self.ctx = ctx
-        self.amount = amount
-
-        # Users who actually clicked Join Event
-        self.players = []
-
-        self.message = None
-        self.finished = False
-
-    # -----------------------------------------------------
-    # MENTIONS FOR MESSAGE CONTENT
-    # -----------------------------------------------------
-
-    def joined_mentions(self):
-
-        if not self.players:
-            return ""
-
-        return " ".join(
-            user.mention
-            for user in self.players
-        )
-
-    # -----------------------------------------------------
-    # NAMES FOR EMBED
-    # -----------------------------------------------------
-
-    def joined_names(self):
-
-        if not self.players:
-            return "No players have joined yet."
-
-        return "\n".join(
-            f"• {user.display_name}"
-            for user in self.players
-        )
-
-    # -----------------------------------------------------
-    # JOIN EMBED
-    # -----------------------------------------------------
-
-    def make_embed(self):
-
-        embed = discord.Embed(
-            title="⚔️ Split or Steal Event",
-            description=(
-                f"**Pot:** {money(self.amount)}\n"
-                f"**Hosted by:** {self.ctx.author.display_name}\n\n"
-
-                f"**Total Players Joined:** "
-                f"{len(self.players)} / 2 minimum\n\n"
-
-                f"**Users:**\n"
-                f"{self.joined_names()}\n\n"
-
-                "Click **Join Event** to participate.\n"
-                "Two players will be selected when "
-                "the timer ends."
-            ),
-            color=discord.Color.blurple()
-        )
-
-        embed.set_footer(
-            text="Join period: 28 seconds"
-        )
-
-        return embed
-
-    # -----------------------------------------------------
-    # JOIN BUTTON
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="Join Event",
-        style=discord.ButtonStyle.success,
-        emoji="🎮"
-    )
-    async def join_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if self.finished:
-
-            await interaction.response.send_message(
-                "This event has already ended.",
-                ephemeral=True
-            )
-
-            return
-
-        # Already joined
-        if interaction.user.id in [
-            user.id for user in self.players
-        ]:
-
-            await interaction.response.send_message(
-                "You already joined this event.",
-                ephemeral=True
-            )
-
-            return
-
-        # Add player
-        self.players.append(
-            interaction.user
-        )
-
-        # Public message mentions joined users
-        # so they receive a notification.
-        await interaction.response.edit_message(
-            content=self.joined_mentions(),
-            embed=self.make_embed(),
-            view=self
-        )
-
-    # -----------------------------------------------------
-    # JOIN TIMEOUT
-    # -----------------------------------------------------
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-
-        for child in self.children:
-            child.disabled = True
-
-        # -------------------------------------------------
-        # NOT ENOUGH PLAYERS
-        # -------------------------------------------------
-
-        if len(self.players) < 2:
-
-            # Refund host
-            await bot.db.change_balance(
-                self.ctx.author.id,
-                self.amount,
-                "sos_not_enough_players_refund"
-            )
-
-            await self.message.edit(
-                content="",
-                embed=discord.Embed(
-                    title="❌ SOS Event Cancelled",
-                    description=(
-                        "Not enough players joined.\n\n"
-                        "**Minimum required:** 2 players\n"
-                        f"**Joined:** {len(self.players)}\n\n"
-                        f"Refunded: **{money(self.amount)}**"
-                    ),
-                    color=discord.Color.red()
-                ),
-                view=self
-            )
-
-            return
-
-        # -------------------------------------------------
-        # SELECT TWO RANDOM PLAYERS
-        # -------------------------------------------------
-
-        selected_players = random.sample(
-            self.players,
-            2
-        )
-
-        # Create decision view
-        decision_view = SOSDecisionView(
-            self.ctx,
-            self.amount,
-            selected_players
-        )
-
-        decision_view.message = self.message
-
-        # Mention both selected players in CONTENT.
-        # Their notifications happen here.
-        #
-        # The embed itself does not contain actual
-        # mentions, so there are no extra notifications.
-        await self.message.edit(
-            content=(
-                f"{selected_players[0].mention} "
-                f"{selected_players[1].mention}"
-            ),
-            embed=decision_view.make_embed(),
-            view=decision_view
-        )
-
-
-# =========================================================
-# SOS DECISION VIEW
-# =========================================================
-
-class SOSDecisionView(discord.ui.View):
-
-    def __init__(
-        self,
-        ctx,
-        amount,
-        players
-    ):
-        super().__init__(timeout=28)
-
-        self.ctx = ctx
-        self.amount = amount
-        self.players = players
-
-        # user_id -> SPLIT / STEAL
-        self.choices = {}
-
-        self.message = None
-        self.finished = False
-
-    # -----------------------------------------------------
-    # PUBLIC EMBED
-    # -----------------------------------------------------
-
-    def make_embed(self):
-
-        player_one = self.players[0]
-        player_two = self.players[1]
-
-        # IMPORTANT:
-        #
-        # We DO NOT reveal SPLIT or STEAL until BOTH
-        # players have selected.
-        #
-        # Before that:
-        #
-        # Locked In
-        # Thinking...
-        #
-
-        status_one = (
-            "Locked In"
-            if player_one.id in self.choices
-            else "Thinking..."
-        )
-
-        status_two = (
-            "Locked In"
-            if player_two.id in self.choices
-            else "Thinking..."
-        )
-
-        embed = discord.Embed(
-            title="⚔️ SPLIT OR STEAL FACE-OFF",
-            description=(
-                "The players have been selected!\n"
-                "Decisions close in **28 seconds**.\n\n"
-
-                f"• **Player 1:** "
-                f"{player_one.display_name} "
-                f"➔ **{status_one}**\n"
-
-                f"• **Player 2:** "
-                f"{player_two.display_name} "
-                f"➔ **{status_two}**\n\n"
-
-                "Players, click your choice below to lock "
-                "in your decision privately."
-            ),
-            color=discord.Color.gold()
-        )
-
-        return embed
-
-    # -----------------------------------------------------
-    # ONLY SELECTED PLAYERS CAN USE BUTTONS
-    # -----------------------------------------------------
+        self.bot = bot
+        self.user_id = user_id
 
     async def interaction_check(
         self,
-        interaction: discord.Interaction
-    ):
+        interaction: discord.Interaction,
+    ) -> bool:
 
-        player_ids = [
-            player.id
-            for player in self.players
-        ]
-
-        # Not a selected player
-        if interaction.user.id not in player_ids:
-
+        if interaction.user.id != self.user_id:
             await interaction.response.send_message(
-                "You are not one of the selected players.",
-                ephemeral=True
+                "This deposit menu belongs to another user.",
+                ephemeral=True,
             )
-
-            return False
-
-        # Already chose
-        if interaction.user.id in self.choices:
-
-            await interaction.response.send_message(
-                "You already locked in your decision.",
-                ephemeral=True
-            )
-
             return False
 
         return True
-
-    # -----------------------------------------------------
-    # SPLIT
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="SPLIT",
-        style=discord.ButtonStyle.success,
-        emoji="🤝"
-    )
-    async def split_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        await self.choose(
-            interaction,
-            "SPLIT"
-        )
-
-    # -----------------------------------------------------
-    # STEAL
-    # -----------------------------------------------------
-
-    @discord.ui.button(
-        label="STEAL",
-        style=discord.ButtonStyle.danger,
-        emoji="💰"
-    )
-    async def steal_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        await self.choose(
-            interaction,
-            "STEAL"
-        )
-
-    # -----------------------------------------------------
-    # PLAYER CHOICE
-    # -----------------------------------------------------
-
-    async def choose(
-        self,
-        interaction,
-        choice
-    ):
-
-        # Save decision
-        self.choices[
-            interaction.user.id
-        ] = choice
-
-        # PRIVATE response
-        #
-        # It does NOT say "You chose SPLIT"
-        # to avoid leaking anything.
-        await interaction.response.send_message(
-            "🔒 Your decision has been locked in.",
-            ephemeral=True
-        )
-
-        # -------------------------------------------------
-        # ONLY ONE PLAYER HAS ANSWERED
-        # -------------------------------------------------
-
-        if len(self.choices) < 2:
-
-            # Public message ONLY says Locked In.
-            await self.message.edit(
-                content=(
-                    f"{self.players[0].mention} "
-                    f"{self.players[1].mention}"
-                ),
-                embed=self.make_embed(),
-                view=self
-            )
-
-            return
-
-        # -------------------------------------------------
-        # BOTH PLAYERS HAVE ANSWERED
-        # -------------------------------------------------
-
-        await self.finish_event()
-
-    # -----------------------------------------------------
-    # FINISH EVENT
-    # -----------------------------------------------------
-
-    async def finish_event(self):
-
-        if self.finished:
-            return
-
-        self.finished = True
-        self.stop()
-
-        for child in self.children:
-            child.disabled = True
-
-        player_one = self.players[0]
-        player_two = self.players[1]
-
-        choice_one = self.choices.get(
-            player_one.id,
-            "STEAL"
-        )
-
-        choice_two = self.choices.get(
-            player_two.id,
-            "STEAL"
-        )
-
-        # =================================================
-        # BOTH SPLIT
-        # =================================================
-
-        if (
-            choice_one == "SPLIT"
-            and
-            choice_two == "SPLIT"
-        ):
-
-            first_reward = self.amount // 2
-            second_reward = (
-                self.amount - first_reward
-            )
-
-            await bot.db.change_balance(
-                player_one.id,
-                first_reward,
-                "sos_split"
-            )
-
-            await bot.db.change_balance(
-                player_two.id,
-                second_reward,
-                "sos_split"
-            )
-
-            result_text = (
-                f"• **Player 1:** "
-                f"{player_one.mention} ➔ **SPLIT**\n"
-
-                f"• **Player 2:** "
-                f"{player_two.mention} ➔ **SPLIT**\n\n"
-
-                "🤝 **Both players chose SPLIT!**\n\n"
-
-                f"{player_one.mention} received "
-                f"**{money(first_reward)}**\n"
-
-                f"{player_two.mention} received "
-                f"**{money(second_reward)}**"
-            )
-
-        # =================================================
-        # PLAYER 1 STEALS
-        # =================================================
-
-        elif (
-            choice_one == "STEAL"
-            and
-            choice_two == "SPLIT"
-        ):
-
-            await bot.db.change_balance(
-                player_one.id,
-                self.amount,
-                "sos_steal"
-            )
-
-            result_text = (
-                f"• **Player 1:** "
-                f"{player_one.mention} ➔ **STEAL**\n"
-
-                f"• **Player 2:** "
-                f"{player_two.mention} ➔ **SPLIT**\n\n"
-
-                f"💰 {player_one.mention} "
-                "stole the entire pot!\n\n"
-
-                f"Reward: **{money(self.amount)}**"
-            )
-
-        # =================================================
-        # PLAYER 2 STEALS
-        # =================================================
-
-        elif (
-            choice_one == "SPLIT"
-            and
-            choice_two == "STEAL"
-        ):
-
-            await bot.db.change_balance(
-                player_two.id,
-                self.amount,
-                "sos_steal"
-            )
-
-            result_text = (
-                f"• **Player 1:** "
-                f"{player_one.mention} ➔ **SPLIT**\n"
-
-                f"• **Player 2:** "
-                f"{player_two.mention} ➔ **STEAL**\n\n"
-
-                f"💰 {player_two.mention} "
-                "stole the entire pot!\n\n"
-
-                f"Reward: **{money(self.amount)}**"
-            )
-
-        # =================================================
-        # BOTH STEAL
-        # =================================================
-
-        else:
-
-            result_text = (
-                f"• **Player 1:** "
-                f"{player_one.mention} ➔ **STEAL**\n"
-
-                f"• **Player 2:** "
-                f"{player_two.mention} ➔ **STEAL**\n\n"
-
-                "💀 **Both players chose STEAL.**\n\n"
-
-                "Nobody receives the pot."
-            )
-
-        # =================================================
-        # SHOW RESULT
-        # =================================================
-
-        await self.message.edit(
-            content="",
-            embed=discord.Embed(
-                title="🏁 SOS EVENT RESULT",
-                description=result_text,
-                color=discord.Color.green()
-            ),
-            view=self
-        )
-
-    # -----------------------------------------------------
-    # DECISION TIMEOUT
-    # -----------------------------------------------------
-
-    async def on_timeout(self):
-
-        if self.finished:
-            return
-
-        # Anyone who didn't answer becomes STEAL.
-        for player in self.players:
-
-            if player.id not in self.choices:
-
-                self.choices[
-                    player.id
-                ] = "STEAL"
-
-        # Now both decisions can be revealed.
-        await self.finish_event()
-
-
-# =========================================================
-# SOS COMMAND
-# =========================================================
-
-@bot.command(
-    name="sos",
-    aliases=["splitorsteal"]
-)
-async def sos(
-    ctx,
-    amount: str = None
-):
-
-    # -----------------------------------------------------
-    # GAME CHANNEL CHECK
-    # -----------------------------------------------------
-
-    if not await bot.game_allowed(ctx):
-        return
-
-    # -----------------------------------------------------
-    # NO AMOUNT
-    # -----------------------------------------------------
-
-    if amount is None:
-
-        await ctx.send(
-            f"Usage: `{ctx.prefix}sos <amount>`"
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # PARSE AMOUNT
-    # -----------------------------------------------------
-
-    try:
-
-        value = parse_amount(amount)
-
-    except ValueError as error:
-
-        await ctx.send(
-            str(error)
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # INVALID AMOUNT
-    # -----------------------------------------------------
-
-    if value <= 0:
-
-        await ctx.send(
-            "The amount must be greater than zero."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # CHECK BALANCE
-    #
-    # We don't remove the balance yet.
-    # It gets removed only when Start is clicked.
-    # -----------------------------------------------------
-
-    # If your DB has a balance getter, you can add a
-    # balance check here. Otherwise Start will check it.
-
-    # -----------------------------------------------------
-    # CONFIRMATION
-    # -----------------------------------------------------
-
-    confirm_view = SOSConfirmView(
-        ctx,
-        value
-    )
-
-    embed = discord.Embed(
-        title="⚔️ Confirm Split or Steal",
-        description=(
-            f"{ctx.author.mention} wants to start a "
-            f"Split or Steal event.\n\n"
-
-            f"**Pot:** {money(value)}\n"
-            f"**Host:** {ctx.author.display_name}\n\n"
-
-            "Do you want to start this event?"
-        ),
-        color=discord.Color.gold()
-    )
-
-    message = await ctx.send(
-        embed=embed,
-        view=confirm_view
-    )
-
-    confirm_view.message = message
-
-class WithdrawModal(discord.ui.Modal, title="Withdrawal request"):
-    address = discord.ui.TextInput(label="Receiving address", min_length=20, max_length=128)
-    amount = discord.ui.TextInput(label="Points to withdraw", placeholder="Minimum shown in previous menu")
-    def __init__(self, currency, owner_id): super().__init__(); self.currency, self.owner_id = currency, owner_id
-    async def on_submit(self, interaction):
-        try: amount = parse_amount(self.amount.value)
-        except ValueError as error: await interaction.response.send_message(str(error), ephemeral=True); return
-        if amount < config.MIN_WITHDRAW[self.currency]:
-            await interaction.response.send_message(f"Minimum {self.currency} withdrawal: {config.MIN_WITHDRAW[self.currency]} points.", ephemeral=True); return
-        address = self.address.value.strip()
-        if self.currency == "LTC" and not address.lower().startswith(("ltc1", "m", "n", "l")):
-            await interaction.response.send_message("That does not look like a Litecoin address.", ephemeral=True); return
-        if self.currency == "SOL" and (len(address) < 32 or len(address) > 50):
-            await interaction.response.send_message("That does not look like a Solana address.", ephemeral=True); return
-        if self.currency == "USDT" and not (address.startswith("0x") and len(address) == 42):
-            await interaction.response.send_message("USDT BEP-20 needs a BSC address beginning with 0x.", ephemeral=True); return
-        if not await bot.db.change_balance(interaction.user.id, -amount, "withdraw_request", f"{self.currency}:{address}"):
-            await interaction.response.send_message("You do not have enough points.", ephemeral=True); return
-        embed = brand("Withdrawal requested", f"**Total:** {money(amount)} points ({usd(amount)})\n**Currency:** {self.currency}\n**Address:** `{address}`\n\nYour Withdrawl has been succesfully proceed.", 0xFEE75C)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        channel = bot.get_channel(config.WITHDRAW_LOG_CHANNEL_ID)
-        if channel: await channel.send(embed=brand("Withdrawal", f"{config.E['withdraw']} **{money(amount)} points** withdrawn by {interaction.user.mention}.\nCurrency: **{self.currency}**\nAddress: `{address}`\nPayment will be recived in few minutes."))
-
-
-class WithdrawView(OwnerView):
-    async def choose(self, interaction, currency):
-        await interaction.response.send_modal(WithdrawModal(currency, self.owner_id))
-    @discord.ui.button(label="LTC", emoji=config.E["ltc"])
-    async def ltc(self, interaction, button): await self.choose(interaction, "LTC")
-    @discord.ui.button(label="SOL", emoji=config.E["sol"])
-    async def sol(self, interaction, button): await self.choose(interaction, "SOL")
-    @discord.ui.button(label="USDT", emoji=config.E["usdt"])
-    async def usdt(self, interaction, button): await self.choose(interaction, "USDT")
-
-
-class ConfirmTipView(OwnerView):
-    def __init__(self, owner, recipient, amount): super().__init__(owner.id); self.owner, self.recipient, self.amount = owner, recipient, amount
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji=config.E["win"])
-    async def confirm(self, interaction, button):
-        if not await bot.db.change_balance(self.owner.id, -self.amount, "tip_sent", str(self.recipient.id)):
-            await interaction.response.edit_message(content="Insufficient balance.", view=None); return
-        await bot.db.change_balance(self.recipient.id, self.amount, "tip_received", str(self.owner.id))
-        await bot.db.pool.execute("UPDATE users SET tips_sent=tips_sent+$2 WHERE user_id=$1", self.owner.id, self.amount)
-        await bot.db.pool.execute("UPDATE users SET tips_received=tips_received+$2 WHERE user_id=$1", self.recipient.id, self.amount)
-        await interaction.response.edit_message(content=f"{config.E['win']} {self.owner.mention} tipped {self.recipient.mention} **{money(self.amount)} points**.", view=None)
-    @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary)
-    async def decline(self, interaction, button): await interaction.response.edit_message(content="Tip cancelled.", view=None)
-
-
-class BlackjackView(OwnerView):
-    def __init__(self, owner, bet):
-        super().__init__(owner.id, timeout=60); self.bet=bet; self.server,self.hash,self.rng=provably_fair(str(owner.id)); self.deck=deck(self.rng); self.player=[self.deck.pop(),self.deck.pop()]; self.dealer=[self.deck.pop(),self.deck.pop()]; self.done=False
-    def text(self, reveal=False):
-        dealer = ", ".join(self.dealer) if reveal else f"{self.dealer[0]}, ??"
-        return f"**Your Hand:** {', '.join(self.player)} (**{hand_total(self.player)}**)\n**Dealer's Hand:** {dealer}" 
-    def embed_and_file(self, reveal=False, title="Blackjack", colour=0x2B2D31, extra=""):
-        embed=brand(title,self.text(reveal)+extra,colour)
-        embed.set_image(url="attachment://blackjack_table.png")
-        return embed, blackjack_table(self.player,self.dealer,reveal)
-    async def finish(self, interaction):
-        while hand_total(self.dealer) < 17: self.dealer.append(self.deck.pop())
-        player,dealer_total=hand_total(self.player),hand_total(self.dealer)
-        payout = round(self.bet*(2.0 if dealer_total>21 or player>dealer_total else 0),4)
-        if player>21 or (dealer_total<=21 and dealer_total>=player): payout=0
-        await bot.db.record_game(self.owner_id,self.bet,payout,"blackjack"); self.done=True
-        for item in self.children: item.disabled=True
-        outcome="Won" if payout else "Lost"; colour=0x57F287 if payout else 0xED4245
-        fair=f"\n\n**Provably Fair**\nPublic Hash: `{self.hash}`\nServer Seed: `{self.server}`\nClient Seed: `{self.owner_id}`"
-        embed,table=self.embed_and_file(True,f"Blackjack — {outcome}",colour,fair)
-        await interaction.response.edit_message(embed=embed,attachments=[table],view=self)
-    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
-    async def hit(self, interaction, button):
-        self.player.append(self.deck.pop())
-        if hand_total(self.player)>21: await self.finish(interaction)
-        else:
-            embed,table=self.embed_and_file()
-            await interaction.response.edit_message(embed=embed,attachments=[table],view=self)
-    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)
-    async def stand(self, interaction, button): await self.finish(interaction)
-    @discord.ui.button(label="Double", style=discord.ButtonStyle.success)
-    async def double(self, interaction, button):
-        if len(self.player)!=2 or not await bot.db.change_balance(self.owner_id,-self.bet,"blackjack_double"):
-            await interaction.response.send_message("Double is only available on your first hand with enough balance.",ephemeral=True); return
-        self.bet*=2; self.player.append(self.deck.pop()); await self.finish(interaction)
-    @discord.ui.button(label="Split", style=discord.ButtonStyle.secondary, disabled=True)
-    async def split(self, interaction, button): await interaction.response.send_message("Split will be enabled in the next blackjack update.",ephemeral=True)
-
-
-
-
-
-
-@bot.command(aliases=["hb", "housebal"])
-async def housebalance(ctx):
-    try:
-        house_balance = 43.56
-        ltc_balance = 27.91
-        usdt_balance = 6.43
-        sol_balance = 9.22
-
-        await ctx.send(
-            embed=brand(
-                f"{config.CASINO_NAME} House Balance",
-                (
-                    f"💰 **House Balance:** `${house_balance:,.2f}`\n"
-                    f"🪙 **LTC:** `${ltc_balance:,.2f}`\n"
-                    f"💵 **USDT:** `${usdt_balance:,.2f}`\n"
-                    f"◎ **SOL:** `${sol_balance:,.2f}`"
-                ),
-                0x00E676,
-            )
-        )
-
-    except Exception as error:
-        print(f"HOUSEBAL ERROR: {error}")
-
-        await ctx.send(
-            embed=brand(
-                "House Balance",
-                "Something went wrong while checking the house balance.",
-                0xED4245,
-            )
-        )
-import io
-import random
-import asyncio
-from PIL import Image, ImageDraw
-
-
-@bot.command()
-async def help(ctx, command: str = None):
-    if command:
-        await ctx.send(embed=brand(f"Help: {command}", "Use the command menu for the available command groups.")); return
-    embed=brand("Help", "**0.01 USD = 2 Points**\nUse `.help <command>` for details.\n-# Select a category below.")
-    await ctx.send(embed=embed, view=HelpView(ctx.author.id))
-
-# =========================================================
-# COINFLIP
-# =========================================================
-
-import random
-from decimal import Decimal, InvalidOperation
-
-
-# =========================================================
-# CONFIG
-# =========================================================
-
-COINFLIP_PAYOUT = Decimal("1.92")
-COINFLIP_MIN_BET = Decimal("20")
-
-# Win-log channel.
-# This is stored in memory and resets when the bot restarts.
-COINFLIP_WINLOG_CHANNEL_ID = None
-
-
-# =========================================================
-# COINFLIP IMAGES
-# =========================================================
-
-COINFLIP_IMAGES = {
-    "heads": (
-        "https://media.discordapp.net/attachments/"
-        "1550136730731024425/"
-        "1550495453781426216/"
-        "image.png?ex=6aae8aea&is=6aad396a&"
-        "hm=871a61aec62433c1a7cc838f9405b39095b00e521ee5b64a154b7318f3e2d80d"
-        "&=&format=webp&quality=lossless&width=640&height=516"
-    ),
-
-    "tails": (
-        "https://media.discordapp.net/attachments/"
-        "1550136730731024425/"
-        "1550495462342267053/"
-        "image.png?ex=6aae8aed&is=6aad396d&"
-        "hm=276af9bbf5c628c07c7d3c735d1ea7092a2e679502af81856cee5fd45820484a"
-        "&=&format=webp&quality=lossless"
-    )
-}
-
-
-# =========================================================
-# NEW RESULT IMAGES
-# =========================================================
-
-COINFLIP_RESULT_IMAGES = {
-    "heads": (
-        "https://media.discordapp.net/attachments/"
-        "1550767800698798080/"
-        "1551189074428301362/"
-        "image.png?ex=6ab110e7&is=6aafbf67&"
-        "hm=cd679a9f19985fcd0d603f3a8f90b3d74b65bc2786d4a76034b73aba95f7b89b"
-        "&=&format=webp&quality=lossless&width=640&height=521"
-    ),
-
-    "tails": (
-        "https://media.discordapp.net/attachments/"
-        "1550767800698798080/"
-        "1551189093201748068/"
-        "image.png?ex=6ab110eb&is=6aafbf6b&"
-        "hm=afd2095cd20d60f5d212a6808887698302c2df360d5957a1ed031ba1f98861a5"
-        "&=&format=webp&quality=lossless&width=640&height=525"
-    )
-}
-
-
-# =========================================================
-# COINFLIP WIN LOG
-# =========================================================
-
-async def send_coinflip_win_log(
-    ctx,
-    player_choice,
-    result,
-    amount,
-    payout
-):
-    global COINFLIP_WINLOG_CHANNEL_ID
-
-    # No channel configured
-    if not COINFLIP_WINLOG_CHANNEL_ID:
-        return
-
-    try:
-
-        channel = bot.get_channel(
-            COINFLIP_WINLOG_CHANNEL_ID
-        )
-
-        # Try fetching if it isn't cached
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(
-                    COINFLIP_WINLOG_CHANNEL_ID
-                )
-            except Exception:
-                return
-
-        if channel is None:
-            return
-
-        # -------------------------------------------------
-        # WIN LOG EMBED
-        # -------------------------------------------------
-
-        log_embed = brand(
-            "🪙 Coinflip Win",
-            (
-                f"**Player:** {ctx.author.mention}\n"
-                f"**Choice:** {player_choice.title()}\n"
-                f"**Result:** {result.title()}\n\n"
-                f"**Bet:** {amount:,.2f} points\n"
-                f"**Payout:** {payout:,.2f} points\n"
-                f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x"
-            ),
-            0x57F287
-        )
-
-        # Use the NEW result image
-        image_url = COINFLIP_RESULT_IMAGES.get(result)
-
-        if image_url:
-            log_embed.set_image(
-                url=image_url
-            )
-
-        log_embed.set_footer(
-            text="Coinflip Win Log"
-        )
-
-        await channel.send(
-            embed=log_embed
-        )
-
-    except Exception as error:
-
-        print(
-            f"[COINFLIP] Win log error: {error}"
-        )
-
-# =========================================================
-# COINFLIP COMMAND
-#
-# Usage:
-#
-# .cf 20 h
-# .cf 20 t
-# .cf 20 heads
-# .cf 20 tails
-#
-# .cf half h
-# .cf half t
-#
-# .cf all h
-# .cf all t
-#
-# h / heads = Heads
-# t / tails = Tails
-#
-# Minimum bet = 20 points
-# =========================================================
-
-@bot.command(name="cf", aliases=["coinflip"])
-@commands.cooldown(
-    1,
-    2,
-    commands.BucketType.user
-)
-async def cf(ctx, bet=None, choice=None):
-
-    # -----------------------------------------------------
-    # GAME CHANNEL CHECK
-    # -----------------------------------------------------
-
-    if not await bot.game_allowed(ctx):
-        return
-
-    # -----------------------------------------------------
-    # CHECK ARGUMENTS
-    # -----------------------------------------------------
-
-    if bet is None or choice is None:
-
-        await ctx.send(
-            embed=brand(
-                "🪙 Coinflip",
-                (
-                    "**Usage:**\n"
-                    "`.cf 20 h`\n"
-                    "`.cf 20 t`\n"
-                    "`.cf 20 heads`\n"
-                    "`.cf 20 tails`\n\n"
-                    "`.cf half h`\n"
-                    "`.cf half t`\n\n"
-                    "`.cf all h`\n"
-                    "`.cf all t`\n\n"
-                    "**h** = Heads\n"
-                    "**t** = Tails\n"
-                    f"**Minimum bet:** {COINFLIP_MIN_BET:,.0f} points"
-                )
-            )
-        )
-        return
-
-    # -----------------------------------------------------
-    # NORMALIZE CHOICE
-    # -----------------------------------------------------
-
-    choice = choice.lower().strip()
-
-    if choice in ("h", "heads"):
-        choice = "heads"
-
-    elif choice in ("t", "tails"):
-        choice = "tails"
-
-    else:
-
-        await ctx.send(
-            embed=brand(
-                "❌ Invalid Choice",
-                (
-                    "Choose **h** or **heads** for Heads,\n"
-                    "or **t** or **tails** for Tails."
-                )
-            )
-        )
-        return
-
-    # -----------------------------------------------------
-    # GET USER BALANCE
-    # -----------------------------------------------------
-
-    row = await bot.db.user(ctx.author.id)
-
-    balance = Decimal(str(row["balance"]))
-
-    # -----------------------------------------------------
-    # PARSE BET
-    # -----------------------------------------------------
-
-    bet_text = str(bet).lower().strip()
-
-    if bet_text in ("all", "max"):
-
-        amount = balance
-
-    elif bet_text == "half":
-
-        amount = balance / Decimal("2")
-
-    else:
-
-        try:
-
-            parsed = parse_amount(bet_text)
-
-            amount = Decimal(str(parsed))
-
-        except (
-            ValueError,
-            TypeError,
-            InvalidOperation
-        ):
-
-            await ctx.send(
-                embed=brand(
-                    "❌ Invalid Bet",
-                    (
-                        "Please enter a valid amount.\n\n"
-                        "Examples:\n"
-                        "`.cf 100 h`\n"
-                        "`.cf half h`\n"
-                        "`.cf all t`"
-                    )
-                )
-            )
-            return
-
-    # -----------------------------------------------------
-    # ROUND AMOUNT
-    # -----------------------------------------------------
-
-    amount = amount.quantize(
-        Decimal("0.0001")
-    )
-
-    # -----------------------------------------------------
-    # VALIDATE BET
-    # -----------------------------------------------------
-
-    if amount <= 0:
-
-        await ctx.send(
-            embed=brand(
-                "❌ Invalid Bet",
-                "Your bet must be greater than `0`."
-            )
-        )
-        return
-
-    if amount < COINFLIP_MIN_BET:
-
-        await ctx.send(
-            embed=brand(
-                "❌ Bet Too Low",
-                (
-                    f"The minimum Coinflip bet is "
-                    f"**{COINFLIP_MIN_BET:,.0f} points**."
-                )
-            )
-        )
-        return
-
-    if amount > balance:
-
-        await ctx.send(
-            embed=brand(
-                "❌ Insufficient Balance",
-                (
-                    f"You only have "
-                    f"**{balance:,.2f} points**."
-                )
-            )
-        )
-        return
-
-    # -----------------------------------------------------
-    # TAKE BET
-    # -----------------------------------------------------
-
-    bet_taken = await bot.db.change_balance(
-        ctx.author.id,
-        -float(amount),
-        "coinflip_bet",
-        f"Coinflip {choice} bet"
-    )
-
-    if not bet_taken:
-
-        await ctx.send(
-            embed=brand(
-                "❌ Bet Failed",
-                "You don't have enough balance."
-            )
-        )
-        return
-
-    # -----------------------------------------------------
-    # GENERATE RESULT
-    # -----------------------------------------------------
-
-    result = random.choice(
-        ["heads", "tails"]
-    )
-
-    won = result == choice
-
-    # -----------------------------------------------------
-    # CALCULATE PAYOUT
-    # -----------------------------------------------------
-
-    if won:
-        payout = amount * COINFLIP_PAYOUT
-    else:
-        payout = Decimal("0")
-
-    payout = payout.quantize(
-        Decimal("0.0001")
-    )
-
-    # =====================================================
-    # WIN
-    # =====================================================
-
-    if won:
-
-        # IMPORTANT:
-        #
-        # DO NOT call change_balance(+payout) here.
-        #
-        # record_game() already credits the payout.
-        #
-        # This prevents the old 2x payout bug.
-        #
-        # Example:
-        #
-        # Bet = 100
-        # Payout = 192
-        #
-        # record_game() adds exactly 192.
-        # =================================================
-
-        await bot.db.record_game(
-            ctx.author.id,
-            float(amount),
-            float(payout),
-            "coinflip"
-        )
-
-        # -------------------------------------------------
-        # WIN EMBED
-        # -------------------------------------------------
-
-        embed = brand(
-            "🪙 Coinflip — You Won!",
-            (
-                f"**Your Choice:** {choice.title()}\n"
-                f"**Result:** {result.title()}\n\n"
-                f"**Bet:** {amount:,.2f} points\n"
-                f"**Payout:** {payout:,.2f} points\n"
-                f"**Multiplier:** {COINFLIP_PAYOUT:.2f}x\n\n"
-                f"🎉 **You won {payout:,.2f} points!**"
-            ),
-            0x57F287
-        )
-
-        # -------------------------------------------------
-        # RESULT IMAGE
-        # -------------------------------------------------
-
-        image_url = COINFLIP_RESULT_IMAGES.get(
-            result
-        )
-
-        if image_url:
-
-            embed.set_image(
-                url=image_url
-            )
-
-        embed.set_footer(
-            text="Coinflip"
-        )
-
-        await ctx.send(
-            embed=embed
-        )
-
-        # -------------------------------------------------
-        # WIN LOG
-        # -------------------------------------------------
-
-        await send_coinflip_win_log(
-            ctx,
-            choice,
-            result,
-            amount,
-            payout
-        )
-
-    # =====================================================
-    # LOSS
-    # =====================================================
-
-    else:
-
-        # Bet was already removed above.
-        #
-        # record_game() records the loss.
-        #
-        # DO NOT subtract the bet again.
-
-        await bot.db.record_game(
-            ctx.author.id,
-            float(amount),
-            0,
-            "coinflip"
-        )
-
-        # -------------------------------------------------
-        # LOSS EMBED
-        # -------------------------------------------------
-
-        embed = brand(
-            "🪙 Coinflip — You Lost",
-            (
-                f"**Your Choice:** {choice.title()}\n"
-                f"**Result:** {result.title()}\n\n"
-                f"**Bet:** {amount:,.2f} points\n"
-                f"**Payout:** `0.00` points\n\n"
-                f"💥 **You lost {amount:,.2f} points.**"
-            ),
-            0xED4245
-        )
-
-        # -------------------------------------------------
-        # RESULT IMAGE
-        # -------------------------------------------------
-
-        image_url = COINFLIP_RESULT_IMAGES.get(
-            result
-        )
-
-        if image_url:
-
-            embed.set_image(
-                url=image_url
-            )
-
-        embed.set_footer(
-            text="Coinflip"
-        )
-
-        await ctx.send(
-            embed=embed
-        )
-
-
-@bot.command(aliases=["b"])
-async def balance(ctx, member: discord.Member = None):
-    member=member or ctx.author; row=await bot.db.user(member.id)
-    await ctx.send(embed=brand("User Balance", f"{config.E['points']} **{money(row['balance'])} Points**\n≈ **{usd(row['balance'])}**\nOwner: {member.mention}"))
-
-@bot.command()
-async def price(ctx, points: str):
-    try: amount=parse_amount(points)
-    except ValueError as error: await ctx.send(str(error)); return
-    await ctx.send(embed=brand("Point conversion", f"**{money(amount)} points** = **{usd(amount)} USD**\n1 point = $0.005"))
-
-# ============================================================
-# DEPOSIT SYSTEM - COMPLETE CODE
-# ============================================================
-
-import io
-import qrcode
-
-from bip_utils import (
-    Bip44,
-    Bip44Coins,
-    Bip44Changes,
-)
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-SOL_DEPOSIT_ADDRESS = "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
-
-USDT_DEPOSIT_ADDRESS = "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2"
-
-LTC_MIN_DEPOSIT = 0.0005
-SOL_MIN_DEPOSIT = 0.001
-USDT_MIN_DEPOSIT = 1.0
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-async def ensure_deposit_table():
-
-    await bot.db.pool.execute("""
-        CREATE TABLE IF NOT EXISTS deposit_addresses (
-            user_id BIGINT NOT NULL,
-            currency TEXT NOT NULL,
-            address TEXT NOT NULL,
-            derivation_index BIGINT,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-
-            PRIMARY KEY (user_id, currency),
-            UNIQUE (address)
-        )
-    """)
-
-
-async def get_saved_deposit_address(user_id, currency):
-
-    await ensure_deposit_table()
-
-    return await bot.db.pool.fetchval(
-        """
-        SELECT address
-        FROM deposit_addresses
-        WHERE user_id = $1
-        AND currency = $2
-        """,
-        user_id,
-        currency,
-    )
-
-
-# ============================================================
-# LTC XPUB
-# ============================================================
-
-def ltc_address_from_xpub(xpub: str, index: int) -> str:
-
-    if not xpub:
-        raise ValueError(
-            "LTC_XPUB is missing from Railway variables."
-        )
-
-    wallet = Bip44.FromExtendedKey(
-        xpub.strip(),
-        Bip44Coins.LITECOIN,
-    )
-
-    address = (
-        wallet
-        .Change(Bip44Changes.CHAIN_EXT)
-        .AddressIndex(index)
-        .PublicKey()
-        .ToAddress()
-    )
-
-    return address
-
-
-async def generate_ltc_deposit_address(user_id: int) -> str:
-
-    await ensure_deposit_table()
-
-    existing = await get_saved_deposit_address(
-        user_id,
-        "LTC",
-    )
-
-    if existing:
-        return existing
-
-    row = await bot.db.pool.fetchrow(
-        """
-        SELECT COALESCE(
-            MAX(derivation_index), -1
-        ) + 1 AS next_index
-        FROM deposit_addresses
-        WHERE currency = 'LTC'
-        """
-    )
-
-    index = int(row["next_index"])
-
-    address = ltc_address_from_xpub(
-        config.LTC_XPUB,
-        index,
-    )
-
-    await bot.db.pool.execute(
-        """
-        INSERT INTO deposit_addresses
-            (user_id, currency, address, derivation_index)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (user_id, currency)
-        DO NOTHING
-        """,
-        user_id,
-        "LTC",
-        address,
-        index,
-    )
-
-    saved = await get_saved_deposit_address(
-        user_id,
-        "LTC",
-    )
-
-    return saved or address
-
-
-# ============================================================
-# QR CODE
-# ============================================================
-
-def make_deposit_qr(address: str, currency: str):
-
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
-        border=4,
-    )
-
-    if currency == "LTC":
-        data = f"litecoin:{address}"
-
-    elif currency == "SOL":
-        data = f"solana:{address}"
-
-    else:
-        data = address
-
-    qr.add_data(data)
-    qr.make(fit=True)
-
-    image = qr.make_image(
-        fill_color="black",
-        back_color="white",
-    ).convert("RGB")
-
-    output = io.BytesIO()
-
-    image.save(
-        output,
-        format="PNG",
-    )
-
-    output.seek(0)
-
-    return discord.File(
-        output,
-        filename="deposit_qr.png",
-    )
-
-
-# ============================================================
-# DEPOSIT VIEW
-# ============================================================
-
-class DepositView(OwnerView):
-
-    def __init__(self, owner_id: int):
-
-        super().__init__(
-            owner_id,
-            timeout=180,
-        )
-
-    async def send_currency(
-        self,
-        interaction: discord.Interaction,
-        currency: str,
-    ):
-
-        try:
-
-            await interaction.response.defer(
-                ephemeral=True,
-            )
-
-        except discord.InteractionResponded:
-            pass
-
-        user = interaction.user
-
-        try:
-
-            if currency == "LTC":
-
-                if not config.LTC_XPUB:
-
-                    await interaction.followup.send(
-                        "LTC_XPUB is missing from Railway variables.",
-                        ephemeral=True,
-                    )
-
-                    return
-
-                address = await generate_ltc_deposit_address(
-                    user.id,
-                )
-
-                minimum = LTC_MIN_DEPOSIT
-                conversion = "1 point = 0.0001 LTC"
-
-            elif currency == "SOL":
-
-                address = SOL_DEPOSIT_ADDRESS
-
-                minimum = SOL_MIN_DEPOSIT
-                conversion = "1 point = 0.0001 SOL"
-
-            elif currency == "USDT":
-
-                address = USDT_DEPOSIT_ADDRESS
-
-                minimum = USDT_MIN_DEPOSIT
-                conversion = "1 point = 0.0001 USDT"
-
-            else:
-
-                await interaction.followup.send(
-                    "Unsupported currency.",
-                    ephemeral=True,
-                )
-
-                return
-
-            print(
-                f"[DEPOSIT] {currency} selected by "
-                f"{user} ({user.id})"
-            )
-
-            qr_file = make_deposit_qr(
-                address,
-                currency,
-            )
-
-            embed = discord.Embed(
-                title=f"Your {currency} Deposit Address",
-                description=(
-                    f"{user.mention}, deposit "
-                    f"**{currency}** only:\n\n"
-                    f"```{address}```\n\n"
-                    f"Minimum: **{minimum} {currency}**\n"
-                    f"Conversion: **{conversion}**\n"
-                    f"Fee: **0%**"
-                ),
-                colour=0x3498DB,
-            )
-
-            embed.set_image(
-                url="attachment://deposit_qr.png"
-            )
-
-            embed.set_footer(
-                text=(
-                    f"Only send {currency} | "
-                    f"Minimum: {minimum} {currency}"
-                )
-            )
-
-            try:
-
-                await user.send(
-                    embed=embed,
-                    file=qr_file,
-                )
-
-            except discord.Forbidden:
-
-                await interaction.followup.send(
-                    "I couldn't DM you. "
-                    "Please enable your DMs from server members.",
-                    ephemeral=True,
-                )
-
-                return
-
-            except discord.HTTPException as error:
-
-                print(
-                    f"[DEPOSIT DM ERROR] {error}"
-                )
-
-                await interaction.followup.send(
-                    "Failed to send your deposit DM.",
-                    ephemeral=True,
-                )
-
-                return
-
-            await interaction.followup.send(
-                f"{config.E['win']} Your **{currency}** "
-                "deposit address has been sent to your DMs.",
-                ephemeral=True,
-            )
-
-        except Exception as error:
-
-            print(
-                f"[DEPOSIT ERROR] {currency}: "
-                f"{type(error).__name__}: {error}"
-            )
-
-            await interaction.followup.send(
-                "Could not generate your deposit address. "
-                "Please contact an administrator.",
-                ephemeral=True,
-            )
 
     @discord.ui.button(
         label="LTC",
         style=discord.ButtonStyle.secondary,
-        emoji=config.E["ltc"],
+        emoji="Ł",
+        custom_id="deposit_ltc",
     )
-    async def ltc(
+    async def ltc_button(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
 
-        await self.send_currency(
+        await self.bot.send_deposit_dm(
             interaction,
             "LTC",
         )
@@ -7888,318 +463,3329 @@ class DepositView(OwnerView):
     @discord.ui.button(
         label="SOL",
         style=discord.ButtonStyle.secondary,
-        emoji=config.E["sol"],
+        emoji="◎",
+        custom_id="deposit_sol",
     )
-    async def sol(
+    async def sol_button(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
 
-        await self.send_currency(
+        await self.bot.send_deposit_dm(
             interaction,
             "SOL",
         )
 
+
+class MainWalletV2(V2LayoutView):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user: discord.User | discord.Member,
+    ):
+        super().__init__(timeout=180)
+
+        self.bot = bot
+        self.user_id = user.id
+
+        text = make_text_display(
+            "## Wallet\n"
+            f"**Balance:** {money(0)}"
+        )
+
+        row = discord.ui.ActionRow()
+
+        row.add_item(
+            discord.ui.Button(
+                label="Deposit",
+                style=discord.ButtonStyle.success,
+                custom_id=f"wallet_v2_deposit:{user.id}",
+            )
+        )
+
+        row.add_item(
+            discord.ui.Button(
+                label="Withdraw",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"wallet_v2_withdraw:{user.id}",
+            )
+        )
+
+        container = make_container(
+            text,
+            row,
+            accent_color=0x00E676,
+        )
+
+        self.add_item(container)
+
+
+class WithdrawModal(discord.ui.Modal):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+    ):
+        super().__init__(
+            title="Withdraw",
+            timeout=300,
+        )
+
+        self.bot = bot
+        self.user_id = user_id
+
+        self.currency = discord.ui.TextInput(
+            label="Currency",
+            placeholder="LTC / SOL / ETH / USDT",
+            required=True,
+            max_length=10,
+        )
+
+        self.address = discord.ui.TextInput(
+            label="Withdrawal Address",
+            placeholder="Enter your wallet address",
+            required=True,
+            max_length=150,
+        )
+
+        self.amount = discord.ui.TextInput(
+            label="Amount",
+            placeholder="Example: 10.00",
+            required=True,
+            max_length=30,
+        )
+
+        self.add_item(self.currency)
+        self.add_item(self.address)
+        self.add_item(self.amount)
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        await self.bot.handle_withdrawal(
+            interaction=interaction,
+            user_id=self.user_id,
+            currency=self.currency.value,
+            address=self.address.value,
+            amount_text=self.amount.value,
+        )
+
+
+# ============================================================
+# DICE SETUP VIEW
+# ============================================================
+
+class DiceSetupView(ButtonView):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+        amount: Decimal,
+    ):
+        super().__init__(timeout=120)
+
+        self.bot = bot
+        self.user_id = user_id
+        self.amount = amount
+        self.mode = None
+        self.dice_count = None
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This dice setup belongs to another player.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
     @discord.ui.button(
-        label="USDT (BEP-20)",
-        style=discord.ButtonStyle.secondary,
-        emoji=config.E["usdt"],
+        label="Crazy Dice",
+        style=discord.ButtonStyle.primary,
+        custom_id="dice_mode_crazy",
     )
-    async def usdt(
+    async def crazy(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
 
-        await self.send_currency(
-            interaction,
-            "USDT",
+        self.mode = "crazy"
+        await self._choose_dice(interaction)
+
+    @discord.ui.button(
+        label="Normal Dice",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dice_mode_normal",
+    )
+    async def normal(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        self.mode = "normal"
+        await self._choose_dice(interaction)
+
+    async def _choose_dice(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        view = DiceCountView(
+            self.bot,
+            self.user_id,
+            self.amount,
+            self.mode,
         )
 
-
-# ============================================================
-# DEPOSIT COMMAND
-# ============================================================
-
-@bot.command()
-async def deposit(ctx):
-
-    embed = brand(
-        "Deposit",
-        (
-            "Choose a currency below.\n\n"
-            "Your deposit address will be sent to your DMs.\n"
-            "Deposits are credited only after blockchain confirmation."
-        ),
-        0x3498DB,
-    )
-
-    await ctx.send(
-        embed=embed,
-        view=DepositView(
-            ctx.author.id,
-        ),
-    )
-
-
-@bot.command()
-async def withdraw(ctx):
-    await ctx.send(embed=brand("Withdraw", "Choose the currency to withdraw.\nLTC minimum: **20** • SOL: **220** • USDT: **150** points\n\nYour Withdrawl will be proceed automatic"),view=WithdrawView(ctx.author.id))
-
-@bot.command()
-async def tip(ctx, member: discord.Member, points: str):
-    if member.bot or member.id==ctx.author.id: await ctx.send("Choose another user."); return
-    try: amount=parse_amount(points)
-    except ValueError as error: await ctx.send(str(error)); return
-    await ctx.send(f"Send **{money(amount)} points** to {member.mention}?",view=ConfirmTipView(ctx.author,member,amount))
-
-@bot.command()
-async def daily(ctx):
-    row=await bot.db.user(ctx.author.id); now=datetime.now(timezone.utc); last=row['daily_at']
-    if float(row['balance']) < 1: await ctx.send(embed=brand("Daily", "You need at least **1 point** in your balance to claim daily.")); return
-    if last and now-last < timedelta(hours=24): await ctx.send(embed=brand("Daily",f"Please come back <t:{int((last+timedelta(hours=24)).timestamp())}:R>.")); return
-    await bot.db.change_balance(ctx.author.id,1,"daily"); await bot.db.pool.execute("UPDATE users SET daily_at=$2,bonus_received=bonus_received+1 WHERE user_id=$1",ctx.author.id,now)
-    await ctx.send(embed=brand("Daily claimed",f"{config.E['win']} You received **1.00 point**."))
-
-async def bonus(ctx, period, days):
-    row=await bot.db.user(ctx.author.id); field=f"{period}_at"; last=row[field]; now=datetime.now(timezone.utc); earned=float(row['losses'])*(.005 if period!='weekly' else .005)
-    if last and now-last<timedelta(days=days): await ctx.send(embed=brand(f"{period.title()} Bonus",f"Claimed already. Return <t:{int((last+timedelta(days=days)).timestamp())}:R>.")); return
-    if earned<=0: await ctx.send(embed=brand(f"{period.title()} Bonus", "**Claimable:** 0 points\nPlay games to earn a bonus.")); return
-    await bot.db.change_balance(ctx.author.id,earned,period); await bot.db.pool.execute(f"UPDATE users SET {field}=$2,losses=0,bonus_received=bonus_received+$3 WHERE user_id=$1",ctx.author.id,now,earned)
-    await ctx.send(embed=brand(f"{period.title()} Bonus",f"{config.E['win']} Claimed **{money(earned)} points** ({usd(earned)})."))
-@bot.command(aliases=["week"])
-async def weekly(ctx): await bonus(ctx,"weekly",7)
-@bot.command(aliases=["monthy"])
-async def monthly(ctx): await bonus(ctx,"monthly",30)
-@bot.command(aliases=["rb"])
-async def rakeback(ctx):
-    row=await bot.db.user(ctx.author.id); available=float(row['rakeback'])
-    if available<=0: await ctx.send(embed=brand("Your Rakeback Details","Available Rakeback Points: **0 points**\nYou get 1% of losses and 0.5% of wins.")); return
-    await bot.db.change_balance(ctx.author.id,available,"rakeback"); await bot.db.pool.execute("UPDATE users SET rakeback=0 WHERE user_id=$1",ctx.author.id)
-    await ctx.send(embed=brand("Your Rakeback Details",f"{config.E['win']} Claimed **{money(available)} points**."))
-
-import io
-import random
-import asyncio
-from PIL import Image, ImageDraw, ImageFont
-import discord
-
-import os
-
-# =========================
-# ADMIN USER IDS
-# =========================
-
-ADMIN_USER_IDS = {
-    int(user_id.strip())
-    for user_id in os.getenv("ADMIN_USER_IDS", "").split(",")
-    if user_id.strip().isdigit()
-}
-
-
-def is_admin_owner(ctx):
-    return ctx.author.id in ADMIN_USER_IDS
-
-
-# =========================
-# ADD BALANCE
-# =========================
-
-@bot.command(name="addbal")
-async def addbal(ctx, member: discord.Member, points: str):
-
-    # ONLY ADMIN_USER_IDS CAN USE THIS
-    if not is_admin_owner(ctx):
-        await ctx.send("Administrator only.")
-        return
-
-    try:
-        amount = parse_amount(points)
-
-    except ValueError as error:
-        await ctx.send(str(error))
-        return
-
-    # Prevent invalid/zero/negative additions
-    if amount <= 0:
-        await ctx.send("Amount must be greater than 0.")
-        return
-
-    success = await bot.db.change_balance(
-        member.id,
-        amount,
-        "admin_add_balance",
-        f"Added by {ctx.author.id}",
-    )
-
-    if not success:
-        await ctx.send(
-            "Failed to add the balance."
-        )
-        return
-
-    await ctx.send(
-        embed=brand(
-            "Balance Added",
-            (
-                f"{config.E['win']} Added **{money(amount)} points** "
-                f"to {member.mention}.\n"
-                f"Value added: **{usd(amount)}**"
+        await interaction.response.edit_message(
+            content=(
+                "**Choose Number of Dice**\n\n"
+                "Select 1, 2, or 3 dice."
             ),
-            0x57F287,
+            view=view,
         )
+
+
+class DiceCountView(ButtonView):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+        amount: Decimal,
+        mode: str,
+    ):
+        super().__init__(timeout=120)
+
+        self.bot = bot
+        self.user_id = user_id
+        self.amount = amount
+        self.mode = mode
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This dice setup belongs to another player.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+    async def choose(
+        self,
+        interaction: discord.Interaction,
+        count: int,
+    ):
+
+        await interaction.response.defer()
+
+        await self.bot.start_dice_game(
+            interaction,
+            self.user_id,
+            self.amount,
+            self.mode,
+            count,
+        )
+
+    @discord.ui.button(
+        label="1 Dice",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dice_count_1",
     )
-    
-@bot.command(aliases=["bj"])
-async def blackjack(ctx, bet: str):
+    async def one(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.choose(interaction, 1)
 
-    if not await bot.game_allowed(ctx):
-        return
+    @discord.ui.button(
+        label="2 Dice",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dice_count_2",
+    )
+    async def two(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.choose(interaction, 2)
 
-    try:
-        bet_lower = bet.lower().strip()
+    @discord.ui.button(
+        label="3 Dice",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dice_count_3",
+    )
+    async def three(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.choose(interaction, 3)
 
-        if bet_lower in ("half", "all", "max"):
 
-            row = await bot.db.user(ctx.author.id)
+# ============================================================
+# COINFLIP VIEW
+# ============================================================
 
-            if not row:
-                await ctx.send(
-                    "Your account could not be found."
+class CoinflipView(ButtonView):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+        amount: Decimal,
+        color: str,
+        game_id: int,
+        server_hash: str,
+        client_seed: str,
+        nonce: int,
+    ):
+        super().__init__(timeout=15)
+
+        self.bot = bot
+        self.user_id = user_id
+        self.amount = amount
+        self.color = color
+        self.game_id = game_id
+        self.server_hash = server_hash
+        self.client_seed = client_seed
+        self.nonce = nonce
+
+    async def on_timeout(self):
+
+        for item in self.children:
+            item.disabled = True
+
+
+# ============================================================
+# MINES GAME STATE
+# ============================================================
+
+class MinesGame:
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+        amount: Decimal,
+        mines: int,
+        game_id: int,
+        server_hash: str,
+        server_seed: str,
+        client_seed: str,
+        nonce: int,
+    ):
+
+        self.bot = bot
+        self.user_id = user_id
+        self.amount = amount
+        self.mines = mines
+        self.game_id = game_id
+
+        self.server_hash = server_hash
+        self.server_seed = server_seed
+        self.client_seed = client_seed
+        self.nonce = nonce
+
+        self.bombs = set(
+            random.sample(
+                range(25),
+                mines,
+            )
+        )
+
+        self.opened: set[int] = set()
+        self.finished = False
+
+    @property
+    def multiplier(self) -> Decimal:
+
+        opened = len(self.opened)
+
+        if opened <= 0:
+            return Decimal("1.00")
+
+        value = (
+            Decimal("25")
+            / Decimal(str(25 - self.mines))
+        ) ** opened
+
+        value *= Decimal("0.96")
+
+        return value.quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+    @property
+    def payout(self) -> Decimal:
+        return (
+            self.amount * self.multiplier
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+
+class MinesView(ButtonView):
+
+    def __init__(
+        self,
+        game: MinesGame,
+    ):
+        super().__init__(timeout=300)
+
+        self.game = game
+
+        for index in range(25):
+
+            button = discord.ui.Button(
+                label="?",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"mine:{index}",
+                row=index // 5,
+            )
+
+            button.callback = self.make_callback(index)
+
+            self.add_item(button)
+
+        cashout = discord.ui.Button(
+            label="Cashout",
+            style=discord.ButtonStyle.success,
+            custom_id="mine_cashout",
+            row=4,
+        )
+
+        cashout.callback = self.cashout
+
+        self.add_item(cashout)
+
+    def make_callback(self, index: int):
+
+        async def callback(
+            interaction: discord.Interaction,
+        ):
+
+            if interaction.user.id != self.game.user_id:
+                await interaction.response.send_message(
+                    "This Mines game belongs to another player.",
+                    ephemeral=True,
                 )
                 return
 
-            balance = row["balance"]
+            await self.game.bot.mines_click(
+                interaction,
+                self.game,
+                index,
+                self,
+            )
 
-            if bet_lower in ("all", "max"):
-                amount = parse_amount(str(balance))
+        return callback
 
-            else:
-                half_balance = Decimal(str(balance)) / Decimal("2")
-                amount = parse_amount(str(half_balance))
+    async def cashout(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        if interaction.user.id != self.game.user_id:
+            await interaction.response.send_message(
+                "This Mines game belongs to another player.",
+                ephemeral=True,
+            )
+            return
+
+        await self.game.bot.mines_cashout(
+            interaction,
+            self.game,
+            self,
+        )
+
+
+# ============================================================
+# RAIN VIEW
+# ============================================================
+
+class RainView(ButtonView):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        rain_id: str,
+    ):
+        super().__init__(timeout=None)
+
+        self.bot = bot
+        self.rain_id = rain_id
+
+    @discord.ui.button(
+        label="Join Rain",
+        style=discord.ButtonStyle.success,
+        custom_id="rain_join",
+    )
+    async def join(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.bot.join_rain(
+            interaction,
+            self.rain_id,
+        )
+
+
+# ============================================================
+# BOT
+# ============================================================
+
+class CasinoBot(commands.Bot):
+
+    def __init__(self):
+
+        intents = discord.Intents.default()
+
+        intents.guilds = True
+        intents.members = True
+        intents.messages = True
+        intents.message_content = True
+
+        super().__init__(
+            command_prefix=commands.when_mentioned,
+            intents=intents,
+            help_command=None,
+        )
+
+        self.db: Optional[Database] = None
+
+        self.http: Optional[aiohttp.ClientSession] = None
+
+        self.started_at = datetime.now(timezone.utc)
+
+        self.active_games: dict[int, dict] = {}
+        self.active_mines: dict[int, MinesGame] = {}
+        self.active_rains: dict[str, dict] = {}
+        self.active_dice: dict[int, dict] = {}
+
+        self.game_counter = random.randint(
+            1000,
+            9999,
+        )
+
+        self._cooldowns: dict[
+            tuple[int, str],
+            float,
+        ] = {}
+
+        self.ltc_watcher_task = None
+
+    # ========================================================
+    # GAME IDS
+    # ========================================================
+
+    def next_game_id(self) -> int:
+
+        self.game_counter += 1
+
+        if self.game_counter > 999999:
+            self.game_counter = 1000
+
+        return self.game_counter
+
+    # ========================================================
+    # RANDOM / PROVABLY FAIR
+    # ========================================================
+
+    def create_server_seed(self) -> str:
+        return secrets.token_hex(32)
+
+    def server_hash(
+        self,
+        server_seed: str,
+    ) -> str:
+
+        return hashlib.sha256(
+            server_seed.encode()
+        ).hexdigest()
+
+    def create_client_seed(
+        self,
+        user_id: int,
+    ) -> str:
+
+        return (
+            f"{user_id}-"
+            f"{secrets.token_hex(16)}"
+        )
+
+    def fair_digest(
+        self,
+        server_seed: str,
+        client_seed: str,
+        nonce: int,
+        game: str = "",
+    ) -> bytes:
+
+        message = (
+            f"{client_seed}:"
+            f"{nonce}:"
+            f"{game}"
+        ).encode()
+
+        return hmac.new(
+            server_seed.encode(),
+            message,
+            hashlib.sha256,
+        ).digest()
+
+    def fair_roll(
+        self,
+        server_seed: str,
+        client_seed: str,
+        nonce: int,
+        game: str = "",
+    ) -> Decimal:
+
+        digest = self.fair_digest(
+            server_seed,
+            client_seed,
+            nonce,
+            game,
+        )
+
+        number = int.from_bytes(
+            digest[:8],
+            "big",
+        )
+
+        value = (
+            Decimal(number)
+            / Decimal(2**64)
+        ) * Decimal("100")
+
+        return value.quantize(
+            Decimal("0.01")
+        )
+
+    def fair_int(
+        self,
+        server_seed: str,
+        client_seed: str,
+        nonce: int,
+        minimum: int,
+        maximum: int,
+        game: str = "",
+    ) -> int:
+
+        digest = self.fair_digest(
+            server_seed,
+            client_seed,
+            nonce,
+            game,
+        )
+
+        number = int.from_bytes(
+            digest[:8],
+            "big",
+        )
+
+        return minimum + (
+            number % (
+                maximum - minimum + 1
+            )
+        )
+
+    # ========================================================
+    # COOLDOWN
+    # ========================================================
+
+    def check_game_cooldown(
+        self,
+        user_id: int,
+        command_name: str,
+    ) -> float:
+
+        if GAME_COOLDOWN <= 0:
+            return 0
+
+        key = (
+            user_id,
+            command_name,
+        )
+
+        now = time.monotonic()
+
+        last = self._cooldowns.get(
+            key,
+            0,
+        )
+
+        remaining = (
+            GAME_COOLDOWN
+            - (now - last)
+        )
+
+        if remaining > 0:
+            return remaining
+
+        self._cooldowns[key] = now
+
+        return 0
+
+    # ========================================================
+    # USER / BALANCE
+    # ========================================================
+
+    async def get_user(
+        self,
+        user_id: int,
+    ):
+
+        if self.db is None:
+            raise RuntimeError(
+                "Database is not connected."
+            )
+
+        return await self.db.user(
+            user_id
+        )
+
+    async def get_balance(
+        self,
+        user_id: int,
+    ) -> Decimal:
+
+        row = await self.get_user(
+            user_id
+        )
+
+        if not row:
+            return Decimal("0")
+
+        return D(
+            row.get("balance", 0)
+            if hasattr(row, "get")
+            else row["balance"]
+        )
+
+    async def deduct_bet(
+        self,
+        user_id: int,
+        amount: Decimal,
+        game: str,
+    ) -> bool:
+
+        if amount < MIN_BET:
+            return False
+
+        return await self.db.change_balance(
+            user_id,
+            -amount,
+            kind="bet",
+            note=game,
+        )
+
+    # ========================================================
+    # DATABASE GAME SETTLEMENT
+    # ========================================================
+
+    async def settle_win(
+        self,
+        user_id: int,
+        bet: Decimal,
+        payout: Decimal,
+        game: str,
+    ):
+
+        await self.db.record_game(
+            user_id,
+            bet,
+            payout,
+            game,
+        )
+
+    async def settle_loss(
+        self,
+        user_id: int,
+        bet: Decimal,
+        game: str,
+    ):
+
+        await self.db.record_game(
+            user_id,
+            bet,
+            Decimal("0"),
+            game,
+        )
+
+    # ========================================================
+    # DISCORD STARTUP
+    # ========================================================
+
+    async def setup_hook(self):
+
+        if not DATABASE_URL:
+            raise RuntimeError(
+                "DATABASE_URL is missing."
+            )
+
+        self.db = Database(
+            DATABASE_URL
+        )
+
+        await self.db.connect()
+
+        self.http = aiohttp.ClientSession()
+
+        self.add_view(
+            RainView(
+                self,
+                "persistent",
+            )
+        )
+
+        try:
+            synced = await self.tree.sync()
+
+            print(
+                f"[BOT] Synced {len(synced)} slash commands."
+            )
+
+        except Exception as exc:
+            print(
+                f"[BOT] Slash command sync failed: {exc}"
+            )
+
+        self.ltc_watcher_task = asyncio.create_task(
+            self.ltc_deposit_watcher()
+        )
+
+    async def close(self):
+
+        if self.ltc_watcher_task:
+            self.ltc_watcher_task.cancel()
+
+            try:
+                await self.ltc_watcher_task
+            except asyncio.CancelledError:
+                pass
+
+        if self.http:
+            await self.http.close()
+
+        if self.db:
+            await self.db.close()
+
+        await super().close()
+
+    async def on_ready(self):
+
+        print(
+            f"[BOT] Logged in as {self.user} "
+            f"({self.user.id})"
+        )
+
+        print(
+            f"[BOT] Servers: {len(self.guilds)}"
+        )
+
+        await self.change_presence(
+            activity=discord.Game(
+                name="/help"
+            )
+        )
+
+    # ========================================================
+    # ERROR HELPERS
+    # ========================================================
+
+    async def safe_send(
+        self,
+        interaction: discord.Interaction,
+        *,
+        content: Optional[str] = None,
+        embed: Optional[discord.Embed] = None,
+        view: Optional[discord.ui.View] = None,
+        ephemeral: bool = False,
+    ):
+
+        kwargs = {
+            "content": content,
+            "embed": embed,
+            "view": view,
+            "ephemeral": ephemeral,
+        }
+
+        kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if value is not None
+        }
+
+        if interaction.response.is_done():
+
+            return await interaction.followup.send(
+                **kwargs
+            )
+
+        return await interaction.response.send_message(
+            **kwargs
+        )
+
+    async def command_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+    ):
+
+        print(
+            f"[COMMAND ERROR] "
+            f"{interaction.command}: {error}"
+        )
+
+        if isinstance(
+            error,
+            app_commands.CommandOnCooldown,
+        ):
+
+            await self.safe_send(
+                interaction,
+                content=(
+                    f"Please wait "
+                    f"**{error.retry_after:.1f}s**."
+                ),
+                ephemeral=True,
+            )
+
+            return
+
+        await self.safe_send(
+            interaction,
+            embed=error_embed(
+                "Something went wrong",
+                "Please try again in a moment.",
+            ),
+            ephemeral=True,
+        )
+
+    # ========================================================
+    # DEPOSIT DM
+    # ========================================================
+
+    async def send_deposit_dm(
+        self,
+        interaction: discord.Interaction,
+        currency: str,
+    ):
+
+        currency = currency.upper()
+
+        address = await self.get_deposit_address(
+            interaction.user.id,
+            currency,
+        )
+
+        if not address:
+
+            await interaction.response.send_message(
+                "A deposit address is not available yet.",
+                ephemeral=True,
+            )
+
+            return
+
+        try:
+
+            await interaction.user.send(
+                f"## {currency} Deposit\n\n"
+                f"**Deposit Address:**\n"
+                f"`{address}`\n\n"
+                "Deposits are credited only after "
+                "blockchain confirmation."
+            )
+
+            await interaction.response.send_message(
+                "Your deposit address is sent to your DMs. "
+                "Deposits are credited only after blockchain confirmation.",
+                ephemeral=True,
+            )
+
+        except discord.Forbidden:
+
+            await interaction.response.send_message(
+                "I couldn't DM you. Please enable DMs "
+                "from this server and try again.",
+                ephemeral=True,
+            )
+
+    async def get_deposit_address(
+        self,
+        user_id: int,
+        currency: str,
+    ) -> Optional[str]:
+
+        currency = currency.upper()
+
+        if hasattr(
+            self.db,
+            "get_deposit_address",
+        ):
+
+            return await self.db.get_deposit_address(
+                user_id,
+                currency,
+            )
+
+        if currency == "SOL":
+
+            return os.getenv(
+                "SOL_DEPOSIT_ADDRESS",
+                "",
+            ) or None
+
+        if currency == "LTC":
+
+            return await self.generate_ltc_address(
+                user_id
+            )
+
+        return None
+
+    # ========================================================
+    # LTC ADDRESS PLACEHOLDER
+    # ========================================================
+
+    async def generate_ltc_address(
+        self,
+        user_id: int,
+    ) -> Optional[str]:
+
+        if hasattr(
+            self.db,
+            "get_or_create_ltc_address",
+        ):
+
+            return await self.db.get_or_create_ltc_address(
+                user_id,
+                config.LTC_XPUB,
+                config.LTC_DERIVATION_PATH,
+            )
+
+        return None
+
+    # ========================================================
+    # WITHDRAWAL
+    # ========================================================
+
+    async def handle_withdrawal(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        currency: str,
+        address: str,
+        amount_text: str,
+    ):
+
+        currency = currency.strip().upper()
+        address = address.strip()
+
+        amount = normalize_amount(
+            amount_text
+        )
+
+        if currency not in {
+            "LTC",
+            "SOL",
+            "ETH",
+            "USDT",
+        }:
+
+            await interaction.response.send_message(
+                "Supported currencies: LTC, SOL, ETH, USDT.",
+                ephemeral=True,
+            )
+
+            return
+
+        if amount is None:
+
+            await interaction.response.send_message(
+                "Enter a valid withdrawal amount.",
+                ephemeral=True,
+            )
+
+            return
+
+        minimum = D(
+            config.MIN_WITHDRAW.get(
+                currency,
+                0,
+            )
+        )
+
+        if minimum and amount < minimum:
+
+            await interaction.response.send_message(
+                f"Minimum {currency} withdrawal is "
+                f"{money(minimum)}.",
+                ephemeral=True,
+            )
+
+            return
+
+        if not self.valid_withdraw_address(
+            currency,
+            address,
+        ):
+
+            await interaction.response.send_message(
+                "That withdrawal address is invalid.",
+                ephemeral=True,
+            )
+
+            return
+
+        balance = await self.get_balance(
+            user_id
+        )
+
+        if amount > balance:
+
+            await interaction.response.send_message(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds",
+                ephemeral=True,
+            )
+
+            return
+
+        if hasattr(
+            self.db,
+            "create_withdrawal",
+        ):
+
+            created = await self.db.create_withdrawal(
+                user_id=user_id,
+                currency=currency,
+                address=address,
+                amount=amount,
+            )
+
+            if not created:
+
+                await interaction.response.send_message(
+                    "Your withdrawal could not be created.",
+                    ephemeral=True,
+                )
+
+                return
 
         else:
-            amount = parse_amount(bet)
 
-    except ValueError as error:
-        await ctx.send(str(error))
-        return
+            deducted = await self.db.change_balance(
+                user_id,
+                -amount,
+                kind="withdraw",
+                note=f"{currency}:{address}",
+            )
 
-    # Minimum bet: 20 points ($0.10)
-    if amount < Decimal("20"):
-        await ctx.send(
-            "The minimum bet is **20 points ($0.10)**."
+            if not deducted:
+
+                await interaction.response.send_message(
+                    "Your withdrawal could not be processed.",
+                    ephemeral=True,
+                )
+
+                return
+
+        await interaction.response.send_message(
+            f"## Withdrawal Requested\n\n"
+            f"**Amount:** {money(amount)}\n"
+            f"**Currency:** {currency}\n"
+            f"**Address:** `{address}`\n\n"
+            "Your withdrawal is pending processing.",
+            ephemeral=True,
         )
-        return
 
-    if not await bot.db.change_balance(
-        ctx.author.id,
-        -amount,
-        "blackjack_bet",
+    def valid_withdraw_address(
+        self,
+        currency: str,
+        address: str,
+    ) -> bool:
+
+        if not address:
+            return False
+
+        if currency == "LTC":
+            return (
+                address.startswith(
+                    (
+                        "ltc1",
+                        "M",
+                        "m",
+                        "L",
+                    )
+                )
+                and len(address) >= 26
+            )
+
+        if currency == "SOL":
+            return 32 <= len(address) <= 50
+
+        if currency in {
+            "ETH",
+            "USDT",
+        }:
+            return (
+                address.startswith("0x")
+                and len(address) == 42
+            )
+
+        return False
+
+    # ========================================================
+    # BLOCKCHAIN WATCHER
+    # ========================================================
+
+    async def ltc_deposit_watcher(self):
+
+        await self.wait_until_ready()
+
+        while not self.is_closed():
+
+            try:
+
+                await self.check_ltc_deposits()
+
+            except asyncio.CancelledError:
+
+                raise
+
+            except Exception as exc:
+
+                print(
+                    f"[LTC WATCHER] {exc}"
+                )
+
+            await asyncio.sleep(60)
+
+    async def check_ltc_deposits(self):
+
+        endpoint = os.getenv(
+            "LTC_PROVIDER_DEPOSIT_URL",
+            "",
+        ).strip()
+
+        if not endpoint:
+            return
+
+        if not self.http:
+            return
+
+        headers = {}
+
+        api_key = getattr(
+            config,
+            "PAYMENT_PROVIDER_API_KEY",
+            "",
+        )
+
+        if api_key:
+            headers["Authorization"] = (
+                f"Bearer {api_key}"
+            )
+
+        async with self.http.get(
+            endpoint,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(
+                total=20
+            ),
+        ) as response:
+
+            if response.status != 200:
+                return
+
+            data = await response.json()
+
+        if not isinstance(data, list):
+            return
+
+        for deposit in data:
+
+            if not isinstance(deposit, dict):
+                continue
+
+            await self.process_ltc_deposit(
+                deposit
+            )
+
+    async def process_ltc_deposit(
+        self,
+        deposit: dict,
     ):
-        await ctx.send(
-            "Insufficient balance."
+
+        if not hasattr(
+            self.db,
+            "process_deposit",
+        ):
+            return
+
+        await self.db.process_deposit(
+            deposit
         )
+
+
+# ============================================================
+# BOT INSTANCE
+# ============================================================
+
+bot = CasinoBot()
+
+
+# ============================================================
+# PART 1 COMMAND REGISTRATION CONTINUES IN PART 2
+# ============================================================
+
+# ============================================================
+# bot.py — PART 2 / 10
+# SLASH COMMANDS — WALLET, HELP, GUIDES, STATS
+# ============================================================
+
+
+# ============================================================
+# BASIC COMMAND CHECKS
+# ============================================================
+
+def slash_command_available(
+    interaction: discord.Interaction,
+) -> bool:
+
+    return interaction.guild is not None
+
+
+async def require_database(
+    interaction: discord.Interaction,
+) -> bool:
+
+    if bot.db is None:
+
+        await bot.safe_send(
+            interaction,
+            content="Database is not ready yet.",
+            ephemeral=True,
+        )
+
+        return False
+
+    return True
+
+
+async def require_bet_amount(
+    interaction: discord.Interaction,
+    amount: Decimal,
+) -> bool:
+
+    if amount < MIN_BET:
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Bet",
+                f"The minimum bet is **{money(MIN_BET)}**.",
+            ),
+            ephemeral=True,
+        )
+
+        return False
+
+    return True
+
+
+async def require_sufficient_balance(
+    interaction: discord.Interaction,
+    amount: Decimal,
+) -> bool:
+
+    balance = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if amount > balance:
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Insufficient Balance",
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds",
+            ),
+            ephemeral=True,
+        )
+
+        return False
+
+    return True
+
+
+# ============================================================
+# /BALANCE
+# ============================================================
+
+@bot.tree.command(
+    name="balance",
+    description="View your wallet balance.",
+)
+async def balance_command(
+    interaction: discord.Interaction,
+):
+
+    if not await require_database(interaction):
         return
 
-    view = BlackjackView(
-        ctx.author,
+    balance = await bot.get_balance(
+        interaction.user.id
+    )
+
+    embed = base_embed(
+        title=f"## {interaction.user.display_name}'s Wallet",
+        description=(
+            f"**Balance:** {money(balance)}"
+        ),
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=WalletView(
+            bot,
+            interaction.user.id,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /DEPOSIT
+# ============================================================
+
+@bot.tree.command(
+    name="deposit",
+    description="Get your cryptocurrency deposit address.",
+)
+async def deposit_command(
+    interaction: discord.Interaction,
+):
+
+    await interaction.response.send_message(
+        "Choose a currency Below",
+        view=DepositCurrencyView(
+            bot,
+            interaction.user.id,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /WITHDRAW
+# ============================================================
+
+@bot.tree.command(
+    name="withdraw",
+    description="Withdraw funds to a cryptocurrency address.",
+)
+async def withdraw_command(
+    interaction: discord.Interaction,
+):
+
+    await interaction.response.send_modal(
+        WithdrawModal(
+            bot,
+            interaction.user.id,
+        )
+    )
+
+
+# ============================================================
+# /HELP
+# ============================================================
+
+HELP_GENERAL = (
+    "## General\n"
+    "`/help` — Show this help menu\n"
+    "`/balance` — View your wallet\n"
+    "`/deposit` — Deposit cryptocurrency\n"
+    "`/withdraw` — Withdraw funds\n"
+    "`/stats` — View your player statistics\n"
+    "`/history` — View recent game history\n"
+    "`/howtoplay` — Learn how to play\n"
+    "`/rewardinfo` — View rewards and perks\n"
+    "`/affiliateinfo` — View affiliate rates\n"
+    "`/fair` — View provably-fair information"
+)
+
+HELP_GAMES = (
+    "## Games\n"
+    "`/dice` — Select a dice game\n"
+    "`/roll` — Roll your dice\n"
+    "`/coinflip` — Play Red or Blue coinflip\n"
+    "`/mines` — Play Mines\n"
+    "`/blackjack` — Play Blackjack\n"
+    "`/frog-run` — Play Frog Run\n"
+    "`/retrigger` — Retrigger an unfinished game\n"
+    "`/fix-dice` — Recover a dice game"
+)
+
+HELP_REWARDS = (
+    "## Rewards\n"
+    "`/rakeback` — Claim available rakeback\n"
+    "`/ranks` — View rank progression\n"
+    "`/rank-rewards` — Claim rank rewards\n"
+    "`/affiliates` — View your affiliates\n"
+    "`/affiliate-claim` — Claim affiliate earnings\n"
+    "`/claim` — Claim a promo code\n"
+    "`/leaderboard` — View top wagerers\n"
+    "`/race` — View the active wager race"
+)
+
+HELP_SOCIAL = (
+    "## Social\n"
+    "`/tip` — Tip another player\n"
+    "`/rain` — Start a rain event\n"
+    "`/private-channel` — Manage a private gaming channel"
+)
+
+HELP_ADMIN = (
+    "## Admin\n"
+    "`/ranksetup` — Configure rank roles\n"
+    "`/code` — Create a promotional code\n"
+    "`/race start` — Start a wager race\n"
+    "`/race end` — End a wager race"
+)
+
+
+@bot.tree.command(
+    name="help",
+    description="View all available commands.",
+)
+async def help_command(
+    interaction: discord.Interaction,
+):
+
+    embed = base_embed(
+        title="Help",
+        description=(
+            f"{HELP_GENERAL}\n\n"
+            f"{HELP_GAMES}\n\n"
+            f"{HELP_REWARDS}\n\n"
+            f"{HELP_SOCIAL}"
+        ),
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /HOWTOPLAY
+# ============================================================
+
+@bot.tree.command(
+    name="howtoplay",
+    description="Learn how to use the bot.",
+)
+async def howtoplay_command(
+    interaction: discord.Interaction,
+):
+
+    description = (
+        "## Funding Your Account\n"
+        "Use `/deposit` to receive a supported deposit address. "
+        "Deposits are credited only after blockchain confirmation.\n\n"
+
+        "## Dice\n"
+        "Use `/dice` to select your mode and number of dice. "
+        "Use `/roll` to roll your dice. "
+        "Normal Dice uses the highest total. "
+        "Crazy Dice uses the lowest total.\n\n"
+
+        "## Coinflip\n"
+        "Use `/coinflip` with an amount and your color. "
+        "Choose **Red** or **Blue**. "
+        "Winning bets pay **1.92x**.\n\n"
+
+        "## Mines\n"
+        "Choose your bet and the number of mines. "
+        "Reveal safe tiles and cash out before hitting a bomb. "
+        "The minimum Mines bet is **$0.10**.\n\n"
+
+        "## Frog Run\n"
+        "Move through the game while avoiding dangerous spaces. "
+        "Cash out before losing your stake.\n\n"
+
+        "## Blackjack\n"
+        "Try to reach 21 without going over. "
+        "You can use the 21+3 and Perfect Pairs side bets. "
+        "Insurance may be available when the dealer shows an ace. "
+        "Unfinished games can be recovered with `/retrigger`.\n\n"
+
+        "## Withdrawals\n"
+        "Use `/withdraw` to request a withdrawal. "
+        "Always verify your wallet address before submitting.\n\n"
+
+        "## Rain\n"
+        "Rain events distribute funds among eligible players. "
+        "You need the verified role and at least **$1 wagered daily** "
+        "to participate.\n\n"
+
+        "## Private Channels\n"
+        "Private channels require a balance of at least **$25**. "
+        "Channels may close if the balance remains below the requirement "
+        "for 10 minutes.\n\n"
+
+        "## Useful Commands\n"
+        "`/stats` — View your progress\n"
+        "`/history` — View your last 10 games\n"
+        "`/fair` — Verify game information\n"
+        "`/rakeback` — Claim rakeback\n"
+        "`/leaderboard` — View the top wagerers"
+    )
+
+    embed = base_embed(
+        title="How To Play",
+        description=description,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /REWARDINFO
+# ============================================================
+
+@bot.tree.command(
+    name="rewardinfo",
+    description="View rewards and perks.",
+)
+async def rewardinfo_command(
+    interaction: discord.Interaction,
+):
+
+    description = (
+        "## Rakeback\n"
+        "Receive **1% rakeback on losses**. "
+        "Winning bets do not generate rakeback.\n\n"
+
+        "## Lossback\n"
+        "Promotional lossback may be provided during selected events.\n\n"
+
+        "## Affiliates\n"
+        "Earn a percentage from eligible referred-player activity. "
+        "Use `/affiliateinfo` for the current rates.\n\n"
+
+        "## Promo Codes\n"
+        "Promo codes may require a deposit or wagering requirement. "
+        "Each user can claim a code only once.\n\n"
+
+        "## Wager Race\n"
+        "Wager races track eligible wagering during the active race period. "
+        "Race rankings are separate from lifetime wagering.\n\n"
+
+        "## Deposits\n"
+        "Promotional deposit bonuses may include 50%, 100%, or 200% offers. "
+        "Each promotion can have its own wagering multiplier and maximum cashout.\n\n"
+
+        "## Betting Limits\n"
+        "The minimum standard bet is **$0.10**. "
+        "Some games may use different minimums or limits.\n\n"
+
+        "## Restrictions\n"
+        "Withdrawal, tipping, and PvP restrictions may apply to promotional "
+        "funds and accounts under review."
+    )
+
+    embed = base_embed(
+        title="Rewards & Perks",
+        description=description,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /AFFILIATEINFO
+# ============================================================
+
+@bot.tree.command(
+    name="affiliateinfo",
+    description="View affiliate commission rates.",
+)
+async def affiliateinfo_command(
+    interaction: discord.Interaction,
+):
+
+    description = (
+        "## Affiliate Commission Rates\n\n"
+        "**1+ referred players:** 0.10%\n"
+        "**10+ referred players:** 0.20%\n"
+        "**25+ referred players:** 0.35%\n"
+        "**100+ referred players:** 0.50%\n\n"
+        "Use `/affiliates` to view your referrals.\n"
+        "Use `/affiliate-claim` to claim available earnings."
+    )
+
+    embed = base_embed(
+        title="Affiliate Information",
+        description=description,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# RANK HELPERS
+# ============================================================
+
+def rank_for_wager(
+    wagered: Decimal,
+) -> dict:
+
+    current = RANKS[0]
+
+    for rank in RANKS:
+
+        if wagered >= rank["wager"]:
+            current = rank
+
+    return current
+
+
+def next_rank_for_wager(
+    wagered: Decimal,
+) -> Optional[dict]:
+
+    for rank in RANKS:
+
+        if wagered < rank["wager"]:
+            return rank
+
+    return None
+
+
+def rank_label(
+    rank: dict,
+) -> str:
+
+    if rank.get("stage"):
+        return (
+            f"{rank['name']} "
+            f"Stage {rank['stage']}"
+        )
+
+    return rank["name"]
+
+
+def rank_progress(
+    wagered: Decimal,
+) -> tuple[dict, Optional[dict]]:
+
+    current = rank_for_wager(
+        wagered
+    )
+
+    upcoming = next_rank_for_wager(
+        wagered
+    )
+
+    return current, upcoming
+
+
+# ============================================================
+# /STATS
+# ============================================================
+
+@bot.tree.command(
+    name="stats",
+    description="View your player statistics.",
+)
+async def stats_command(
+    interaction: discord.Interaction,
+):
+
+    if not await require_database(interaction):
+        return
+
+    row = await bot.get_user(
+        interaction.user.id
+    )
+
+    if not row:
+
+        await interaction.response.send_message(
+            "Your account could not be found.",
+            ephemeral=True,
+        )
+
+        return
+
+    balance = D(row["balance"])
+    wagered = D(row["wagered"])
+
+    deposited = D(
+        row.get("lifetime_deposit", 0)
+        if hasattr(row, "get")
+        else row["lifetime_deposit"]
+    )
+
+    withdrawn = D(
+        row.get("lifetime_withdraw", 0)
+        if hasattr(row, "get")
+        else 0
+    )
+
+    current, upcoming = rank_progress(
+        wagered
+    )
+
+    current_label = rank_label(
+        current
+    )
+
+    if upcoming:
+
+        remaining = (
+            upcoming["wager"]
+            - wagered
+        )
+
+        next_label = rank_label(
+            upcoming
+        )
+
+        next_stage = (
+            f"wager {money(remaining)} more "
+            f"to reach **{next_label}**"
+        )
+
+    else:
+
+        next_stage = (
+            "You have reached the highest rank."
+        )
+
+    embed = base_embed(
+        title=f"## {interaction.user.display_name}'s Stats",
+        description=(
+            f"**Balance:** {money(balance)}\n"
+            f"**Rank:** **{current_label}**\n"
+            f"**Total Wagered:** {money(wagered)}\n"
+            f"**Total Deposited:** {money(deposited)}\n"
+            f"**Total Withdrawn:** {money(withdrawn)}\n"
+            f"**Next Stage:** {next_stage}"
+        ),
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# HISTORY HELPERS
+# ============================================================
+
+def format_history_row(
+    row,
+) -> str:
+
+    if hasattr(row, "get"):
+
+        game = row.get(
+            "game",
+            row.get("note", "Game"),
+        )
+
+        amount = row.get(
+            "amount",
+            0,
+        )
+
+        created_at = row.get(
+            "created_at",
+            None,
+        )
+
+    else:
+
+        game = row["game"]
+        amount = row["amount"]
+        created_at = row["created_at"]
+
+    if isinstance(
+        created_at,
+        datetime,
+    ):
+
+        timestamp = discord.utils.format_dt(
+            created_at,
+            style="R",
+        )
+
+    else:
+
+        timestamp = "Unknown time"
+
+    amount_decimal = D(
         amount
     )
 
-    embed, table = view.embed_and_file()
+    sign = "+" if amount_decimal >= 0 else ""
 
-    await ctx.send(
-        embed=embed,
-        file=table,
-        view=view
+    return (
+        f"**{game}** · "
+        f"{sign}{money(amount_decimal)} · "
+        f"{timestamp}"
     )
-@bot.command()
-async def stats(ctx, member: discord.Member=None):
-    member=member or ctx.author; row=await bot.db.user(member.id)
-    text=f"Withdrawals: **0 points** (**0 times**)\nWon: **{row['won_games']} games**\nBonus received: **{money(row['bonus_received'])} points**\nTotal Played: **{row['games_played']} games** and wagered **{money(row['wagered'])} points**\nTips sent: **{money(row['tips_sent'])} points**\nTips received: **{money(row['tips_received'])} points**"
-    embed=brand(f"Stats for {member.display_name}",text); embed.set_thumbnail(url=member.display_avatar.url); await ctx.send(embed=embed)
 
-@bot.command()
-async def whois(ctx, member: discord.Member=None):
-    member=member or ctx.author; created=f"<t:{int(member.created_at.timestamp())}:F>"; joined=f"<t:{int(member.joined_at.timestamp())}:F>" if member.joined_at else "Unknown"
-    roles=", ".join(r.mention for r in member.roles[1:]) or "None"
-    embed=brand(f"Information for {member}",f"**Global Info**\n> **ID:** {member.id}\n> **Bot:** {'Yes' if member.bot else 'No'}\n> **Created:** {created}\n> **Username:** {member.name}\n\n**Server Info**\n> **Nickname:** {member.nick or 'None'}\n> **Joined:** {joined}\n> **Roles:** {roles}\n> **Status:** {member.status}")
-    embed.set_thumbnail(url=member.display_avatar.url); await ctx.send(embed=embed)
 
-@bot.command(aliases=["lb"])
-async def leaderboard(ctx):
-    rows=await bot.db.leaderboard(); lines=[]
-    for index,row in enumerate(rows,1):
-        user=bot.get_user(row['user_id']) or await bot.fetch_user(row['user_id']); lines.append(f"`#{index}` **{user}** — {money(row['wagered'])} points")
-    await ctx.send(embed=brand("Leaderboard", "\n".join(lines) or "No games have been played yet."))
+# ============================================================
+# /HISTORY
+# ============================================================
 
-@bot.command()
-async def vault(ctx, action: str, points: str):
-    try: amount=parse_amount(points)
-    except ValueError as error: await ctx.send(str(error)); return
-    row=await bot.db.user(ctx.author.id)
-    if action.lower()=="deposit":
-        if not await bot.db.change_balance(ctx.author.id,-amount,"vault_deposit"): await ctx.send("Insufficient balance."); return
-        await bot.db.pool.execute("UPDATE users SET vault=vault+$2 WHERE user_id=$1",ctx.author.id,amount)
-    elif action.lower()=="withdraw":
-        if float(row['vault'])<amount: await ctx.send("Insufficient vault balance."); return
-        await bot.db.pool.execute("UPDATE users SET vault=vault-$2 WHERE user_id=$1",ctx.author.id,amount); await bot.db.change_balance(ctx.author.id,amount,"vault_withdraw")
-    else: await ctx.send("Use `.vault deposit <points>` or `.vault withdraw <points>`."); return
-    await ctx.send(embed=brand("Vault",f"{config.E['win']} Vault {action.lower()} complete: **{money(amount)} points**."))
+@bot.tree.command(
+    name="history",
+    description="View your last 10 games.",
+)
+async def history_command(
+    interaction: discord.Interaction,
+):
 
-@bot.command()
-async def claim(ctx, code: str):
-    code=code.upper()
-    async with bot.db.pool.acquire() as c:
-        async with c.transaction():
-            record=await c.fetchrow("SELECT * FROM codes WHERE code=$1 FOR UPDATE",code)
-            already=await c.fetchrow("SELECT 1 FROM code_claims WHERE code=$1 AND user_id=$2",code,ctx.author.id)
-            if not record or not record['active'] or already or record['uses']>=record['max_uses']: await ctx.send("Invalid, expired, or already claimed code."); return
-            await c.execute("INSERT INTO code_claims(code,user_id) VALUES($1,$2)",code,ctx.author.id); await c.execute("UPDATE codes SET uses=uses+1 WHERE code=$1",code)
-    await bot.db.change_balance(ctx.author.id,float(record['amount']),"code",code); await ctx.send(embed=brand("Code claimed",f"{config.E['gift']} You received **{money(record['amount'])} points**. Wager 3× your code amount before withdrawing."))
+    if not await require_database(interaction):
+        return
 
-@bot.command()
-async def createcode(ctx, code: str, max_users: int, amount: str):
-    if not allowed_admin(ctx): await ctx.send("Administrator only."); return
-    try: value=parse_amount(amount)
-    except ValueError as error: await ctx.send(str(error)); return
-    await bot.db.pool.execute("INSERT INTO codes(code,max_uses,amount) VALUES($1,$2,$3) ON CONFLICT(code) DO UPDATE SET max_uses=$2,amount=$3,uses=0,active=TRUE",code.upper(),max_users,value)
-    await ctx.send(f"{config.E['win']} Code `{code.upper()}` created.")
+    rows = []
 
-@bot.command()
-async def freeze(ctx):
-    if not allowed_admin(ctx): await ctx.send("Administrator only."); return
-    await bot.db.set_setting("frozen","1"); await ctx.send("Games frozen.")
-@bot.command()
-async def unfreeze(ctx):
-    if not allowed_admin(ctx): await ctx.send("Administrator only."); return
-    await bot.db.set_setting("frozen","0"); await ctx.send("Games unfrozen.")
+    if hasattr(
+        bot.db,
+        "game_history",
+    ):
 
-@bot.command()
-async def ai(ctx, *, question: str):
-    await ctx.send(embed=brand("AI", "AI integration needs `OPENAI_API_KEY` before it can answer questions. It will not discuss or influence casino games."))
+        rows = await bot.db.game_history(
+            interaction.user.id,
+            10,
+        )
 
-@bot.command()
-async def thread(ctx, action: str="create", member: discord.Member=None):
-    if action.lower()=="create":
-        created=await ctx.channel.create_thread(name=f"{ctx.author.display_name}'s {config.CASINO_NAME} thread",type=discord.ChannelType.private_thread,invitable=False)
-        await created.add_user(ctx.author); await ctx.send(f"Your personal thread: {created.mention}")
-    else: await ctx.send("Use `.thread create`. Member management requires running the command inside your private thread.")
+    elif hasattr(
+        bot.db,
+        "history",
+    ):
 
-@bot.event
-async def on_ready(): print(f"Logged in as {bot.user} ({bot.user.id})")
+        rows = await bot.db.history(
+            interaction.user.id,
+            10,
+        )
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound): return
-    if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
-        await ctx.send("Invalid command usage. Use `.help` to see commands."); return
-    if isinstance(error, commands.CommandOnCooldown): await ctx.send("Please wait before using that command again."); return
-    print(repr(error)); await ctx.send("Something went wrong. Please try again.")
+    if not rows:
 
-if __name__ == "__main__":
-    if not config.TOKEN: raise RuntimeError("DISCORD_TOKEN is missing from Railway variables.")
-    if not config.DATABASE_URL: raise RuntimeError("DATABASE_URL is missing from Railway variables.")
-    bot.run(config.TOKEN)
+        description = (
+            "You have no recorded games yet."
+        )
+
+    else:
+
+        description = "\n".join(
+            format_history_row(row)
+            for row in rows
+        )
+
+    embed = base_embed(
+        title="Game History",
+        description=description,
+    )
+
+    embed.set_footer(
+        text="last 10 Games history"
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /RANKS
+# ============================================================
+
+@bot.tree.command(
+    name="ranks",
+    description="View rank progression and rewards.",
+)
+async def ranks_command(
+    interaction: discord.Interaction,
+):
+
+    lines = [
+        "## Rank Progression",
+        "",
+    ]
+
+    for rank in RANKS:
+
+        label = rank_label(
+            rank
+        )
+
+        lines.append(
+            f"**{label}** · "
+            f"Wager: {money(rank['wager'])} · "
+            f"Reward: {money(rank['reward'])}"
+        )
+
+    embed = base_embed(
+        title="Ranks",
+        description="\n".join(lines),
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /RANK-REWARDS
+# ============================================================
+
+@bot.tree.command(
+    name="rank-rewards",
+    description="Claim an available rank reward.",
+)
+async def rank_rewards_command(
+    interaction: discord.Interaction,
+):
+
+    if not await require_database(interaction):
+        return
+
+    if hasattr(
+        bot.db,
+        "claim_rank_reward",
+    ):
+
+        reward = await bot.db.claim_rank_reward(
+            interaction.user.id,
+            RANKS,
+        )
+
+        if reward:
+
+            amount = D(
+                reward
+            )
+
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Rank Reward Claimed",
+                    f"You received **{money(amount)}**.",
+                ),
+                ephemeral=True,
+            )
+
+            return
+
+    await interaction.response.send_message(
+        embed=neutral_embed(
+            "Rank Rewards",
+            "You have no unclaimed rank rewards.",
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /AFFILIATES
+# ============================================================
+
+@bot.tree.command(
+    name="affiliates",
+    description="View your affiliate statistics.",
+)
+async def affiliates_command(
+    interaction: discord.Interaction,
+):
+
+    if not await require_database(interaction):
+        return
+
+    referred = 0
+    earnings = Decimal("0")
+
+    if hasattr(
+        bot.db,
+        "affiliate_stats",
+    ):
+
+        stats = await bot.db.affiliate_stats(
+            interaction.user.id
+        )
+
+        if stats:
+
+            referred = int(
+                stats.get(
+                    "referred",
+                    0,
+                )
+            )
+
+            earnings = D(
+                stats.get(
+                    "earnings",
+                    0,
+                )
+            )
+
+    description = (
+        f"**Referred Players:** {referred}\n"
+        f"**Available Earnings:** {money(earnings)}\n\n"
+        "Use `/affiliate-claim` to claim your earnings."
+    )
+
+    embed = base_embed(
+        title="Your Affiliates",
+        description=description,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /AFFILIATE-CLAIM
+# ============================================================
+
+@bot.tree.command(
+    name="affiliate-claim",
+    description="Claim your affiliate earnings.",
+)
+async def affiliate_claim_command(
+    interaction: discord.Interaction,
+):
+
+    if not await require_database(interaction):
+        return
+
+    if hasattr(
+        bot.db,
+        "claim_affiliate",
+    ):
+
+        amount = await bot.db.claim_affiliate(
+            interaction.user.id
+        )
+
+        amount = D(
+            amount
+        )
+
+        if amount > 0:
+
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Affiliate Earnings Claimed",
+                    f"You received **{money(amount)}**.",
+                ),
+                ephemeral=True,
+            )
+
+            return
+
+    await interaction.response.send_message(
+        embed=neutral_embed(
+            "Affiliate Earnings",
+            "You have $0 to claim.",
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# END OF PART 2
+# ============================================================
+
+# ============================================================
+# bot.py — PART 3 / 10
+# ============================================================
+
+# ============================================================
+# /HELP
+# ============================================================
+
+@bot.tree.command(
+    name="help",
+    description="View all available commands."
+)
+async def help_command(
+    interaction: discord.Interaction,
+):
+
+    text = (
+        "## Commands\n\n"
+
+        "### Games\n"
+        "`/dice` — Start a dice game\n"
+        "`/roll` — Roll your dice\n"
+        "`/coinflip` — Play Red vs Blue coinflip\n"
+        "`/mines` — Play Mines\n"
+        "`/frog-run` — Play Frog Run\n"
+        "`/bj` — Play Blackjack\n"
+        "`/blackjack` — Play Blackjack\n\n"
+
+        "### Wallet\n"
+        "`/balance` — View your wallet\n"
+        "`/deposit` — Deposit crypto\n"
+        "`/withdraw` — Withdraw crypto\n"
+        "`/tip` — Tip another user\n"
+        "`/history` — View your game history\n\n"
+
+        "### Rewards\n"
+        "`/rakeback` — Claim your 1% loss rakeback\n"
+        "`/ranks` — View ranks and rewards\n"
+        "`/rank-rewards` — View or claim rank rewards\n"
+        "`/affiliate` — View your affiliate information\n"
+        "`/affiliates` — View affiliate information\n"
+        "`/affiliate-claim` — Claim affiliate earnings\n"
+        "`/claim` — Claim a promo code\n"
+        "`/leaderboard` — View top wagerers\n"
+        "`/race` — View the wager race\n\n"
+
+        "### Rain\n"
+        "`/rain` — Start a rain\n\n"
+
+        "### Information\n"
+        "`/stats` — View your stats\n"
+        "`/howtoplay` — Learn how to play\n"
+        "`/rewardinfo` — View rewards and perks\n"
+        "`/affiliateinfo` — View affiliate rates\n"
+        "`/fair` — View provably fair information\n"
+        "`/provably-fair` — Verify a game\n\n"
+
+        "### Private Channels\n"
+        "`/private-channel` — Create a private channel\n\n"
+
+        "### Utilities\n"
+        "`/retrigger` — Retrigger a stuck game\n"
+        "`/fix-dice` — Recover a dice game"
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            "Help",
+            text,
+            0x00E676,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /HOWTOPLAY
+# ============================================================
+
+@bot.tree.command(
+    name="howtoplay",
+    description="Learn how the casino works."
+)
+async def howtoplay(
+    interaction: discord.Interaction,
+):
+
+    text = (
+        "## How To Play\n\n"
+
+        "### Getting Started\n"
+        "Fund your wallet using `/deposit`.\n"
+        "Supported crypto networks include **LTC, ETH, USDT and SOL** "
+        "where available.\n\n"
+
+        "Use `/balance` to view your current USD balance.\n\n"
+
+        "### Dice\n"
+        "Use `/dice <amount>` to select your dice mode.\n"
+        "Then use `/roll` to roll your selected dice.\n\n"
+        "Available modes:\n"
+        "• Normal Dice — highest total wins\n"
+        "• Crazy Dice — lowest total wins\n"
+        "• 1 Dice\n"
+        "• 2 Dice\n"
+        "• 3 Dice\n\n"
+
+        "### Coinflip\n"
+        "Use `/coinflip <amount> <color>`.\n"
+        "Choose **Red** or **Blue**.\n"
+        "A winning side pays **1.92x** the stake.\n\n"
+
+        "### Mines\n"
+        "Use `/mines <amount> <mines>`.\n"
+        "Open tiles to increase your multiplier.\n"
+        "Find a gem to continue.\n"
+        "Hit a bomb and the game ends.\n"
+        "You can cash out before hitting a bomb.\n\n"
+
+        "### Frog Run\n"
+        "Use `/frog-run` to start Frog Run.\n"
+        "Advance through the board while avoiding losing positions.\n"
+        "Cash out before the run ends.\n\n"
+
+        "### Blackjack\n"
+        "Blackjack uses standard blackjack gameplay.\n"
+        "Get closer to 21 than the dealer without going over.\n"
+        "Natural blackjack pays according to the configured game rules.\n\n"
+        "Optional side bets:\n"
+        "• 21+3\n"
+        "• Perfect Pairs\n"
+        "• Insurance\n\n"
+        "Games that remain inactive for one hour may be auto-closed.\n"
+        "Use `/retrigger` if a game message needs to be restored.\n\n"
+
+        "### Withdrawals\n"
+        "Use `/withdraw` to request a crypto withdrawal.\n"
+        "Always verify the address and network before submitting.\n\n"
+
+        "### Rain\n"
+        "Rains distribute a specified amount between eligible users.\n"
+        "You must have the required verified role and wager at least "
+        "**$1 daily** to participate.\n\n"
+
+        "### Private Channels\n"
+        "Private channels require a **$25 balance**.\n"
+        "A private channel may automatically close if the balance remains "
+        "below $25 for 10 minutes.\n\n"
+
+        "### Handy Commands\n"
+        "`/stats` — Your account statistics\n"
+        "`/history` — Your recent games\n"
+        "`/leaderboard` — Top wagerers\n"
+        "`/fair` — Provably fair verification"
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            "How To Play",
+            text,
+            0x00E676,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /REWARDINFO
+# ============================================================
+
+@bot.tree.command(
+    name="rewardinfo",
+    description="View rewards and perks."
+)
+async def rewardinfo(
+    interaction: discord.Interaction,
+):
+
+    text = (
+        "## Rewards & Perks\n\n"
+
+        "### Rakeback\n"
+        "You receive **1% rakeback on losses**.\n"
+        "Winning wagers do not generate rakeback.\n"
+        "Use `/rakeback` to claim available rakeback.\n\n"
+
+        "### Lossback\n"
+        "Eligible promotional lossback may be distributed according "
+        "to active promotions.\n\n"
+
+        "### Affiliates\n"
+        "Earn a percentage from qualifying referred-player activity.\n"
+        "Use `/affiliateinfo` for the current affiliate rates.\n\n"
+
+        "### Promo Codes\n"
+        "Promo codes may require a deposit or wagering requirement.\n"
+        "Use `/claim <code>` to claim an eligible code.\n\n"
+
+        "### Wager Race\n"
+        "The wager race tracks qualifying wager during the active race.\n"
+        "Use `/race` to view the current race.\n\n"
+
+        "### Tips & Rain\n"
+        "Users can send tips with `/tip`.\n"
+        "Eligible users can participate in `/rain` events.\n\n"
+
+        "### Rank Rewards\n"
+        "Ranks progress through wager milestones.\n"
+        "Rank rewards can be claimed using `/rank-rewards`.\n\n"
+
+        "### Important Limits\n"
+        "Game-specific limits may apply.\n"
+        "Maximum bets can be restricted by balance and configuration.\n"
+        "Withdrawals and tipping require sufficient available balance.\n"
+        "PvP features may have additional restrictions."
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            "Rewards & Perks",
+            text,
+            0x00E676,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /AFFILIATEINFO
+# ============================================================
+
+@bot.tree.command(
+    name="affiliateinfo",
+    description="View affiliate rates."
+)
+async def affiliateinfo(
+    interaction: discord.Interaction,
+):
+
+    text = (
+        "## Affiliate Program\n\n"
+        "**1+ referred players:** 0.10%\n"
+        "**10+ referred players:** 0.20%\n"
+        "**25+ referred players:** 0.35%\n"
+        "**100+ referred players:** 0.50%\n\n"
+
+        "Use `/affiliates` to view your referral information.\n"
+        "Use `/affiliate-claim` to claim available affiliate earnings."
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            "Affiliate Information",
+            text,
+            0x00E676,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /BALANCE
+# ============================================================
+
+@bot.tree.command(
+    name="balance",
+    description="View your wallet balance."
+)
+async def balance_command(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    await bot.db.ensure(
+        user_id
+    )
+
+    balance = await bot.get_balance(
+        user_id
+    )
+
+    text = (
+        f"## {interaction.user.display_name}'s Wallet\n\n"
+        f"**Balance:** {money(balance)}"
+    )
+
+    await interaction.response.send_message(
+        content=text,
+        view=WalletView(
+            bot,
+            user_id,
+        ),
+    )
+
+
+# ============================================================
+# /DEPOSIT
+# ============================================================
+
+@bot.tree.command(
+    name="deposit",
+    description="Choose a cryptocurrency to deposit."
+)
+async def deposit_command(
+    interaction: discord.Interaction,
+):
+
+    await bot.db.ensure(
+        interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        content="Choose a currency Below",
+        view=DepositCurrencyView(
+            bot,
+            interaction.user.id,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /STATS
+# ============================================================
+
+@bot.tree.command(
+    name="stats",
+    description="View your account statistics."
+)
+async def stats_command(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    row = await bot.get_user(
+        user_id
+    )
+
+    if not row:
+        await bot.db.ensure(
+            user_id
+        )
+        row = await bot.get_user(
+            user_id
+        )
+
+    balance = D(row["balance"])
+    wagered = D(row["wagered"])
+    deposited = D(
+        row["lifetime_deposit"]
+    )
+
+    withdrawn = Decimal("0")
+
+    if hasattr(
+        bot.db,
+        "total_withdrawn",
+    ):
+        withdrawn = D(
+            await bot.db.total_withdrawn(
+                user_id
+            )
+        )
+
+    rank_index = 0
+
+    for index, rank in enumerate(RANKS):
+
+        if wagered >= rank["wager"]:
+            rank_index = index
+
+    current_rank = RANKS[
+        rank_index
+    ]
+
+    if rank_index + 1 < len(RANKS):
+
+        next_rank = RANKS[
+            rank_index + 1
+        ]
+
+        needed = max(
+            Decimal("0"),
+            next_rank["wager"] - wagered,
+        )
+
+        next_stage = (
+            f"wager {money(needed)} more "
+            f"to reach **{next_rank['name']}"
+        )
+
+        if next_rank["stage"]:
+            next_stage += (
+                f" Stage {next_rank['stage']}"
+            )
+
+        next_stage += "**"
+
+    else:
+
+        next_stage = (
+            "You have reached the highest rank."
+        )
+
+    stage_text = (
+        f"{current_rank['name']}"
+    )
+
+    if current_rank["stage"]:
+        stage_text += (
+            f" **Stage {current_rank['stage']}**"
+        )
+
+    text = (
+        f"## {interaction.user.display_name}'s Stats\n\n"
+        f"**Balance:** {money(balance)}\n"
+        f"**Rank:** **{stage_text}**\n"
+        f"**Total Wagered:** {money(wagered)}\n"
+        f"**Total Deposited:** {money(deposited)}\n"
+        f"**Total Withdrawn:** {money(withdrawn)}\n"
+        f"**Next Stage:** {next_stage}"
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            None,
+            text,
+            0x00E676,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /HISTORY
+# ============================================================
+
+@bot.tree.command(
+    name="history",
+    description="View your last 10 games."
+)
+async def history_command(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    games = []
+
+    if hasattr(
+        bot.db,
+        "game_history",
+    ):
+        games = await bot.db.game_history(
+            user_id,
+            10,
+        )
+    else:
+
+        games = await bot.db.pool.fetch(
+            """
+            SELECT
+                created_at,
+                note,
+                amount
+            FROM transactions
+            WHERE user_id = $1
+              AND kind = 'game'
+            ORDER BY created_at DESC
+            LIMIT 10
+            """,
+            user_id,
+        )
+
+    lines = [
+        "## Game History",
+        "",
+    ]
+
+    if not games:
+
+        lines.append(
+            "No games played yet."
+        )
+
+    else:
+
+        for game in games:
+
+            if isinstance(
+                game,
+                dict,
+            ):
+                created = game.get(
+                    "created_at"
+                )
+                game_name = game.get(
+                    "game",
+                    game.get(
+                        "note",
+                        "Game",
+                    ),
+                )
+                amount = D(
+                    game.get(
+                        "amount",
+                        0,
+                    )
+                )
+            else:
+                created = game["created_at"]
+                game_name = game.get(
+                    "game",
+                    game.get(
+                        "note",
+                        "Game",
+                    ),
+                )
+                amount = D(
+                    game.get(
+                        "amount",
+                        0,
+                    )
+                )
+
+            if created:
+                timestamp = discord.utils.format_dt(
+                    created,
+                    style="R",
+                )
+            else:
+                timestamp = "Unknown time"
+
+            result = (
+                f"+{money(amount)}"
+                if amount > 0
+                else money(amount)
+            )
+
+            lines.append(
+                f"**{game_name}** · "
+                f"{result} · {timestamp}"
+            )
+
+    embed = base_embed(
+        None,
+        "\n".join(lines),
+        0x00E676,
+    )
+
+    embed.set_footer(
+        text="last 10 Games history"
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /TIP
+# ============================================================
+
+@bot.tree.command(
+    name="tip",
+    description="Tip another user."
+)
+@app_commands.describe(
+    user="The user receiving the tip.",
+    amount="Amount to tip.",
+)
+async def tip_command(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    amount: str,
+):
+
+    sender_id = interaction.user.id
+
+    if user.bot:
+        await interaction.response.send_message(
+            "You cannot tip a bot.",
+            ephemeral=True,
+        )
+        return
+
+    if user.id == sender_id:
+        await interaction.response.send_message(
+            "You cannot tip yourself.",
+            ephemeral=True,
+        )
+        return
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None:
+        await interaction.response.send_message(
+            "Enter a valid amount such as `1`, `1$`, `0.10`, or `0.10$`.",
+            ephemeral=True,
+        )
+        return
+
+    if value <= 0:
+        await interaction.response.send_message(
+            "The tip must be greater than $0.",
+            ephemeral=True,
+        )
+        return
+
+    sender_balance = await bot.get_balance(
+        sender_id
+    )
+
+    if value > sender_balance:
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto\n"
+            "-# use /deposit to top-up Funds",
+            ephemeral=True,
+        )
+        return
+
+    async with bot.db.pool.acquire() as connection:
+
+        async with connection.transaction():
+
+            await connection.execute(
+                """
+                INSERT INTO users(user_id)
+                VALUES($1)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                sender_id,
+            )
+
+            await connection.execute(
+                """
+                INSERT INTO users(user_id)
+                VALUES($1)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                user.id,
+            )
+
+            changed = await connection.fetchrow(
+                """
+                UPDATE users
+                SET balance = balance - $2
+                WHERE user_id = $1
+                  AND balance >= $2
+                RETURNING balance
+                """,
+                sender_id,
+                value,
+            )
+
+            if not changed:
+
+                await interaction.response.send_message(
+                    "You Dont Have Enough Crypto",
+                    ephemeral=True,
+                )
+                return
+
+            await connection.execute(
+                """
+                UPDATE users
+                SET
+                    balance = balance + $2,
+                    tips_received = tips_received + $2
+                WHERE user_id = $1
+                """,
+                user.id,
+                value,
+            )
+
+            await connection.execute(
+                """
+                UPDATE users
+                SET tips_sent = tips_sent + $2
+                WHERE user_id = $1
+                """,
+                sender_id,
+                value,
+            )
+
+            await connection.execute(
+                """
+                INSERT INTO transactions(
+                    user_id,
+                    kind,
+                    amount,
+                    note
+                )
+                VALUES(
+                    $1,
+                    'tip',
+                    $2,
+                    $3
+                )
+                """,
+                sender_id,
+                -value,
+                f"Tip to {user.id}",
+            )
+
+            await connection.execute(
+                """
+                INSERT INTO transactions(
+                    user_id,
+                    kind,
+                    amount,
+                    note
+                )
+                VALUES(
+                    $1,
+                    'tip',
+                    $2,
+                    $3
+                )
+                """,
+                user.id,
+                value,
+                f"Tip from {sender_id}",
+            )
+
+    await interaction.response.send_message(
+        f"## Tip Sent\n"
+        f"{interaction.user.mention} tipped "
+        f"**{money(value)}** to "
+        f"**{user.display_name}**.",
+    )
+
+
+# ============================================================
+# /RAKEBACK
+# ============================================================
+
+@bot.tree.command(
+    name="rakeback",
+    description="Claim your available 1% loss rakeback."
+)
+async def rakeback_command(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    row = await bot.get_user(
+        user_id
+    )
+
+    available = (
+        D(row["rakeback"])
+        if row
+        else Decimal("0")
+    )
+
+    if available <= 0:
+
+        await interaction.response.send_message(
+            "You Dont have any rakeback avalable . "
+            "try again later",
+            ephemeral=True,
+        )
+
+        return
+
+    if hasattr(
+        bot.db,
+        "claim_rakeback",
+    ):
+
+        claimed = D(
+            await bot.db.claim_rakeback(
+                user_id
+            )
+        )
+
+    else:
+
+        async with bot.db.pool.acquire() as connection:
+
+            async with connection.transaction():
+
+                row = await connection.fetchrow(
+                    """
+                    UPDATE users
+                    SET rakeback = 0,
+                        balance = balance + $2
+                    WHERE user_id = $1
+                      AND rakeback > 0
+                    RETURNING rakeback
+                    """,
+                    user_id,
+                    available,
+                )
+
+                if not row:
+                    claimed = Decimal("0")
+                else:
+                    claimed = available
+
+                if claimed > 0:
+
+                    await connection.execute(
+                        """
+                        INSERT INTO transactions(
+                            user_id,
+                            kind,
+                            amount,
+                            note
+                        )
+                        VALUES(
+                            $1,
+                            'rakeback',
+                            $2,
+                            'Rakeback claim'
+                        )
+                        """,
+                        user_id,
+                        claimed,
+                    )
+
+    if claimed <= 0:
+
+        await interaction.response.send_message(
+            "You Dont have any rakeback avalable . "
+            "try again later",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Rakeback Claimed",
+            f"You claimed **{money(claimed)}** "
+            "in rakeback.",
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /RANKS
+# ============================================================
+
+@bot.tree.command(
+    name="ranks",
+    description="View all ranks and wager requirements."
+)
+async def ranks_command(
+    interaction: discord.Interaction,
+):
+
+    lines = [
+        "## Ranks & Rewards",
+        "",
+    ]
+
+    for rank in RANKS:
+
+        label = rank["name"]
+
+        if rank["stage"]:
+            label += (
+                f" Stage {rank['stage']}"
+            )
+
+        lines.append(
+            f"**{label}** — "
+            f"Wager {money(rank['wager'])} "
+            f"· Reward {money(rank['reward'])}"
+        )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            None,
+            "\n".join(lines),
+            0x00E676,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /RANK-REWARDS
+# ============================================================
+
+@bot.tree.command(
+    name="rank-rewards",
+    description="View and claim available rank rewards."
+)
+async def rank_rewards_command(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    row = await bot.get_user(
+        user_id
+    )
+
+    wagered = D(
+        row["wagered"]
+    ) if row else Decimal("0")
+
+    claimed_index = 0
+
+    if hasattr(
+        bot.db,
+        "get_claimed_rank",
+    ):
+        claimed_index = int(
+            await bot.db.get_claimed_rank(
+                user_id
+            )
+        )
+
+    available = []
+
+    for index, rank in enumerate(RANKS):
+
+        if (
+            wagered >= rank["wager"]
+            and index >= claimed_index
+        ):
+            available.append(
+                (
+                    index,
+                    rank,
+                )
+            )
+
+    if not available:
+
+        await interaction.response.send_message(
+            "You have no rank rewards available.",
+            ephemeral=True,
+        )
+
+        return
+
+    lines = [
+        "## Available Rank Rewards",
+        "",
+    ]
+
+    for index, rank in available:
+
+        label = rank["name"]
+
+        if rank["stage"]:
+            label += (
+                f" Stage {rank['stage']}"
+            )
+
+        lines.append(
+            f"**{label}** — {money(rank['reward'])}"
+        )
+
+    lines.append(
+        "",
+    )
+
+    lines.append(
+        "Use the claim button below to claim "
+        "the next available reward."
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            None,
+            "\n".join(lines),
+            0x00E676,
+        ),
+        view=RankRewardView(
+            bot,
+            user_id,
+            available[0][0],
+        ),
+        ephemeral=True,
+    )
+
+
+class RankRewardView(ButtonView):
+
+    def __init__(
+        self,
+        bot_instance: CasinoBot,
+        user_id: int,
+        rank_index: int,
+    ):
+
+        super().__init__(timeout=120)
+
+        self.bot = bot_instance
+        self.user_id = user_id
+        self.rank_index = rank_index
+
+    @discord.ui.button(
+        label="Claim Reward",
+        style=discord.ButtonStyle.success,
+    )
+    async def claim(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                "This reward belongs to another user.",
+                ephemeral=True,
+            )
+
+            return
+
+        rank = RANKS[
+            self.rank_index
+        ]
+
+        if hasattr(
+            self.bot.db,
+            "claim_rank_reward",
+        ):
+
+            success = await self.bot.db.claim_rank_reward(
+                self.user_id,
+                self.rank_index,
+                rank["reward"],
+            )
+
+        else:
+
+            success = await self.bot.db.change_balance(
+                self.user_id,
+                rank["reward"],
+                kind="rank_reward",
+                note=(
+                    f"{rank['name']} "
+                    f"Stage {rank['stage']}"
+                ),
+            )
+
+        if not success:
+
+            await interaction.response.send_message(
+                "This reward has already been claimed "
+                "or is not available.",
+                ephemeral=True,
+            )
+
+            return
+
+        await interaction.response.edit_message(
+            content=(
+                f"**Rank Reward Claimed!**\n"
+                f"You received **{money(rank['reward'])}**."
+            ),
+            embed=None,
+            view=None,
+        )
+
+
+# ============================================================
+# /LEADERBOARD
+# ============================================================
+
+@bot.tree.command(
+    name="leaderboard",
+    description="View the top 10 wagerers."
+)
+async def leaderboard_command(
+    interaction: discord.Interaction,
+):
+
+    if hasattr(
+        bot.db,
+        "leaderboard",
+    ):
+
+        rows = await bot.db.leaderboard()
+
+    else:
+
+        rows = await bot.db.pool.fetch(
+            """
+            SELECT user_id, wagered
+            FROM users
+            ORDER BY wagered DESC
+            LIMIT 10
+            """
+        )
+
+    lines = [
+        "## Top Wagerers",
+        "Top 10 by total wagered",
+        "",
+    ]
+
+    if not rows:
+
+        lines.append(
+            "No wagerers yet."
+        )
+
+    else:
+
+        for row in rows:
+
+            user_id = int(
+                row["user_id"]
+            )
+
+            member = interaction.guild.get_member(
+                user_id
+            ) if interaction.guild else None
+
+            name = (
+                member.mention
+                if member
+                else f"<@{user_id}>"
+            )
+
+            lines.append(
+                f"{name}: "
+                f"{money(row['wagered'])}"
+            )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            None,
+            "\n".join(lines),
+            0x00E676,
+        ),
+    )
