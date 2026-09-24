@@ -5520,3 +5520,5837 @@ async def rain_timer(
 # ============================================================
 # PART 4 END
 # ============================================================
+
+# ============================================================
+# bot.py — PART 5 / 10
+# COMMANDS: COINFLIP / MINES / RAIN
+# ============================================================
+
+
+# ============================================================
+# COINFLIP
+# ============================================================
+
+@bot.tree.command(
+    name="coinflip",
+    description="Flip a coin against the bot.",
+)
+@app_commands.describe(
+    amount="Amount to bet",
+    color="Choose Red or Blue",
+)
+@app_commands.choices(
+    color=[
+        app_commands.Choice(
+            name="Red",
+            value="red",
+        ),
+        app_commands.Choice(
+            name="Blue",
+            value="blue",
+        ),
+    ]
+)
+async def coinflip(
+    interaction: discord.Interaction,
+    amount: str,
+    color: app_commands.Choice[str],
+):
+
+    user_id = interaction.user.id
+
+    cooldown = bot.check_game_cooldown(
+        user_id,
+        "coinflip",
+    )
+
+    if cooldown:
+        await bot.safe_send(
+            interaction,
+            content=(
+                f"Please wait **{cooldown:.1f}s** "
+                "before playing again."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    balance = await bot.get_balance(
+        user_id
+    )
+
+    bet = amount_or_all(
+        amount,
+        balance,
+    )
+
+    if bet is None:
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Amount",
+                "Enter a valid amount such as `$1`, `1`, or `0.10`.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+    if bet < MIN_BET:
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Minimum Bet",
+                f"The minimum bet is **{money(MIN_BET)}**.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+    if bet > balance:
+
+        await bot.safe_send(
+            interaction,
+            content=(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds"
+            ),
+            ephemeral=True,
+        )
+        return
+
+    selected = color.value
+
+    game_id = bot.next_game_id()
+
+    server_seed = bot.create_server_seed()
+    server_hash = bot.server_hash(
+        server_seed
+    )
+    client_seed = bot.create_client_seed(
+        user_id
+    )
+    nonce = 0
+
+    if not await bot.deduct_bet(
+        user_id,
+        bet,
+        "coinflip",
+    ):
+
+        await bot.safe_send(
+            interaction,
+            content="Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+        return
+
+    bot.active_games[user_id] = {
+        "type": "coinflip",
+        "game_id": game_id,
+        "bet": bet,
+        "selected": selected,
+        "server_seed": server_seed,
+        "server_hash": server_hash,
+        "client_seed": client_seed,
+        "nonce": nonce,
+    }
+
+    selected_name = (
+        "Red"
+        if selected == "red"
+        else "Blue"
+    )
+
+    opponent_name = (
+        "Blue"
+        if selected == "red"
+        else "Red"
+    )
+
+    await interaction.response.send_message(
+        embed=neutral_embed(
+            "## Flipping…",
+            (
+                f"**{interaction.user.display_name}** "
+                f"( {selected_name}) vs Bot "
+                f"( {opponent_name})\n\n"
+                f"**Bet:** {money(bet)} · "
+                f"**Game #{game_id}**"
+            ),
+        )
+    )
+
+    await asyncio.sleep(2)
+
+    game = bot.active_games.pop(
+        user_id,
+        None,
+    )
+
+    if not game:
+        return
+
+    roll = bot.fair_roll(
+        game["server_seed"],
+        game["client_seed"],
+        game["nonce"],
+        "coinflip",
+    )
+
+    result = (
+        "red"
+        if roll < Decimal("50")
+        else "blue"
+    )
+
+    won = result == selected
+
+    if won:
+
+        payout = (
+            bet * COINFLIP_MULTIPLIER
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        await bot.settle_win(
+            user_id,
+            bet,
+            payout,
+            "coinflip",
+        )
+
+        result_title = (
+            f"## Coinflip — "
+            f"{result.title()} wins!"
+        )
+
+        result_color = 0x57F287
+
+        result_text = (
+            f"**Result:** {result.title()}\n"
+            f"**Roll:** {roll}\n"
+            f"**Bet:** {money(bet)}\n"
+            f"**Payout:** {money(payout)} "
+            f"**(1.92x)**"
+        )
+
+    else:
+
+        payout = Decimal("0")
+
+        await bot.settle_loss(
+            user_id,
+            bet,
+            "coinflip",
+        )
+
+        result_title = (
+            f"## Coinflip — "
+            f"{result.title()} wins!"
+        )
+
+        result_color = 0xED4245
+
+        result_text = (
+            f"**Result:** {result.title()}\n"
+            f"**Roll:** {roll}\n"
+            f"**Bet:** {money(bet)}\n"
+            f"**Lost:** {money(bet)}"
+        )
+
+    embed = base_embed(
+        title=result_title,
+        description=result_text,
+        color=result_color,
+    )
+
+    embed.add_field(
+        name="Provably Fair",
+        value=(
+            f"**Server Hash:** `{game['server_hash']}`\n"
+            f"**Client Seed:** `{game['client_seed']}`\n"
+            f"**Nonce:** `{game['nonce']}`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Game",
+        value=f"`#{game_id}`",
+        inline=True,
+    )
+
+    embed.set_footer(
+        text="Verify this result with /provably-fair"
+    )
+
+    await interaction.edit_original_response(
+        embed=embed
+    )
+
+
+# ============================================================
+# COINFLIP STICKER CONFIG
+# ============================================================
+
+@bot.tree.command(
+    name="cfred",
+    description="Set the Red coinflip sticker ID.",
+)
+@app_commands.describe(
+    sticker_id="Discord sticker ID",
+)
+async def cfred(
+    interaction: discord.Interaction,
+    sticker_id: str,
+):
+
+    if not bot.is_owner(
+        interaction.user
+    ):
+
+        await interaction.response.send_message(
+            "Only the bot owner can use this command.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        value = int(sticker_id)
+    except ValueError:
+
+        await interaction.response.send_message(
+            "Sticker ID must be a number.",
+            ephemeral=True,
+        )
+        return
+
+    await bot.db.set_setting(
+        "coinflip_red_sticker",
+        str(value),
+    )
+
+    await interaction.response.send_message(
+        f"Red coinflip sticker set to `{value}`.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="cfblue",
+    description="Set the Blue coinflip sticker ID.",
+)
+@app_commands.describe(
+    sticker_id="Discord sticker ID",
+)
+async def cfblue(
+    interaction: discord.Interaction,
+    sticker_id: str,
+):
+
+    if not bot.is_owner(
+        interaction.user
+    ):
+
+        await interaction.response.send_message(
+            "Only the bot owner can use this command.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        value = int(sticker_id)
+    except ValueError:
+
+        await interaction.response.send_message(
+            "Sticker ID must be a number.",
+            ephemeral=True,
+        )
+        return
+
+    await bot.db.set_setting(
+        "coinflip_blue_sticker",
+        str(value),
+    )
+
+    await interaction.response.send_message(
+        f"Blue coinflip sticker set to `{value}`.",
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# MINES
+# ============================================================
+
+def mines_multiplier(
+    mines: int,
+    opened: int,
+) -> Decimal:
+
+    if opened <= 0:
+        return Decimal("1.00")
+
+    safe_tiles = 25 - mines
+
+    multiplier = (
+        Decimal("25")
+        / Decimal(str(safe_tiles))
+    ) ** opened
+
+    multiplier *= Decimal("0.96")
+
+    return multiplier.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+
+def mines_embed(
+    game: MinesGame,
+) -> discord.Embed:
+
+    current = mines_multiplier(
+        game.mines,
+        len(game.opened),
+    )
+
+    payout = (
+        game.amount * current
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    embed = base_embed(
+        title="## Mines",
+        description=(
+            f"**Bet:** {money(game.amount)}\n"
+            f"**Mines:** {game.mines}\n"
+            f"**Opened:** {len(game.opened)}/"
+            f"{25 - game.mines}\n"
+            f"**Multiplier:** {current:.2f}x\n"
+            f"**Current Payout:** {money(payout)}"
+        ),
+        color=0x00E676,
+    )
+
+    embed.add_field(
+        name="Game",
+        value=f"`#{game.game_id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Provably Fair",
+        value=(
+            f"Server Hash: `{game.server_hash}`"
+        ),
+        inline=False,
+    )
+
+    return embed
+
+
+@bot.tree.command(
+    name="mines",
+    description="Play Mines.",
+)
+@app_commands.describe(
+    amount="Amount to bet",
+    mines="Number of mines, 1-20",
+)
+async def mines(
+    interaction: discord.Interaction,
+    amount: str,
+    mines: app_commands.Range[int, 1, 20],
+):
+
+    user_id = interaction.user.id
+
+    if user_id in bot.active_mines:
+
+        await interaction.response.send_message(
+            "You already have an active Mines game.",
+            ephemeral=True,
+        )
+        return
+
+    cooldown = bot.check_game_cooldown(
+        user_id,
+        "mines",
+    )
+
+    if cooldown:
+
+        await interaction.response.send_message(
+            f"Please wait **{cooldown:.1f}s**.",
+            ephemeral=True,
+        )
+        return
+
+    balance = await bot.get_balance(
+        user_id
+    )
+
+    bet = amount_or_all(
+        amount,
+        balance,
+    )
+
+    if bet is None:
+
+        await interaction.response.send_message(
+            "Enter a valid bet amount.",
+            ephemeral=True,
+        )
+        return
+
+    if bet < MIN_MINES_BET:
+
+        await interaction.response.send_message(
+            f"Minimum bet is {money(MIN_MINES_BET)}.",
+            ephemeral=True,
+        )
+        return
+
+    if bet > balance:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto\n"
+            "-# use /deposit to top-up Funds",
+            ephemeral=True,
+        )
+        return
+
+    if not await bot.deduct_bet(
+        user_id,
+        bet,
+        "mines",
+    ):
+
+        await interaction.response.send_message(
+            "Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+        return
+
+    game_id = bot.next_game_id()
+
+    server_seed = bot.create_server_seed()
+    server_hash = bot.server_hash(
+        server_seed
+    )
+    client_seed = bot.create_client_seed(
+        user_id
+    )
+    nonce = 0
+
+    game = MinesGame(
+        bot=bot,
+        user_id=user_id,
+        amount=bet,
+        mines=mines,
+        game_id=game_id,
+        server_hash=server_hash,
+        server_seed=server_seed,
+        client_seed=client_seed,
+        nonce=nonce,
+    )
+
+    bot.active_mines[user_id] = game
+
+    view = MinesView(game)
+
+    await interaction.response.send_message(
+        embed=mines_embed(game),
+        view=view,
+    )
+
+
+# ============================================================
+# MINES CLICK
+# ============================================================
+
+async def mines_click(
+    self,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    index: int,
+    view: MinesView,
+):
+
+    if game.finished:
+
+        await interaction.response.send_message(
+            "This Mines game has ended.",
+            ephemeral=True,
+        )
+        return
+
+    if index in game.opened:
+
+        await interaction.response.send_message(
+            "That tile is already open.",
+            ephemeral=True,
+        )
+        return
+
+    game.opened.add(index)
+
+    button = next(
+        (
+            item
+            for item in view.children
+            if getattr(
+                item,
+                "custom_id",
+                None,
+            ) == f"mine:{index}"
+        ),
+        None,
+    )
+
+    if index in game.bombs:
+
+        game.finished = True
+
+        for item in view.children:
+
+            custom_id = getattr(
+                item,
+                "custom_id",
+                "",
+            )
+
+            if (
+                custom_id.startswith(
+                    "mine:"
+                )
+            ):
+
+                tile_index = int(
+                    custom_id.split(":")[1]
+                )
+
+                item.disabled = True
+
+                if tile_index in game.bombs:
+                    item.label = "💣"
+                    item.style = (
+                        discord.ButtonStyle.danger
+                    )
+
+                elif tile_index in game.opened:
+                    item.label = "💎"
+                    item.style = (
+                        discord.ButtonStyle.success
+                    )
+
+        await bot.settle_loss(
+            game.user_id,
+            game.amount,
+            "mines",
+        )
+
+        embed = base_embed(
+            title="## Mines — Bomb!",
+            description=(
+                f"You hit a bomb.\n\n"
+                f"**Bet:** {money(game.amount)}\n"
+                f"**Lost:** {money(game.amount)}"
+            ),
+            color=0xED4245,
+        )
+
+        embed.add_field(
+            name="Game",
+            value=f"`#{game.game_id}`",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Server Hash",
+            value=f"`{game.server_hash}`",
+            inline=False,
+        )
+
+        bot.active_mines.pop(
+            game.user_id,
+            None,
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=view,
+        )
+
+        return
+
+    if button:
+
+        button.label = "💎"
+        button.style = (
+            discord.ButtonStyle.success
+        )
+        button.disabled = True
+
+    safe_tiles = 25 - game.mines
+
+    if len(game.opened) >= safe_tiles:
+
+        await mines_cashout(
+            self,
+            interaction,
+            game,
+            view,
+            automatic=True,
+        )
+
+        return
+
+    await interaction.response.edit_message(
+        embed=mines_embed(game),
+        view=view,
+    )
+
+
+# ============================================================
+# MINES CASHOUT
+# ============================================================
+
+async def mines_cashout(
+    self,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    view: MinesView,
+    automatic: bool = False,
+):
+
+    if game.finished:
+
+        await interaction.response.send_message(
+            "This Mines game has already ended.",
+            ephemeral=True,
+        )
+        return
+
+    if len(game.opened) <= 0:
+
+        await interaction.response.send_message(
+            "Open at least one tile before cashing out.",
+            ephemeral=True,
+        )
+        return
+
+    game.finished = True
+
+    multiplier = mines_multiplier(
+        game.mines,
+        len(game.opened),
+    )
+
+    payout = (
+        game.amount * multiplier
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    await bot.settle_win(
+        game.user_id,
+        game.amount,
+        payout,
+        "mines",
+    )
+
+    for item in view.children:
+
+        custom_id = getattr(
+            item,
+            "custom_id",
+            "",
+        )
+
+        if custom_id.startswith("mine:"):
+
+            tile_index = int(
+                custom_id.split(":")[1]
+            )
+
+            item.disabled = True
+
+            if tile_index in game.bombs:
+                item.label = "💣"
+                item.style = (
+                    discord.ButtonStyle.danger
+                )
+
+            elif tile_index in game.opened:
+                item.label = "💎"
+                item.style = (
+                    discord.ButtonStyle.success
+                )
+
+    bot.active_mines.pop(
+        game.user_id,
+        None,
+    )
+
+    embed = base_embed(
+        title="## Mines — Cashed Out",
+        description=(
+            f"**Bet:** {money(game.amount)}\n"
+            f"**Multiplier:** {multiplier:.2f}x\n"
+            f"**Payout:** {money(payout)}"
+        ),
+        color=0x57F287,
+    )
+
+    embed.add_field(
+        name="Tiles Opened",
+        value=str(len(game.opened)),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Game",
+        value=f"`#{game.game_id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Provably Fair",
+        value=(
+            f"Server Hash: `{game.server_hash}`\n"
+            f"Client Seed: `{game.client_seed}`\n"
+            f"Nonce: `{game.nonce}`"
+        ),
+        inline=False,
+    )
+
+    if automatic:
+
+        embed.title = "## Mines — All Safe Tiles!"
+
+    await interaction.response.edit_message(
+        embed=embed,
+        view=view,
+    )
+
+
+# Attach the methods to the bot instance.
+CasinoBot.mines_click = mines_click
+CasinoBot.mines_cashout = mines_cashout
+
+
+# ============================================================
+# RAIN
+# ============================================================
+
+async def get_verified_role(
+    guild: discord.Guild,
+) -> Optional[discord.Role]:
+
+    role_id = getattr(
+        config,
+        "RAIN_ROLE_ID",
+        0,
+    )
+
+    if not role_id:
+        return None
+
+    return guild.get_role(
+        role_id
+    )
+
+
+async def user_can_join_rain(
+    guild: discord.Guild,
+    member: discord.Member,
+) -> tuple[bool, str]:
+
+    role = await get_verified_role(
+        guild
+    )
+
+    if role is not None:
+
+        if role not in member.roles:
+
+            return (
+                False,
+                "You need the verified role to join Rain.",
+            )
+
+    try:
+
+        row = await bot.db.user(
+            member.id
+        )
+
+        wagered = D(
+            row["wagered"]
+        ) if row else Decimal("0")
+
+    except Exception:
+
+        wagered = Decimal("0")
+
+    if wagered < Decimal("1"):
+
+        return (
+            False,
+            "You need at least **$1 wagered** to join Rain.",
+        )
+
+    return True, ""
+
+
+@bot.tree.command(
+    name="rain",
+    description="Start a Rain for the server.",
+)
+@app_commands.describe(
+    amount="Amount to rain",
+    duration="Duration in minutes: 1, 2, 5, or 10",
+)
+@app_commands.choices(
+    duration=[
+        app_commands.Choice(
+            name="1 minute",
+            value=1,
+        ),
+        app_commands.Choice(
+            name="2 minutes",
+            value=2,
+        ),
+        app_commands.Choice(
+            name="5 minutes",
+            value=5,
+        ),
+        app_commands.Choice(
+            name="10 minutes",
+            value=10,
+        ),
+    ]
+)
+async def rain(
+    interaction: discord.Interaction,
+    amount: str,
+    duration: app_commands.Choice[int],
+):
+
+    if interaction.guild is None:
+
+        await interaction.response.send_message(
+            "Rain can only be started in a server.",
+            ephemeral=True,
+        )
+        return
+
+    user_id = interaction.user.id
+
+    balance = await bot.get_balance(
+        user_id
+    )
+
+    rain_amount = normalize_amount(
+        amount
+    )
+
+    if rain_amount is None:
+
+        await interaction.response.send_message(
+            "Enter a valid Rain amount.",
+            ephemeral=True,
+        )
+        return
+
+    if rain_amount <= 0:
+
+        await interaction.response.send_message(
+            "Rain amount must be greater than $0.",
+            ephemeral=True,
+        )
+        return
+
+    if rain_amount > balance:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto\n"
+            "-# use /deposit to top-up Funds",
+            ephemeral=True,
+        )
+        return
+
+    if not await bot.deduct_bet(
+        user_id,
+        rain_amount,
+        "rain",
+    ):
+
+        await interaction.response.send_message(
+            "Your balance changed. Please try again.",
+            ephemeral=True,
+        )
+        return
+
+    rain_id = secrets.token_hex(12)
+
+    bot.active_rains[rain_id] = {
+        "id": rain_id,
+        "guild_id": interaction.guild.id,
+        "channel_id": interaction.channel.id,
+        "host_id": user_id,
+        "amount": rain_amount,
+        "duration": duration.value,
+        "started_at": time.monotonic(),
+        "users": set(),
+    }
+
+    embed = base_embed(
+        title=f"## Rain Started — {money(rain_amount)}",
+        description=(
+            f"**{interaction.user.display_name}** "
+            f"rained — **{money(rain_amount)}**\n\n"
+            "Click on Button Below to Join"
+        ),
+        color=0x00E676,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=RainView(
+            bot,
+            rain_id,
+        ),
+    )
+
+    asyncio.create_task(
+        finish_rain(
+            rain_id
+        )
+    )
+
+
+async def join_rain(
+    self,
+    interaction: discord.Interaction,
+    rain_id: str,
+):
+
+    rain_data = self.active_rains.get(
+        rain_id
+    )
+
+    if not rain_data:
+
+        await interaction.response.send_message(
+            "This Rain has already ended.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.guild is None:
+
+        await interaction.response.send_message(
+            "Rain is only available in servers.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.user.id in rain_data["users"]:
+
+        await interaction.response.send_message(
+            "You already joined this Rain.",
+            ephemeral=True,
+        )
+        return
+
+    member = interaction.guild.get_member(
+        interaction.user.id
+    )
+
+    if member is None:
+
+        await interaction.response.send_message(
+            "You must be a server member to join.",
+            ephemeral=True,
+        )
+        return
+
+    allowed, reason = await user_can_join_rain(
+        interaction.guild,
+        member,
+    )
+
+    if not allowed:
+
+        await interaction.response.send_message(
+            reason,
+            ephemeral=True,
+        )
+        return
+
+    rain_data["users"].add(
+        interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        "You joined the Rain!",
+        ephemeral=True,
+    )
+
+
+async def finish_rain(
+    rain_id: str,
+):
+
+    await asyncio.sleep(
+        RAIN_DURATIONS[
+            bot.active_rains[
+                rain_id
+            ]["duration"]
+        ]
+    )
+
+    rain_data = bot.active_rains.pop(
+        rain_id,
+        None,
+    )
+
+    if not rain_data:
+        return
+
+    users = list(
+        rain_data["users"]
+    )
+
+    amount = D(
+        rain_data["amount"]
+    )
+
+    channel = bot.get_channel(
+        rain_data["channel_id"]
+    )
+
+    if not users:
+
+        await bot.db.change_balance(
+            rain_data["host_id"],
+            amount,
+            kind="rain_refund",
+            note=rain_id,
+        )
+
+        if channel:
+
+            await channel.send(
+                embed=base_embed(
+                    title=f"## Rain Ended — {money(amount)}",
+                    description=(
+                        "Nobody joined the Rain.\n"
+                        f"{money(amount)} was refunded."
+                    ),
+                    color=0xED4245,
+                )
+            )
+
+        return
+
+    share = (
+        amount
+        / Decimal(str(len(users)))
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    distributed = (
+        share
+        * Decimal(str(len(users)))
+    )
+
+    remainder = (
+        amount - distributed
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    for index, user_id in enumerate(users):
+
+        payout = share
+
+        if index == 0:
+            payout += remainder
+
+        if payout <= 0:
+            continue
+
+        await bot.db.change_balance(
+            user_id,
+            payout,
+            kind="rain",
+            note=rain_id,
+        )
+
+    host = bot.get_user(
+        rain_data["host_id"]
+    )
+
+    host_name = (
+        host.display_name
+        if host
+        else "User"
+    )
+
+    description = (
+        f"## **{host_name}** rained on "
+        f"**{len(users)}** players — "
+        f"**{money(share)}** each!\n\n"
+    )
+
+    names = []
+
+    for user_id in users:
+
+        member = (
+            channel.guild.get_member(user_id)
+            if channel
+            and hasattr(channel, "guild")
+            else None
+        )
+
+        if member:
+            names.append(
+                member.display_name
+            )
+
+    if names:
+
+        shown = names[:10]
+
+        description += (
+            ", ".join(
+                f"**{name}**"
+                for name in shown
+            )
+        )
+
+        if len(names) > 10:
+
+            description += (
+                f" **+{len(names) - 10} more**"
+            )
+
+    if channel:
+
+        await channel.send(
+            embed=base_embed(
+                title=f"## Rain Ended — {money(amount)}",
+                description=description,
+                color=0x57F287,
+            )
+        )
+
+
+CasinoBot.join_rain = join_rain
+
+
+# ============================================================
+# END PART 5
+# ============================================================
+
+# ============================================================
+# bot.py — PARTS 6 / 7 / 8 / 9 / 10
+# ============================================================
+
+
+# ============================================================
+# /BALANCE
+# ============================================================
+
+@bot.tree.command(
+    name="balance",
+    description="View your wallet balance.",
+)
+async def balance(
+    interaction: discord.Interaction,
+):
+
+    balance_value = await bot.get_balance(
+        interaction.user.id
+    )
+
+    embed = base_embed(
+        description=(
+            f"## {interaction.user.display_name}'s Wallet\n\n"
+            f"**Balance:** {money(balance_value)}"
+        ),
+        color=0x00E676,
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=WalletView(
+            bot,
+            interaction.user.id,
+        ),
+    )
+
+
+# ============================================================
+# /DEPOSIT
+# ============================================================
+
+@bot.tree.command(
+    name="deposit",
+    description="Get a cryptocurrency deposit address.",
+)
+@app_commands.describe(
+    currency="Currency to deposit.",
+)
+@app_commands.choices(
+    currency=[
+        app_commands.Choice(
+            name="LTC",
+            value="LTC",
+        ),
+        app_commands.Choice(
+            name="SOL",
+            value="SOL",
+        ),
+    ]
+)
+async def deposit(
+    interaction: discord.Interaction,
+    currency: Optional[app_commands.Choice[str]] = None,
+):
+
+    if currency:
+
+        await bot.send_deposit_dm(
+            interaction,
+            currency.value,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        "Choose a currency Below",
+        view=DepositCurrencyView(
+            bot,
+            interaction.user.id,
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /WITHDRAW
+# ============================================================
+
+@bot.tree.command(
+    name="withdraw",
+    description="Withdraw your balance.",
+)
+async def withdraw(
+    interaction: discord.Interaction,
+):
+
+    await interaction.response.send_modal(
+        WithdrawModal(
+            bot,
+            interaction.user.id,
+        )
+    )
+
+
+# ============================================================
+# /HELP
+# ============================================================
+
+HELP_TEXT = """
+## Games
+`/dice` `/roll`
+`/coinflip`
+`/mines`
+`/frog-run`
+`/bj` `/blackjack`
+
+## Wallet
+`/balance`
+`/deposit`
+`/withdraw`
+`/tip`
+
+## Rewards
+`/rakeback`
+`/ranks`
+`/rank-rewards`
+`/rewardinfo`
+
+## Rain & Affiliates
+`/rain`
+`/affiliate`
+`/affiliates`
+`/affiliate-claim`
+`/affiliateinfo`
+
+## Competition
+`/leaderboard`
+`/race`
+
+## Information
+`/howtoplay`
+`/stats`
+`/history`
+`/fair`
+`/provably-fair`
+
+## Other
+`/claim`
+`/private-channel`
+`/retrigger`
+`/fix-dice`
+"""
+
+
+@bot.tree.command(
+    name="help",
+    description="View available commands.",
+)
+async def help_command(
+    interaction: discord.Interaction,
+):
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="Help",
+            description=HELP_TEXT,
+            color=0x00E676,
+        )
+    )
+
+
+# ============================================================
+# /HOWTOPLAY
+# ============================================================
+
+@bot.tree.command(
+    name="howtoplay",
+    description="Learn how to use the casino.",
+)
+async def howtoplay(
+    interaction: discord.Interaction,
+):
+
+    text = """
+## How To Play
+
+### Fund Your Account
+Use `/deposit` to fund your wallet.
+
+Supported cryptocurrency systems include:
+**LTC · ETH · USDT · SOL**
+
+Deposits are credited only after blockchain confirmation.
+
+### Dice
+Use `/dice <amount>` to create a Dice game.
+
+Choose:
+- Normal Dice
+- Crazy Dice
+- 1 Dice
+- 2 Dice
+- 3 Dice
+
+Then use `/roll`.
+
+Normal Dice uses the highest total.
+Crazy Dice uses the lowest total.
+
+### Coinflip
+Use:
+
+`/coinflip <amount> <red/blue>`
+
+Choose **Red** or **Blue**.
+
+Winning pays **1.92x**.
+
+### Mines
+Use:
+
+`/mines <amount> <mines>`
+
+Choose up to **20 mines**.
+
+Open tiles to increase your multiplier.
+Cash out before hitting a mine.
+
+### Frog Run
+Use `/frog-run` to start a Frog Run game.
+
+Advance through the board while avoiding losing positions.
+Cash out before the run ends.
+
+### Blackjack
+Use:
+
+`/bj <amount>`
+
+Optional side bets:
+- 21+3
+- Perfect Pairs
+
+Normal Blackjack rules apply.
+
+Insurance is available when applicable.
+
+Games automatically stand after one hour.
+
+Use `/retrigger` if your game needs to be restored.
+
+### Withdraw
+Use `/withdraw` to request a withdrawal.
+
+### Rain
+Rain distributes crypto/points to eligible verified players.
+
+You must have the required verified role and have wagered at least **$1 during the required daily period**.
+
+### Private Channels
+Private channels require at least **$25 balance**.
+
+Channels automatically close if the balance remains below $25 for 10 minutes.
+
+### Provably Fair
+Every supported game uses a server seed, client seed and nonce.
+
+Use `/provably-fair` to inspect game information.
+"""
+
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="How To Play",
+            description=text,
+            color=0x00E676,
+        )
+    )
+
+
+# ============================================================
+# /REWARDINFO
+# ============================================================
+
+@bot.tree.command(
+    name="rewardinfo",
+    description="View rewards and perks.",
+)
+async def rewardinfo(
+    interaction: discord.Interaction,
+):
+
+    text = """
+## Rewards & Perks
+
+### Rakeback
+Receive **1% rakeback on losses**.
+
+Wins do not generate rakeback.
+
+Use `/rakeback` to claim your available amount.
+
+### Ranks
+Progress through wager milestones.
+
+Every rank can provide a cash reward.
+
+Use `/ranks` to see all stages.
+
+### Affiliates
+Affiliate commission is based on qualifying wager activity.
+
+### Promo Codes
+Use `/claim <code>` to claim an eligible promotional code.
+
+### Wager Race
+Compete for the highest wager during an active race.
+
+Use `/race` to view the current standings.
+
+### Tips & Rain
+Users can tip each other with `/tip`.
+
+Rain events can distribute funds to eligible verified players.
+
+### Deposit Bonuses
+Promotional deposit bonuses may include:
+- 50%
+- 100%
+- 200%
+
+Promotions can have wager multipliers and maximum cashout conditions.
+
+### Game Wagering
+Game wagering contributes according to the game's rules.
+
+### Betting Limits
+The minimum bet is **$0.10**.
+
+Promotional or special games can have their own minimums.
+
+### Restrictions
+Withdrawal, tipping and PvP eligibility can be restricted by active promotions.
+
+Always check the terms attached to a promotion before using it.
+"""
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="Rewards & Perks",
+            description=text,
+            color=0x00E676,
+        )
+    )
+
+
+# ============================================================
+# /AFFILIATEINFO
+# ============================================================
+
+@bot.tree.command(
+    name="affiliateinfo",
+    description="View affiliate commission information.",
+)
+async def affiliateinfo(
+    interaction: discord.Interaction,
+):
+
+    text = """
+## Affiliate Program
+
+Commission rates:
+
+**1+ referred users** → **0.10%**
+
+**10+ referred users** → **0.20%**
+
+**25+ referred users** → **0.35%**
+
+**100+ referred users** → **0.50%**
+
+Use `/affiliates` to view your affiliate information.
+
+Use `/affiliate-claim` to claim available earnings.
+"""
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="Affiliate Info",
+            description=text,
+            color=0x00E676,
+        )
+    )
+
+
+# ============================================================
+# /STATS
+# ============================================================
+
+@bot.tree.command(
+    name="stats",
+    description="View your statistics.",
+)
+async def stats(
+    interaction: discord.Interaction,
+):
+
+    row = await bot.get_user(
+        interaction.user.id
+    )
+
+    balance_value = D(
+        row["balance"]
+    )
+
+    wagered = D(
+        row["wagered"]
+    )
+
+    deposited = D(
+        row["lifetime_deposit"]
+    )
+
+    withdrawn = (
+        D(row["total_withdrawn"])
+        if "total_withdrawn" in row
+        else Decimal("0")
+    )
+
+    rank_index = bot.get_rank_index(
+        wagered
+    )
+
+    current_rank = RANKS[rank_index]
+
+    if rank_index + 1 < len(RANKS):
+
+        next_rank = RANKS[
+            rank_index + 1
+        ]
+
+        remaining = max(
+            Decimal("0"),
+            next_rank["wager"]
+            - wagered,
+        )
+
+        next_stage = (
+            f"wager {money(remaining)} more "
+            f"to reach **{bot.rank_label(next_rank)}**"
+        )
+
+    else:
+
+        next_stage = "Maximum rank reached"
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            description=(
+                f"## {interaction.user.display_name}'s Stats\n\n"
+                f"**Balance:** {money(balance_value)}\n"
+                f"**Rank:** **{bot.rank_label(current_rank)}** "
+                f"· {rank_index + 1}/{len(RANKS)} stages\n"
+                f"**Total Wagered:** {money(wagered)}\n"
+                f"**Total Deposited:** {money(deposited)}\n"
+                f"**Total Withdrawn:** {money(withdrawn)}\n"
+                f"**Next Stage:** {next_stage}"
+            )
+        )
+    )
+
+
+# ============================================================
+# RANK HELPERS
+# ============================================================
+
+def _rank_index(
+    self,
+    wagered: Decimal,
+) -> int:
+
+    result = 0
+
+    for index, rank in enumerate(RANKS):
+
+        if wagered >= rank["wager"]:
+            result = index
+
+    return result
+
+
+def _rank_label(
+    self,
+    rank: dict,
+) -> str:
+
+    if rank["stage"]:
+        return (
+            f"{rank['name']} "
+            f"Stage {rank['stage']}"
+        )
+
+    return rank["name"]
+
+
+CasinoBot.get_rank_index = _rank_index
+CasinoBot.rank_label = _rank_label
+
+
+# ============================================================
+# /RANKS
+# ============================================================
+
+@bot.tree.command(
+    name="ranks",
+    description="View all rank stages.",
+)
+async def ranks(
+    interaction: discord.Interaction,
+):
+
+    lines = [
+        "## Rank Progression",
+        "",
+    ]
+
+    for rank in RANKS:
+
+        lines.append(
+            f"**{bot.rank_label(rank)}**"
+            f" — wager {money(rank['wager'])}"
+            f" — reward {money(rank['reward'])}"
+        )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            description="\n".join(lines)
+        )
+    )
+
+
+# ============================================================
+# /RANK-REWARDS
+# ============================================================
+
+@bot.tree.command(
+    name="rank-rewards",
+    description="Claim an available rank reward.",
+)
+async def rank_rewards(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    row = await bot.get_user(
+        user_id
+    )
+
+    wagered = D(
+        row["wagered"]
+    )
+
+    rank_index = bot.get_rank_index(
+        wagered
+    )
+
+    if rank_index < 0:
+
+        await interaction.response.send_message(
+            "You have no rank reward available.",
+            ephemeral=True,
+        )
+
+        return
+
+    rank = RANKS[
+        rank_index
+    ]
+
+    if hasattr(
+        bot.db,
+        "claim_rank_reward",
+    ):
+
+        claimed = await bot.db.claim_rank_reward(
+            user_id,
+            rank_index,
+        )
+
+        if not claimed:
+
+            await interaction.response.send_message(
+                "You have no unclaimed rank reward.",
+                ephemeral=True,
+            )
+
+            return
+
+    else:
+
+        key = f"rank_claimed_{rank_index}"
+
+        claimed = await bot.db.setting(
+            f"{user_id}:{key}",
+            "0",
+        )
+
+        if claimed == "1":
+
+            await interaction.response.send_message(
+                "You have no unclaimed rank reward.",
+                ephemeral=True,
+            )
+
+            return
+
+        await bot.db.set_setting(
+            f"{user_id}:{key}",
+            "1",
+        )
+
+    await bot.db.change_balance(
+        user_id,
+        rank["reward"],
+        kind="rank_reward",
+        note=bot.rank_label(rank),
+    )
+
+    await interaction.response.send_message(
+        f"**Rank Reward Claimed!**\n"
+        f"You received {money(rank['reward'])} "
+        f"for reaching **{bot.rank_label(rank)}**."
+    )
+
+
+# ============================================================
+# /RAKEBACK
+# ============================================================
+
+@bot.tree.command(
+    name="rakeback",
+    description="Claim your available 1% loss rakeback.",
+)
+async def rakeback(
+    interaction: discord.Interaction,
+):
+
+    row = await bot.get_user(
+        interaction.user.id
+    )
+
+    available = D(
+        row["rakeback"]
+    )
+
+    if available <= 0:
+
+        await interaction.response.send_message(
+            "You Dont have any rakeback avalable . "
+            "try again later",
+            ephemeral=True,
+        )
+
+        return
+
+    if hasattr(
+        bot.db,
+        "claim_rakeback",
+    ):
+
+        amount = D(
+            await bot.db.claim_rakeback(
+                interaction.user.id
+            )
+        )
+
+    else:
+
+        amount = available
+
+        await bot.db.pool.execute(
+            """
+            UPDATE users
+            SET rakeback = 0
+            WHERE user_id = $1
+            """,
+            interaction.user.id,
+        )
+
+    if amount <= 0:
+
+        await interaction.response.send_message(
+            "You Dont have any rakeback avalable . "
+            "try again later",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.change_balance(
+        interaction.user.id,
+        amount,
+        kind="rakeback",
+        note="1% loss rakeback",
+    )
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Rakeback Claimed",
+            f"You received **{money(amount)}**."
+        )
+    )
+
+
+# ============================================================
+# /AFFILIATE / /AFFILIATES
+# ============================================================
+
+@bot.tree.command(
+    name="affiliate",
+    description="View your affiliate information.",
+)
+async def affiliate(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    if hasattr(
+        bot.db,
+        "affiliate_stats",
+    ):
+
+        data = await bot.db.affiliate_stats(
+            user_id
+        )
+
+        referrals = int(
+            data.get("referrals", 0)
+        )
+
+        earnings = D(
+            data.get("earnings", 0)
+        )
+
+        commission = D(
+            data.get("rate", 0)
+        )
+
+    else:
+
+        referrals = 0
+        earnings = Decimal("0")
+        commission = Decimal("0")
+
+    percent = (
+        commission * Decimal("100")
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            description=(
+                "## Affiliate\n\n"
+                f"**Referrals:** {referrals}\n"
+                f"**Commission:** {percent:.2f}%\n"
+                f"**Available:** {money(earnings)}"
+            )
+        )
+    )
+
+
+@bot.tree.command(
+    name="affiliates",
+    description="View your affiliate dashboard.",
+)
+async def affiliates(
+    interaction: discord.Interaction,
+):
+
+    await affiliate.callback(
+        interaction
+    )
+
+
+@bot.tree.command(
+    name="affiliate-claim",
+    description="Claim your affiliate earnings.",
+)
+async def affiliate_claim(
+    interaction: discord.Interaction,
+):
+
+    if hasattr(
+        bot.db,
+        "claim_affiliate",
+    ):
+
+        amount = D(
+            await bot.db.claim_affiliate(
+                interaction.user.id
+            )
+        )
+
+    else:
+
+        amount = Decimal("0")
+
+    if amount <= 0:
+
+        await interaction.response.send_message(
+            "You have $0 to claim.",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.change_balance(
+        interaction.user.id,
+        amount,
+        kind="affiliate",
+        note="Affiliate claim",
+    )
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Affiliate Claimed",
+            f"You received **{money(amount)}**."
+        )
+    )
+
+
+# ============================================================
+# /TIP
+# ============================================================
+
+@bot.tree.command(
+    name="tip",
+    description="Tip another user.",
+)
+@app_commands.describe(
+    user="User receiving the tip.",
+    amount="Amount to tip.",
+)
+async def tip(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    amount: str,
+):
+
+    if user.id == interaction.user.id:
+
+        await interaction.response.send_message(
+            "You cannot tip yourself.",
+            ephemeral=True,
+        )
+
+        return
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None:
+
+        await interaction.response.send_message(
+            "Enter a valid amount.",
+            ephemeral=True,
+        )
+
+        return
+
+    if value < Decimal("0.01"):
+
+        await interaction.response.send_message(
+            "Minimum tip is $0.01.",
+            ephemeral=True,
+        )
+
+        return
+
+    success = await bot.db.change_balance(
+        interaction.user.id,
+        -value,
+        kind="tip_sent",
+        note=str(user.id),
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.change_balance(
+        user.id,
+        value,
+        kind="tip_received",
+        note=str(interaction.user.id),
+    )
+
+    await interaction.response.send_message(
+        f"**{interaction.user.display_name}** tipped "
+        f"**{user.display_name}** **{money(value)}**."
+    )
+
+
+# ============================================================
+# /LEADERBOARD
+# ============================================================
+
+@bot.tree.command(
+    name="leaderboard",
+    description="View the top wagerers.",
+)
+async def leaderboard(
+    interaction: discord.Interaction,
+):
+
+    rows = await bot.db.leaderboard()
+
+    lines = [
+        "## Top Wagerers",
+        "Top 10 by total wagered",
+        "",
+    ]
+
+    for row in rows:
+
+        member = interaction.guild.get_member(
+            int(row["user_id"])
+        ) if interaction.guild else None
+
+        if member:
+            name = member.mention
+        else:
+            name = f"<@{row['user_id']}>"
+
+        lines.append(
+            f"{name}: {money(row['wagered'])}"
+        )
+
+    if len(rows) == 0:
+        lines.append("No wager history yet.")
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            description="\n".join(lines)
+        )
+    )
+
+
+# ============================================================
+# RACE
+# ============================================================
+
+async def send_race_message(
+    interaction: discord.Interaction,
+):
+
+    ongoing = await bot.db.setting(
+        "race_active",
+        "0",
+    )
+
+    rows = []
+
+    if ongoing == "1":
+
+        if hasattr(
+            bot.db,
+            "race_leaderboard",
+        ):
+            rows = await bot.db.race_leaderboard(
+                3
+            )
+
+        lines = [
+            "## 3 Day Race — On GOING",
+            "",
+        ]
+
+        for row in rows:
+
+            lines.append(
+                f"<@{row['user_id']}> : "
+                f"{money(row['wagered'])} wagared"
+            )
+
+        if not rows:
+            lines.append(
+                "No wagerers yet."
+            )
+
+    else:
+
+        if hasattr(
+            bot.db,
+            "race_winners",
+        ):
+
+            rows = await bot.db.race_winners(
+                3
+            )
+
+        lines = [
+            "## 3 Day Race — Winners!",
+            "",
+        ]
+
+        prizes = [
+            Decimal("70"),
+            Decimal("50"),
+            Decimal("30"),
+        ]
+
+        for index, row in enumerate(rows[:3]):
+
+            prize = prizes[index]
+
+            lines.append(
+                f"**{index + 1}.** "
+                f"<@{row['user_id']}> — "
+                f"{money(prize)}"
+            )
+
+        lines.extend(
+            [
+                "",
+                "Winners Open Ticket",
+            ]
+        )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            description="\n".join(lines)
+        )
+    )
+
+
+@bot.tree.command(
+    name="race",
+    description="View the current wager race.",
+)
+async def race(
+    interaction: discord.Interaction,
+):
+
+    await send_race_message(
+        interaction
+    )
+
+
+# ============================================================
+# OWNER RACE COMMANDS
+# ============================================================
+
+def owner_only():
+    async def predicate(
+        interaction: discord.Interaction,
+    ):
+
+        if interaction.user.id not in config.ADMIN_USER_IDS:
+
+            raise app_commands.CheckFailure(
+                "Owner only"
+            )
+
+        return True
+
+    return app_commands.check(
+        predicate
+    )
+
+
+race_group = app_commands.Group(
+    name="raceadmin",
+    description="Race administration.",
+)
+
+
+@race_group.command(
+    name="start",
+    description="Start a new wager race.",
+)
+@owner_only()
+async def race_start(
+    interaction: discord.Interaction,
+):
+
+    await bot.db.set_setting(
+        "race_active",
+        "1",
+    )
+
+    if hasattr(
+        bot.db,
+        "reset_race",
+    ):
+        await bot.db.reset_race()
+
+    await interaction.response.send_message(
+        "## 3 Day Race — Started\n\n"
+        "The wager race has started."
+    )
+
+
+@race_group.command(
+    name="end",
+    description="End the current wager race.",
+)
+@owner_only()
+async def race_end(
+    interaction: discord.Interaction,
+):
+
+    if hasattr(
+        bot.db,
+        "finish_race",
+    ):
+
+        await bot.db.finish_race()
+
+    await bot.db.set_setting(
+        "race_active",
+        "0",
+    )
+
+    await interaction.response.send_message(
+        "## 3 Day Race — Ended\n\n"
+        "Winners are now available through `/race`."
+    )
+
+
+bot.tree.add_command(
+    race_group
+)
+
+
+# ============================================================
+# /HISTORY
+# ============================================================
+
+@bot.tree.command(
+    name="history",
+    description="View your last 10 games.",
+)
+async def history(
+    interaction: discord.Interaction,
+):
+
+    if hasattr(
+        bot.db,
+        "game_history",
+    ):
+
+        rows = await bot.db.game_history(
+            interaction.user.id,
+            10,
+        )
+
+    else:
+
+        rows = await bot.db.pool.fetch(
+            """
+            SELECT
+                created_at,
+                note,
+                amount
+            FROM transactions
+            WHERE user_id = $1
+              AND kind = 'game'
+            ORDER BY created_at DESC
+            LIMIT 10
+            """,
+            interaction.user.id,
+        )
+
+    lines = [
+        "## Game History",
+        "",
+    ]
+
+    if not rows:
+
+        lines.append(
+            "No games played yet."
+        )
+
+    else:
+
+        for row in rows:
+
+            created = row["created_at"]
+
+            if created:
+
+                timestamp = int(
+                    created.timestamp()
+                )
+
+                when = (
+                    f"<t:{timestamp}:R>"
+                )
+
+            else:
+
+                when = "Unknown time"
+
+            result = D(
+                row["amount"]
+            )
+
+            if result > 0:
+                result_text = (
+                    f"+{money(result)}"
+                )
+            else:
+                result_text = money(result)
+
+            game_name = (
+                row.get("note", "Game")
+                if hasattr(row, "get")
+                else row["note"]
+            )
+
+            lines.append(
+                f"**{game_name}** · "
+                f"{result_text} · {when}"
+            )
+
+    embed = base_embed(
+        description="\n".join(lines)
+    )
+
+    embed.set_footer(
+        text="last 10 Games history"
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# ============================================================
+# /FAIR
+# ============================================================
+
+@bot.tree.command(
+    name="fair",
+    description="View provably fair information.",
+)
+@app_commands.describe(
+    game_id="Game ID to verify.",
+)
+async def fair(
+    interaction: discord.Interaction,
+    game_id: Optional[int] = None,
+):
+
+    if game_id is not None and hasattr(
+        bot.db,
+        "get_game",
+    ):
+
+        game = await bot.db.get_game(
+            game_id
+        )
+
+        if not game:
+
+            await interaction.response.send_message(
+                "Game not found.",
+                ephemeral=True,
+            )
+
+            return
+
+        await interaction.response.send_message(
+            embed=base_embed(
+                title="Provably Fair",
+                description=(
+                    f"**Game:** {game['game']}\n"
+                    f"**Game #:** {game['game_id']}\n"
+                    f"**Server Hash:** `{game['server_hash']}`\n"
+                    f"**Client Seed:** `{game['client_seed']}`\n"
+                    f"**Nonce:** `{game['nonce']}`\n"
+                    f"**Result:** `{game['result']}`"
+                ),
+            )
+        )
+
+        return
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="Provably Fair",
+            description=(
+                "Games use a commit-reveal system.\n\n"
+                "The server seed is hashed before the game.\n"
+                "The client seed and nonce are combined with "
+                "the server seed to generate the result.\n\n"
+                "Use `/provably-fair <hash>` to inspect a "
+                "specific game when its information is available."
+            ),
+        )
+    )
+
+
+@bot.tree.command(
+    name="provably-fair",
+    description="Verify a provably fair game.",
+)
+@app_commands.describe(
+    game_id="Game ID.",
+)
+async def provably_fair(
+    interaction: discord.Interaction,
+    game_id: Optional[int] = None,
+):
+
+    await fair.callback(
+        interaction,
+        game_id,
+    )
+
+
+# ============================================================
+# /RETRIGGER
+# ============================================================
+
+@bot.tree.command(
+    name="retrigger",
+    description="Restore a recoverable unfinished game.",
+)
+async def retrigger(
+    interaction: discord.Interaction,
+):
+
+    user_id = interaction.user.id
+
+    game = bot.active_games.get(
+        user_id
+    )
+
+    if game:
+
+        await interaction.response.send_message(
+            "Your active game has been restored.",
+            ephemeral=True,
+        )
+
+        return
+
+    if user_id in bot.active_mines:
+
+        await interaction.response.send_message(
+            "Your Mines game is still active.",
+            ephemeral=True,
+        )
+
+        return
+
+    if user_id in bot.active_dice:
+
+        await interaction.response.send_message(
+            "Your Dice game is still active.",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        "No recoverable game was found.",
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /FIX-DICE
+# ============================================================
+
+@bot.tree.command(
+    name="fix-dice",
+    description="Recover an interrupted dice game.",
+)
+async def fix_dice(
+    interaction: discord.Interaction,
+):
+
+    game = bot.active_dice.get(
+        interaction.user.id
+    )
+
+    if not game:
+
+        await interaction.response.send_message(
+            "No active Dice game was found.",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        "Your active Dice game is available again.",
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /PRIVATE-CHANNEL
+# ============================================================
+
+class PrivateChannelView(ButtonView):
+
+    def __init__(
+        self,
+        bot_instance: CasinoBot,
+        owner_id: int,
+    ):
+
+        super().__init__(
+            timeout=600
+        )
+
+        self.bot = bot_instance
+        self.owner_id = owner_id
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.owner_id:
+
+            await interaction.response.send_message(
+                "Only the channel owner can use these controls.",
+                ephemeral=True,
+            )
+
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Add Member",
+        style=discord.ButtonStyle.success,
+    )
+    async def add_member(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await interaction.response.send_modal(
+            PrivateMemberModal(
+                self.bot,
+                interaction.channel.id,
+                add=True,
+            )
+        )
+
+    @discord.ui.button(
+        label="Remove Member",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def remove_member(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await interaction.response.send_modal(
+            PrivateMemberModal(
+                self.bot,
+                interaction.channel.id,
+                add=False,
+            )
+        )
+
+    @discord.ui.button(
+        label="Delete",
+        style=discord.ButtonStyle.danger,
+    )
+    async def delete_channel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        channel = interaction.channel
+
+        await interaction.response.send_message(
+            "Deleting this private channel.",
+            ephemeral=True,
+        )
+
+        await channel.delete(
+            reason="Private channel deleted by owner."
+        )
+
+
+class PrivateMemberModal(discord.ui.Modal):
+
+    def __init__(
+        self,
+        bot_instance: CasinoBot,
+        channel_id: int,
+        add: bool,
+    ):
+
+        super().__init__(
+            title=(
+                "Add Member"
+                if add
+                else "Remove Member"
+            )
+        )
+
+        self.bot = bot_instance
+        self.channel_id = channel_id
+        self.add_member_mode = add
+
+        self.user_id_input = discord.ui.TextInput(
+            label="User ID",
+            placeholder="Discord user ID",
+            required=True,
+            max_length=25,
+        )
+
+        self.add_item(
+            self.user_id_input
+        )
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        channel = interaction.guild.get_channel(
+            self.channel_id
+        )
+
+        if not channel:
+
+            await interaction.response.send_message(
+                "Channel not found.",
+                ephemeral=True,
+            )
+
+            return
+
+        try:
+
+            user_id = int(
+                self.user_id_input.value.strip()
+            )
+
+        except ValueError:
+
+            await interaction.response.send_message(
+                "Invalid user ID.",
+                ephemeral=True,
+            )
+
+            return
+
+        member = interaction.guild.get_member(
+            user_id
+        )
+
+        if not member:
+
+            try:
+                member = await interaction.guild.fetch_member(
+                    user_id
+                )
+            except discord.HTTPException:
+
+                await interaction.response.send_message(
+                    "Member not found.",
+                    ephemeral=True,
+                )
+
+                return
+
+        overwrite = channel.overwrites_for(
+            member
+        )
+
+        overwrite.view_channel = (
+            self.add_member_mode
+        )
+
+        await channel.set_permissions(
+            member,
+            overwrite=overwrite,
+        )
+
+        await interaction.response.send_message(
+            (
+                f"{member.mention} was added."
+                if self.add_member_mode
+                else f"{member.mention} was removed."
+            ),
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(
+    name="private-channel",
+    description="Create a private channel.",
+)
+async def private_channel(
+    interaction: discord.Interaction,
+):
+
+    balance_value = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if balance_value < Decimal("25"):
+
+        await interaction.response.send_message(
+            "You need at least **$25.00** balance "
+            "to create a private channel.",
+            ephemeral=True,
+        )
+
+        return
+
+    guild = interaction.guild
+
+    if guild is None:
+
+        await interaction.response.send_message(
+            "This command can only be used in a server.",
+            ephemeral=True,
+        )
+
+        return
+
+    category = interaction.channel.category
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=False
+        ),
+        interaction.user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+        ),
+    }
+
+    channel = await guild.create_text_channel(
+        name=f"private-{interaction.user.name}",
+        category=category,
+        overwrites=overwrites,
+        reason="Private channel created.",
+    )
+
+    await channel.send(
+        f"## Private Channel\n"
+        f"Owner: {interaction.user.mention}\n\n"
+        "This channel requires a **$25 balance**.\n"
+        "If your balance stays below $25 for 10 minutes, "
+        "the channel may be closed.",
+        view=PrivateChannelView(
+            bot,
+            interaction.user.id,
+        ),
+    )
+
+    await interaction.response.send_message(
+        f"Private channel created: {channel.mention}",
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# PRIVATE CHANNEL BALANCE MONITOR
+# ============================================================
+
+@tasks.loop(minutes=1)
+async def private_channel_monitor():
+
+    if not bot.db:
+        return
+
+    for guild in bot.guilds:
+
+        for channel in guild.text_channels:
+
+            if not channel.name.startswith(
+                "private-"
+            ):
+                continue
+
+            owner_id = None
+
+            try:
+
+                owner_name = channel.name[
+                    len("private-"):
+                ]
+
+                member = discord.utils.find(
+                    lambda m:
+                    m.name == owner_name
+                    and m.guild.id == guild.id,
+                    guild.members,
+                )
+
+                if member:
+                    owner_id = member.id
+
+            except Exception:
+                continue
+
+            if not owner_id:
+                continue
+
+            balance_value = await bot.get_balance(
+                owner_id
+            )
+
+            if balance_value >= Decimal("25"):
+                continue
+
+            marker = (
+                f"private_low_balance:"
+                f"{channel.id}"
+            )
+
+            since = await bot.db.setting(
+                marker,
+                "",
+            )
+
+            if not since:
+
+                await bot.db.set_setting(
+                    marker,
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                )
+
+                continue
+
+            try:
+
+                started = datetime.fromisoformat(
+                    since
+                )
+
+                elapsed = (
+                    datetime.now(
+                        timezone.utc
+                    )
+                    - started
+                ).total_seconds()
+
+            except Exception:
+
+                elapsed = 0
+
+            if elapsed >= 600:
+
+                try:
+                    await channel.delete(
+                        reason=(
+                            "Private channel balance "
+                            "below $25 for 10 minutes."
+                        )
+                    )
+                except discord.HTTPException:
+                    pass
+
+
+# ============================================================
+# /CLAIM
+# ============================================================
+
+@bot.tree.command(
+    name="claim",
+    description="Claim a promo code.",
+)
+@app_commands.describe(
+    code="Promo code.",
+)
+async def claim(
+    interaction: discord.Interaction,
+    code: str,
+):
+
+    code = code.strip().upper()
+
+    if hasattr(
+        bot.db,
+        "claim_code",
+    ):
+
+        result = await bot.db.claim_code(
+            interaction.user.id,
+            code,
+        )
+
+        if not result:
+
+            await interaction.response.send_message(
+                "That code is invalid, expired, or already claimed.",
+                ephemeral=True,
+            )
+
+            return
+
+        amount = D(
+            result["amount"]
+        )
+
+    else:
+
+        row = await bot.db.pool.fetchrow(
+            """
+            SELECT
+                code,
+                amount,
+                max_uses,
+                uses,
+                active
+            FROM codes
+            WHERE code = $1
+            """,
+            code,
+        )
+
+        if not row:
+
+            await interaction.response.send_message(
+                "Invalid promo code.",
+                ephemeral=True,
+            )
+
+            return
+
+        if not row["active"] or row["uses"] >= row["max_uses"]:
+
+            await interaction.response.send_message(
+                "That code has expired.",
+                ephemeral=True,
+            )
+
+            return
+
+        already = await bot.db.pool.fetchval(
+            """
+            SELECT 1
+            FROM code_claims
+            WHERE code = $1
+              AND user_id = $2
+            """,
+            code,
+            interaction.user.id,
+        )
+
+        if already:
+
+            await interaction.response.send_message(
+                "You already claimed this code.",
+                ephemeral=True,
+            )
+
+            return
+
+        amount = D(
+            row["amount"]
+        )
+
+        async with bot.db.pool.acquire() as conn:
+
+            async with conn.transaction():
+
+                await conn.execute(
+                    """
+                    INSERT INTO code_claims(
+                        code,
+                        user_id
+                    )
+                    VALUES($1, $2)
+                    """,
+                    code,
+                    interaction.user.id,
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE codes
+                    SET uses = uses + 1
+                    WHERE code = $1
+                    """,
+                    code,
+                )
+
+    await bot.db.change_balance(
+        interaction.user.id,
+        amount,
+        kind="promo",
+        note=code,
+    )
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Promo Claimed",
+            f"You received **{money(amount)}**."
+        )
+    )
+
+
+# ============================================================
+# /CODE
+# ============================================================
+
+@bot.tree.command(
+    name="code",
+    description="Create a promotional code.",
+)
+@app_commands.describe(
+    amount="Amount each person receives.",
+    max_uses="Maximum number of claims.",
+    requirement="Requirement number: 1, 2, or 3.",
+)
+@owner_only()
+async def code_command(
+    interaction: discord.Interaction,
+    amount: str,
+    max_uses: int,
+    requirement: int,
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None:
+
+        await interaction.response.send_message(
+            "Invalid amount.",
+            ephemeral=True,
+        )
+
+        return
+
+    if max_uses <= 0:
+
+        await interaction.response.send_message(
+            "Max uses must be greater than zero.",
+            ephemeral=True,
+        )
+
+        return
+
+    if requirement not in CODE_REQUIREMENTS:
+
+        await interaction.response.send_message(
+            "Requirement must be 1, 2, or 3.",
+            ephemeral=True,
+        )
+
+        return
+
+    code = (
+        "GOOSE-"
+        + "".join(
+            secrets.choice(
+                string.ascii_uppercase
+                + string.digits
+            )
+            for _ in range(8)
+        )
+    )
+
+    await bot.db.pool.execute(
+        """
+        INSERT INTO codes(
+            code,
+            max_uses,
+            amount
+        )
+        VALUES($1, $2, $3)
+        """,
+        code,
+        max_uses,
+        value,
+    )
+
+    requirement_data = CODE_REQUIREMENTS[
+        requirement
+    ]
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Promo Code Created",
+            (
+                f"**Code:** `{code}`\n"
+                f"**Amount:** {money(value)} per person\n"
+                f"**Max Uses:** {max_uses}\n"
+                f"**Requirement:** "
+                f"{requirement_data['name']}"
+            ),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /RAIN
+# ============================================================
+
+@bot.tree.command(
+    name="rain",
+    description="Start a rain event.",
+)
+@app_commands.describe(
+    amount="Total amount to rain.",
+    duration="Duration in minutes: 1, 2, 5 or 10.",
+)
+@app_commands.choices(
+    duration=[
+        app_commands.Choice(
+            name="1 minute",
+            value=1,
+        ),
+        app_commands.Choice(
+            name="2 minutes",
+            value=2,
+        ),
+        app_commands.Choice(
+            name="5 minutes",
+            value=5,
+        ),
+        app_commands.Choice(
+            name="10 minutes",
+            value=10,
+        ),
+    ]
+)
+async def rain(
+    interaction: discord.Interaction,
+    amount: str,
+    duration: app_commands.Choice[int],
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None:
+
+        await interaction.response.send_message(
+            "Enter a valid amount.",
+            ephemeral=True,
+        )
+
+        return
+
+    if value < MIN_BET:
+
+        await interaction.response.send_message(
+            "Rain amount must be at least $0.10.",
+            ephemeral=True,
+        )
+
+        return
+
+    success = await bot.db.change_balance(
+        interaction.user.id,
+        -value,
+        kind="rain_start",
+        note="rain",
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto\n"
+            "-# use /deposit to top-up Funds",
+            ephemeral=True,
+        )
+
+        return
+
+    rain_id = secrets.token_hex(12)
+
+    bot.active_rains[rain_id] = {
+        "owner_id": interaction.user.id,
+        "amount": value,
+        "duration": duration.value,
+        "joined": set(),
+        "started": time.monotonic(),
+        "channel_id": interaction.channel.id,
+        "refunded": False,
+    }
+
+    view = RainView(
+        bot,
+        rain_id,
+    )
+
+    await interaction.response.send_message(
+        (
+            f"## Rain Started — **{money(value)}**\n\n"
+            f"**{interaction.user.mention}** rained — "
+            f"**{money(value)}**\n\n"
+            "Click on Button Below to Join"
+        ),
+        view=view,
+    )
+
+    asyncio.create_task(
+        bot.finish_rain(
+            rain_id,
+            interaction.channel.id,
+        )
+    )
+
+
+async def _join_rain(
+    self,
+    interaction: discord.Interaction,
+    rain_id: str,
+):
+
+    rain_data = self.active_rains.get(
+        rain_id
+    )
+
+    if not rain_data:
+
+        await interaction.response.send_message(
+            "This rain has ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    if interaction.user.id == rain_data["owner_id"]:
+
+        await interaction.response.send_message(
+            "The rain creator cannot join their own rain.",
+            ephemeral=True,
+        )
+
+        return
+
+    role_id = getattr(
+        config,
+        "RAIN_ROLE_ID",
+        0,
+    )
+
+    if role_id:
+
+        role = interaction.guild.get_role(
+            role_id
+        )
+
+        if role and role not in interaction.user.roles:
+
+            await interaction.response.send_message(
+                "You need the verified role to join rain.",
+                ephemeral=True,
+            )
+
+            return
+
+    if hasattr(
+        self.db,
+        "daily_wager",
+    ):
+
+        wagered = D(
+            await self.db.daily_wager(
+                interaction.user.id
+            )
+        )
+
+    else:
+
+        wagered = Decimal("1")
+
+    if wagered < Decimal("1"):
+
+        await interaction.response.send_message(
+            "You must wager at least **$1 today** "
+            "to join rain.",
+            ephemeral=True,
+        )
+
+        return
+
+    if interaction.user.id in rain_data["joined"]:
+
+        await interaction.response.send_message(
+            "You already joined this rain.",
+            ephemeral=True,
+        )
+
+        return
+
+    rain_data["joined"].add(
+        interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        "You joined the rain!",
+        ephemeral=True,
+    )
+
+
+CasinoBot.join_rain = _join_rain
+
+
+async def _finish_rain(
+    self,
+    rain_id: str,
+    channel_id: int,
+):
+
+    rain_data = self.active_rains.get(
+        rain_id
+    )
+
+    if not rain_data:
+        return
+
+    await asyncio.sleep(
+        RAIN_DURATIONS.get(
+            rain_data["duration"],
+            60,
+        )
+    )
+
+    joined = list(
+        rain_data["joined"]
+    )
+
+    total = D(
+        rain_data["amount"]
+    )
+
+    channel = self.get_channel(
+        channel_id
+    )
+
+    if not joined:
+
+        await self.db.change_balance(
+            rain_data["owner_id"],
+            total,
+            kind="rain_refund",
+            note="No rain participants",
+        )
+
+        if channel:
+
+            await channel.send(
+                f"## Rain Ended — **{money(total)}**\n\n"
+                "Nobody joined the rain.\n"
+                "The full amount was refunded."
+            )
+
+        self.active_rains.pop(
+            rain_id,
+            None,
+        )
+
+        return
+
+    share = (
+        total / Decimal(len(joined))
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    distributed = Decimal("0")
+
+    for user_id in joined:
+
+        if share <= 0:
+            continue
+
+        await self.db.change_balance(
+            user_id,
+            share,
+            kind="rain",
+            note=rain_id,
+        )
+
+        distributed += share
+
+    remainder = (
+        total - distributed
+    )
+
+    if remainder > 0:
+
+        await self.db.change_balance(
+            rain_data["owner_id"],
+            remainder,
+            kind="rain_remainder",
+            note=rain_id,
+        )
+
+    if channel:
+
+        mentions = " ".join(
+            f"<@{uid}>"
+            for uid in joined
+        )
+
+        await channel.send(
+            f"## Rain Ended — **{money(total)}**\n\n"
+            f"## **{self.get_user(rain_data['owner_id']).mention if self.get_user(rain_data['owner_id']) else f'<@{rain_data[\"owner_id\"]}>'}** "
+            f"rained on **{len(joined)}** players — "
+            f"**{money(share)}** each!\n\n"
+            f"{mentions}"
+        )
+
+    self.active_rains.pop(
+        rain_id,
+        None,
+    )
+
+
+CasinoBot.finish_rain = _finish_rain
+
+
+# ============================================================
+# /FROG-RUN
+# ============================================================
+
+class FrogRunView(ButtonView):
+
+    def __init__(
+        self,
+        bot_instance: CasinoBot,
+        user_id: int,
+        amount: Decimal,
+        game_id: int,
+    ):
+
+        super().__init__(
+            timeout=300
+        )
+
+        self.bot = bot_instance
+        self.user_id = user_id
+        self.amount = amount
+        self.game_id = game_id
+        self.position = 0
+        self.multiplier = Decimal("1.00")
+        self.finished = False
+
+        self.make_buttons()
+
+    def make_buttons(self):
+
+        self.clear_items()
+
+        for index in range(3):
+
+            button = discord.ui.Button(
+                label=f"Lane {index + 1}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"frog:{index}",
+            )
+
+            button.callback = (
+                self.make_callback(index)
+            )
+
+            self.add_item(button)
+
+        cashout = discord.ui.Button(
+            label="Cashout",
+            style=discord.ButtonStyle.success,
+        )
+
+        cashout.callback = self.cashout
+
+        self.add_item(cashout)
+
+    def make_callback(
+        self,
+        lane: int,
+    ):
+
+        async def callback(
+            interaction: discord.Interaction,
+        ):
+
+            if interaction.user.id != self.user_id:
+
+                await interaction.response.send_message(
+                    "This Frog Run belongs to another player.",
+                    ephemeral=True,
+                )
+
+                return
+
+            await self.bot.frog_step(
+                interaction,
+                self,
+                lane,
+            )
+
+        return callback
+
+    async def cashout(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        if self.finished:
+
+            await interaction.response.send_message(
+                "This game has ended.",
+                ephemeral=True,
+            )
+
+            return
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                "This game belongs to another player.",
+                ephemeral=True,
+            )
+
+            return
+
+        self.finished = True
+
+        payout = (
+            self.amount * self.multiplier
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        await self.bot.settle_win(
+            self.user_id,
+            self.amount,
+            payout,
+            "frog-run",
+        )
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content=(
+                f"## Frog Run — Cashed Out\n\n"
+                f"Bet: **{money(self.amount)}**\n"
+                f"Multiplier: **{self.multiplier:.2f}x**\n"
+                f"Payout: **{money(payout)}**"
+            ),
+            view=self,
+        )
+
+
+async def _frog_step(
+    self,
+    interaction: discord.Interaction,
+    view: FrogRunView,
+    lane: int,
+):
+
+    if view.finished:
+
+        await interaction.response.send_message(
+            "This game has ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    safe_lane = random.randrange(3)
+
+    if lane != safe_lane:
+
+        view.finished = True
+
+        for child in view.children:
+            child.disabled = True
+
+        await self.settle_loss(
+            view.user_id,
+            view.amount,
+            "frog-run",
+        )
+
+        await interaction.response.edit_message(
+            content=(
+                f"## Frog Run — Lost\n\n"
+                f"Bet: **{money(view.amount)}**\n"
+                f"Lost: **{money(view.amount)}**"
+            ),
+            view=view,
+        )
+
+        return
+
+    view.position += 1
+
+    view.multiplier = (
+        Decimal("1.20")
+        ** view.position
+    ).quantize(
+        Decimal("0.01")
+    )
+
+    if view.position >= 10:
+
+        view.finished = True
+
+        payout = (
+            view.amount * view.multiplier
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        await self.settle_win(
+            view.user_id,
+            view.amount,
+            payout,
+            "frog-run",
+        )
+
+        for child in view.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content=(
+                "## Frog Run — Finished!\n\n"
+                f"Multiplier: **{view.multiplier:.2f}x**\n"
+                f"Payout: **{money(payout)}**"
+            ),
+            view=view,
+        )
+
+        return
+
+    await interaction.response.edit_message(
+        content=(
+            "## Frog Run\n\n"
+            f"Stage: **{view.position}/10**\n"
+            f"Multiplier: **{view.multiplier:.2f}x**\n"
+            f"Current payout: "
+            f"**{money(view.amount * view.multiplier)}**"
+        ),
+        view=view,
+    )
+
+
+CasinoBot.frog_step = _frog_step
+
+
+@bot.tree.command(
+    name="frog-run",
+    description="Play Frog Run.",
+)
+@app_commands.describe(
+    amount="Amount to bet.",
+)
+async def frog_run(
+    interaction: discord.Interaction,
+    amount: str,
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None or value < MIN_FROG_BET:
+
+        await interaction.response.send_message(
+            "Minimum Frog Run bet is $0.10.",
+            ephemeral=True,
+        )
+
+        return
+
+    remaining = bot.check_game_cooldown(
+        interaction.user.id,
+        "frog-run",
+    )
+
+    if remaining:
+
+        await interaction.response.send_message(
+            f"Please wait **{remaining:.1f}s**.",
+            ephemeral=True,
+        )
+
+        return
+
+    success = await bot.deduct_bet(
+        interaction.user.id,
+        value,
+        "frog-run",
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    game_id = bot.next_game_id()
+
+    view = FrogRunView(
+        bot,
+        interaction.user.id,
+        value,
+        game_id,
+    )
+
+    await interaction.response.send_message(
+        content=(
+            f"## Frog Run\n\n"
+            f"Bet: **{money(value)}**\n"
+            f"Game #{game_id}\n\n"
+            "Choose a lane to continue."
+        ),
+        view=view,
+    )
+
+
+# ============================================================
+# /DICE
+# ============================================================
+
+@bot.tree.command(
+    name="dice",
+    description="Create a Dice game.",
+)
+@app_commands.describe(
+    amount="Amount to bet.",
+)
+async def dice(
+    interaction: discord.Interaction,
+    amount: str,
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None or value < MIN_BET:
+
+        await interaction.response.send_message(
+            "Minimum bet is **$0.10**.",
+            ephemeral=True,
+        )
+
+        return
+
+    balance_value = await bot.get_balance(
+        interaction.user.id
+    )
+
+    if value > balance_value:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        content=(
+            "**Choose Dice Mode**\n\n"
+            "**Crazy Dice**\n"
+            "Lowest Wins\n\n"
+            "**Dice**\n"
+            "Highest Wins"
+        ),
+        view=DiceSetupView(
+            bot,
+            interaction.user.id,
+            value,
+        ),
+    )
+
+
+# ============================================================
+# DICE GAME
+# ============================================================
+
+async def _start_dice_game(
+    self,
+    interaction: discord.Interaction,
+    user_id: int,
+    amount: Decimal,
+    mode: str,
+    dice_count: int,
+):
+
+    success = await self.deduct_bet(
+        user_id,
+        amount,
+        "dice",
+    )
+
+    if not success:
+
+        await interaction.edit_original_response(
+            content="You Dont Have Enough Crypto",
+            view=None,
+        )
+
+        return
+
+    game_id = self.next_game_id()
+
+    server_seed = self.create_server_seed()
+    server_hash = self.server_hash(
+        server_seed
+    )
+
+    client_seed = self.create_client_seed(
+        user_id
+    )
+
+    nonce = 0
+
+    self.active_dice[user_id] = {
+        "user_id": user_id,
+        "amount": amount,
+        "mode": mode,
+        "dice_count": dice_count,
+        "game_id": game_id,
+        "server_seed": server_seed,
+        "server_hash": server_hash,
+        "client_seed": client_seed,
+        "nonce": nonce,
+        "player_rolls": [],
+        "bot_rolls": [],
+        "message_id": None,
+        "channel_id": interaction.channel.id,
+    }
+
+    mode_name = (
+        "Crazy"
+        if mode == "crazy"
+        else "Normal"
+    )
+
+    await interaction.edit_original_response(
+        content=(
+            f"## Dice - /roll to proceed\n\n"
+            f"Mode: **{dice_count} Rolls "
+            f"({mode_name})** · "
+            f"Bet: **{money(amount)}**\n"
+            f"{interaction.user.mention} vs Bot\n\n"
+            f"{interaction.user.display_name}: "
+            + " + ".join("?" for _ in range(dice_count))
+            + " = ?\n"
+            f"Bot: "
+            + " + ".join("?" for _ in range(dice_count))
+            + " = ?\n\n"
+            f"Game #{game_id} · Provably fair.\n"
+            f"Server hash: `{server_hash}`"
+        ),
+        view=None,
+    )
+
+
+CasinoBot.start_dice_game = _start_dice_game
+
+
+@bot.tree.command(
+    name="roll",
+    description="Roll your active Dice game.",
+)
+async def roll(
+    interaction: discord.Interaction,
+):
+
+    game = bot.active_dice.get(
+        interaction.user.id
+    )
+
+    if not game:
+
+        await interaction.response.send_message(
+            "You don't have an active Dice game.",
+            ephemeral=True,
+        )
+
+        return
+
+    if len(
+        game["player_rolls"]
+    ) >= game["dice_count"]:
+
+        await interaction.response.send_message(
+            "You have already rolled all your dice.",
+            ephemeral=True,
+        )
+
+        return
+
+    index = len(
+        game["player_rolls"]
+    )
+
+    player_roll = bot.fair_int(
+        game["server_seed"],
+        game["client_seed"],
+        game["nonce"] + index,
+        1,
+        6,
+        "dice-player",
+    )
+
+    game["player_rolls"].append(
+        player_roll
+    )
+
+    if len(
+        game["player_rolls"]
+    ) < game["dice_count"]:
+
+        player_text = " + ".join(
+            str(x)
+            for x in game["player_rolls"]
+        )
+
+        player_text += " + ?"
+
+        await interaction.response.send_message(
+            f"🎲 You rolled **{player_roll}**\n"
+            f"Current total: **{sum(game['player_rolls'])}**"
+        )
+
+        return
+
+    game["bot_rolls"] = [
+        bot.fair_int(
+            game["server_seed"],
+            game["client_seed"],
+            game["nonce"] + 100 + i,
+            1,
+            6,
+            "dice-bot",
+        )
+        for i in range(
+            game["dice_count"]
+        )
+    ]
+
+    player_total = sum(
+        game["player_rolls"]
+    )
+
+    bot_total = sum(
+        game["bot_rolls"]
+    )
+
+    if game["mode"] == "crazy":
+
+        player_wins = (
+            player_total < bot_total
+        )
+
+    else:
+
+        player_wins = (
+            player_total > bot_total
+        )
+
+    if player_total == bot_total:
+        result = "Push"
+    elif player_wins:
+        result = "Win"
+    else:
+        result = "Loss"
+
+    if result == "Win":
+
+        payout = (
+            game["amount"]
+            * DICE_MULTIPLIER
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        await bot.settle_win(
+            game["user_id"],
+            game["amount"],
+            payout,
+            "dice",
+        )
+
+    elif result == "Loss":
+
+        payout = Decimal("0")
+
+        await bot.settle_loss(
+            game["user_id"],
+            game["amount"],
+            "dice",
+        )
+
+    else:
+
+        payout = game["amount"]
+
+        await bot.db.change_balance(
+            game["user_id"],
+            game["amount"],
+            kind="game_push",
+            note="dice",
+        )
+
+        await bot.db.record_game(
+            game["user_id"],
+            game["amount"],
+            Decimal("0"),
+            "dice_push",
+        )
+
+    player_values = " + ".join(
+        str(x)
+        for x in game["player_rolls"]
+    )
+
+    bot_values = " + ".join(
+        str(x)
+        for x in game["bot_rolls"]
+    )
+
+    if result == "Win":
+        color = 0x57F287
+    elif result == "Loss":
+        color = 0xED4245
+    else:
+        color = 0xFEE75C
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title=f"Dice — {result}!",
+            description=(
+                f"**{interaction.user.display_name}:** "
+                f"{player_values} = **{player_total}**\n"
+                f"**Bot:** "
+                f"{bot_values} = **{bot_total}**\n\n"
+                f"**Bet:** {money(game['amount'])}\n"
+                f"**Payout:** {money(payout)}\n\n"
+                f"Game #{game['game_id']}\n"
+                f"Server hash: `{game['server_hash']}`\n"
+                f"Client seed: `{game['client_seed']}`\n"
+                f"Nonce: `{game['nonce']}`"
+            ),
+            color=color,
+        )
+    )
+
+    bot.active_dice.pop(
+        interaction.user.id,
+        None,
+    )
+
+
+# ============================================================
+# /COINFLIP
+# ============================================================
+
+@bot.tree.command(
+    name="coinflip",
+    description="Play Coinflip.",
+)
+@app_commands.describe(
+    amount="Amount to bet.",
+    color="Choose Red or Blue.",
+)
+@app_commands.choices(
+    color=[
+        app_commands.Choice(
+            name="Red",
+            value="red",
+        ),
+        app_commands.Choice(
+            name="Blue",
+            value="blue",
+        ),
+    ]
+)
+async def coinflip(
+    interaction: discord.Interaction,
+    amount: str,
+    color: app_commands.Choice[str],
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None or value < MIN_BET:
+
+        await interaction.response.send_message(
+            "Minimum bet is **$0.10**.",
+            ephemeral=True,
+        )
+
+        return
+
+    remaining = bot.check_game_cooldown(
+        interaction.user.id,
+        "coinflip",
+    )
+
+    if remaining:
+
+        await interaction.response.send_message(
+            f"Please wait **{remaining:.1f}s**.",
+            ephemeral=True,
+        )
+
+        return
+
+    success = await bot.deduct_bet(
+        interaction.user.id,
+        value,
+        "coinflip",
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    game_id = bot.next_game_id()
+
+    server_seed = bot.create_server_seed()
+    server_hash = bot.server_hash(
+        server_seed
+    )
+
+    client_seed = bot.create_client_seed(
+        interaction.user.id
+    )
+
+    nonce = 0
+
+    result_roll = bot.fair_int(
+        server_seed,
+        client_seed,
+        nonce,
+        0,
+        1,
+        "coinflip",
+    )
+
+    result_color = (
+        "red"
+        if result_roll == 0
+        else "blue"
+    )
+
+    won = (
+        result_color
+        == color.value
+    )
+
+    payout = (
+        value * COINFLIP_MULTIPLIER
+        if won
+        else Decimal("0")
+    )
+
+    payout = payout.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="Flipping…",
+            description=(
+                f"{interaction.user.display_name} "
+                f"(**{color.name}**) vs Bot "
+                f"(**{'Blue' if color.value == 'red' else 'Red'}**)\n\n"
+                f"Bet: **{money(value)}** · "
+                f"Game #{game_id}"
+            ),
+            color=0x5865F2,
+        )
+    )
+
+    await asyncio.sleep(2)
+
+    if won:
+
+        await bot.settle_win(
+            interaction.user.id,
+            value,
+            payout,
+            "coinflip",
+        )
+
+        result_title = (
+            f"Coinflip — "
+            f"{result_color.title()} wins!"
+        )
+
+        result_color_code = 0x57F287
+
+    else:
+
+        await bot.settle_loss(
+            interaction.user.id,
+            value,
+            "coinflip",
+        )
+
+        result_title = (
+            f"Coinflip — "
+            f"{result_color.title()} wins!"
+        )
+
+        result_color_code = 0xED4245
+
+    await interaction.edit_original_response(
+        embed=base_embed(
+            title=result_title,
+            description=(
+                f"Roll: **{Decimal(result_roll):.2f}**\n\n"
+                f"Result: **{result_color.title()}**\n"
+                f"Bet: **{money(value)}**\n"
+                f"Payout: **{money(payout)}**\n"
+                f"Multiplier: **1.92x**\n\n"
+                f"Game #{game_id}\n"
+                f"Server hash: `{server_hash}`\n"
+                f"Client seed: `{client_seed}`\n"
+                f"Nonce: `{nonce}`"
+            ),
+            color=result_color_code,
+        )
+    )
+
+
+# ============================================================
+# /PROVABLY-FAIR ROTATION
+# ============================================================
+
+@bot.tree.command(
+    name="provably-fair-rotate",
+    description="Rotate your client seed.",
+)
+async def provably_fair_rotate(
+    interaction: discord.Interaction,
+):
+
+    seed = bot.create_client_seed(
+        interaction.user.id
+    )
+
+    await bot.db.set_setting(
+        f"client_seed:{interaction.user.id}",
+        seed,
+    )
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Client Seed Rotated",
+            f"Your new client seed is:\n`{seed}`"
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /MINES
+# ============================================================
+
+@bot.tree.command(
+    name="mines",
+    description="Play Mines.",
+)
+@app_commands.describe(
+    amount="Amount to bet.",
+    mines="Number of mines, 1-20.",
+)
+async def mines(
+    interaction: discord.Interaction,
+    amount: str,
+    mines: app_commands.Range[int, 1, 20],
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None or value < MIN_MINES_BET:
+
+        await interaction.response.send_message(
+            "Minimum Mines bet is **$0.10**.",
+            ephemeral=True,
+        )
+
+        return
+
+    success = await bot.deduct_bet(
+        interaction.user.id,
+        value,
+        "mines",
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    game_id = bot.next_game_id()
+
+    server_seed = bot.create_server_seed()
+    server_hash = bot.server_hash(
+        server_seed
+    )
+
+    client_seed = bot.create_client_seed(
+        interaction.user.id
+    )
+
+    game = MinesGame(
+        bot,
+        interaction.user.id,
+        value,
+        mines,
+        game_id,
+        server_hash,
+        server_seed,
+        client_seed,
+        0,
+    )
+
+    bot.active_mines[
+        interaction.user.id
+    ] = game
+
+    view = MinesView(
+        game
+    )
+
+    await interaction.response.send_message(
+        content=(
+            "## Mines\n\n"
+            f"Bet: **{money(value)}**\n"
+            f"Mines: **{mines}**\n"
+            f"Multiplier: **{game.multiplier:.2f}x**\n"
+            f"Cashout: **{money(game.payout)}**\n\n"
+            f"Game #{game_id}\n"
+            f"Server hash: `{server_hash}`"
+        ),
+        view=view,
+    )
+
+
+# ============================================================
+# MINES CLICK
+# ============================================================
+
+async def _mines_click(
+    self,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    index: int,
+    view: MinesView,
+):
+
+    if game.finished:
+
+        await interaction.response.send_message(
+            "This game has ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    if index in game.opened:
+
+        await interaction.response.send_message(
+            "That tile is already open.",
+            ephemeral=True,
+        )
+
+        return
+
+    game.opened.add(
+        index
+    )
+
+    button = next(
+        (
+            item
+            for item in view.children
+            if getattr(
+                item,
+                "custom_id",
+                None,
+            ) == f"mine:{index}"
+        ),
+        None,
+    )
+
+    if index in game.bombs:
+
+        game.finished = True
+
+        for item in view.children:
+
+            custom_id = getattr(
+                item,
+                "custom_id",
+                "",
+            )
+
+            if (
+                custom_id.startswith(
+                    "mine:"
+                )
+            ):
+
+                tile_index = int(
+                    custom_id.split(":")[1]
+                )
+
+                item.disabled = True
+
+                if tile_index in game.bombs:
+                    item.label = "💣"
+
+                elif tile_index in game.opened:
+                    item.label = "💎"
+
+        await self.settle_loss(
+            game.user_id,
+            game.amount,
+            "mines",
+        )
+
+        await interaction.response.edit_message(
+            content=(
+                "## Mines — Boom!\n\n"
+                f"Bet: **{money(game.amount)}**\n"
+                f"Lost: **{money(game.amount)}**\n\n"
+                f"Game #{game.game_id}"
+            ),
+            view=view,
+        )
+
+        self.active_mines.pop(
+            game.user_id,
+            None,
+        )
+
+        return
+
+    if button:
+
+        button.label = "💎"
+        button.style = (
+            discord.ButtonStyle.success
+        )
+        button.disabled = True
+
+    if len(game.opened) >= (
+        25 - game.mines
+    ):
+
+        game.finished = True
+
+        payout = game.payout
+
+        await self.settle_win(
+            game.user_id,
+            game.amount,
+            payout,
+            "mines",
+        )
+
+        for item in view.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content=(
+                "## Mines — Cleared!\n\n"
+                f"Bet: **{money(game.amount)}**\n"
+                f"Multiplier: **{game.multiplier:.2f}x**\n"
+                f"Payout: **{money(payout)}**"
+            ),
+            view=view,
+        )
+
+        self.active_mines.pop(
+            game.user_id,
+            None,
+        )
+
+        return
+
+    await interaction.response.edit_message(
+        content=(
+            "## Mines\n\n"
+            f"Bet: **{money(game.amount)}**\n"
+            f"Opened: **{len(game.opened)}**\n"
+            f"Multiplier: **{game.multiplier:.2f}x**\n"
+            f"Cashout: **{money(game.payout)}**"
+        ),
+        view=view,
+    )
+
+
+CasinoBot.mines_click = _mines_click
+
+
+# ============================================================
+# MINES CASHOUT
+# ============================================================
+
+async def _mines_cashout(
+    self,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    view: MinesView,
+):
+
+    if game.finished:
+
+        await interaction.response.send_message(
+            "This game has ended.",
+            ephemeral=True,
+        )
+
+        return
+
+    if not game.opened:
+
+        await interaction.response.send_message(
+            "Open at least one tile before cashing out.",
+            ephemeral=True,
+        )
+
+        return
+
+    game.finished = True
+
+    payout = game.payout
+
+    await self.settle_win(
+        game.user_id,
+        game.amount,
+        payout,
+        "mines",
+    )
+
+    for item in view.children:
+        item.disabled = True
+
+    await interaction.response.edit_message(
+        content=(
+            "## Mines — Cashed Out\n\n"
+            f"Bet: **{money(game.amount)}**\n"
+            f"Opened: **{len(game.opened)}**\n"
+            f"Multiplier: **{game.multiplier:.2f}x**\n"
+            f"Payout: **{money(payout)}**"
+        ),
+        view=view,
+    )
+
+    self.active_mines.pop(
+        game.user_id,
+        None,
+    )
+
+
+CasinoBot.mines_cashout = _mines_cashout
+
+
+# ============================================================
+# /BLACKJACK / /BJ
+# ============================================================
+
+def blackjack_card_value(
+    card: str,
+) -> int:
+
+    value = card.split("_")[0].lower()
+
+    if value in {
+        "jack",
+        "queen",
+        "king",
+    }:
+        return 10
+
+    if value == "ace":
+        return 11
+
+    try:
+        return int(value)
+    except ValueError:
+        return 10
+
+
+def blackjack_hand_total(
+    cards: list[str],
+) -> int:
+
+    total = sum(
+        blackjack_card_value(card)
+        for card in cards
+    )
+
+    aces = sum(
+        1
+        for card in cards
+        if card.startswith("ace_")
+    )
+
+    while total > 21 and aces:
+
+        total -= 10
+        aces -= 1
+
+    return total
+
+
+def blackjack_deck() -> list[str]:
+
+    suits = [
+        "clubs",
+        "diamonds",
+        "hearts",
+        "spades",
+    ]
+
+    ranks = [
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "jack",
+        "queen",
+        "king",
+        "ace",
+    ]
+
+    cards = [
+        f"{rank}_of_{suit}"
+        for suit in suits
+        for rank in ranks
+    ]
+
+    random.shuffle(
+        cards
+    )
+
+    return cards
+
+
+def card_path(
+    card: str,
+) -> Path:
+
+    return BASE_DIR / f"{card}.png"
+
+
+def create_blackjack_image(
+    player_cards: list[str],
+    dealer_cards: list[str],
+    hidden: bool = True,
+) -> Optional[discord.File]:
+
+    try:
+
+        from PIL import Image, ImageDraw
+
+    except ImportError:
+
+        return None
+
+    card_files = []
+
+    for card in player_cards:
+
+        path = card_path(
+            card
+        )
+
+        if path.exists():
+            card_files.append(
+                path
+            )
+
+    for card in dealer_cards:
+
+        if hidden and card == "hidden":
+            continue
+
+        path = card_path(
+            card
+        )
+
+        if path.exists():
+            card_files.append(
+                path
+            )
+
+    if not card_files:
+        return None
+
+    images = []
+
+    for path in card_files:
+
+        try:
+            images.append(
+                Image.open(path)
+                .convert("RGBA")
+            )
+        except Exception:
+            pass
+
+    if not images:
+        return None
+
+    width = sum(
+        image.width
+        for image in images
+    )
+
+    height = max(
+        image.height
+        for image in images
+    )
+
+    canvas = Image.new(
+        "RGBA",
+        (
+            width + 40,
+            height + 40,
+        ),
+        (20, 30, 25, 255),
+    )
+
+    x = 20
+
+    for image in images:
+
+        canvas.alpha_composite(
+            image,
+            (x, 20),
+        )
+
+        x += image.width
+
+    output = io.BytesIO()
+
+    canvas.save(
+        output,
+        format="PNG",
+    )
+
+    output.seek(0)
+
+    return discord.File(
+        output,
+        filename="blackjack.png",
+    )
+
+
+class BlackjackView(ButtonView):
+
+    def __init__(
+        self,
+        bot_instance: CasinoBot,
+        user_id: int,
+        game: dict,
+    ):
+
+        super().__init__(
+            timeout=3600
+        )
+
+        self.bot = bot_instance
+        self.user_id = user_id
+        self.game = game
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                "This Blackjack game belongs to another player.",
+                ephemeral=True,
+            )
+
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="Hit",
+        style=discord.ButtonStyle.primary,
+    )
+    async def hit(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.bot.blackjack_hit(
+            interaction,
+            self,
+        )
+
+    @discord.ui.button(
+        label="Stand",
+        style=discord.ButtonStyle.success,
+    )
+    async def stand(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.bot.blackjack_stand(
+            interaction,
+            self,
+        )
+
+    @discord.ui.button(
+        label="Double",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def double(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.bot.blackjack_double(
+            interaction,
+            self,
+        )
+
+
+async def _blackjack_finish(
+    self,
+    interaction: discord.Interaction,
+    view: BlackjackView,
+    result: str,
+):
+
+    game = view.game
+
+    if game["finished"]:
+        return
+
+    game["finished"] = True
+
+    player_total = blackjack_hand_total(
+        game["player"]
+    )
+
+    dealer_total = blackjack_hand_total(
+        game["dealer"]
+    )
+
+    if result == "win":
+
+        payout = (
+            game["bet"]
+            * Decimal("2")
+        )
+
+        await self.settle_win(
+            game["user_id"],
+            game["bet"],
+            payout,
+            "blackjack",
+        )
+
+        title = "Blackjack — Won"
+        color = 0x57F287
+
+    elif result == "push":
+
+        payout = game["bet"]
+
+        await self.db.change_balance(
+            game["user_id"],
+            payout,
+            kind="blackjack_push",
+            note="blackjack",
+        )
+
+        await self.db.record_game(
+            game["user_id"],
+            game["bet"],
+            Decimal("0"),
+            "blackjack_push",
+        )
+
+        title = "Blackjack — Push"
+        color = 0xFEE75C
+
+    else:
+
+        payout = Decimal("0")
+
+        await self.settle_loss(
+            game["user_id"],
+            game["bet"],
+            "blackjack",
+        )
+
+        title = "Blackjack — Lost"
+        color = 0xED4245
+
+    view.clear_items()
+
+    file = create_blackjack_image(
+        game["player"],
+        game["dealer"],
+        hidden=False,
+    )
+
+    embed = base_embed(
+        title=title,
+        description=(
+            f"**Blackjack** • "
+            f"Bet {money(game['bet'])} "
+            f"**{title.split('—')[-1].strip()} "
+            f"{money(game['bet'])}**\n\n"
+            f"Player: **{player_total}**\n"
+            f"Dealer: **{dealer_total}**\n\n"
+            f"Server hash: `{game['server_hash']}`\n"
+            f"Client seed: `{game['client_seed']}`\n"
+            f"Nonce: `{game['nonce']}`"
+        ),
+        color=color,
+    )
+
+    kwargs = {
+        "embed": embed,
+        "view": view,
+    }
+
+    if file:
+        kwargs["file"] = file
+
+    await interaction.response.edit_message(
+        **kwargs
+    )
+
+    self.active_games.pop(
+        game["user_id"],
+        None,
+    )
+
+
+CasinoBot.blackjack_finish = _blackjack_finish
+
+
+async def _blackjack_hit(
+    self,
+    interaction: discord.Interaction,
+    view: BlackjackView,
+):
+
+    game = view.game
+
+    if game["finished"]:
+        return
+
+    game["player"].append(
+        game["deck"].pop()
+    )
+
+    total = blackjack_hand_total(
+        game["player"]
+    )
+
+    if total > 21:
+
+        await self.blackjack_finish(
+            interaction,
+            view,
+            "loss",
+        )
+
+        return
+
+    file = create_blackjack_image(
+        game["player"],
+        game["dealer"],
+        hidden=True,
+    )
+
+    embed = base_embed(
+        title="Blackjack",
+        description=(
+            f"Player total: **{total}**\n"
+            f"Dealer: **?**\n\n"
+            "Choose Hit or Stand."
+        ),
+    )
+
+    kwargs = {
+        "embed": embed,
+        "view": view,
+    }
+
+    if file:
+        kwargs["file"] = file
+
+    await interaction.response.edit_message(
+        **kwargs
+    )
+
+
+CasinoBot.blackjack_hit = _blackjack_hit
+
+
+async def _blackjack_stand(
+    self,
+    interaction: discord.Interaction,
+    view: BlackjackView,
+):
+
+    game = view.game
+
+    if game["finished"]:
+        return
+
+    while blackjack_hand_total(
+        game["dealer"]
+    ) < 17:
+
+        game["dealer"].append(
+            game["deck"].pop()
+        )
+
+    player_total = blackjack_hand_total(
+        game["player"]
+    )
+
+    dealer_total = blackjack_hand_total(
+        game["dealer"]
+    )
+
+    if dealer_total > 21:
+
+        result = "win"
+
+    elif player_total > dealer_total:
+
+        result = "win"
+
+    elif player_total == dealer_total:
+
+        result = "push"
+
+    else:
+
+        result = "loss"
+
+    await self.blackjack_finish(
+        interaction,
+        view,
+        result,
+    )
+
+
+CasinoBot.blackjack_stand = _blackjack_stand
+
+
+async def _blackjack_double(
+    self,
+    interaction: discord.Interaction,
+    view: BlackjackView,
+):
+
+    game = view.game
+
+    if game["finished"]:
+        return
+
+    if len(game["player"]) != 2:
+
+        await interaction.response.send_message(
+            "Double is only available on your first two cards.",
+            ephemeral=True,
+        )
+
+        return
+
+    extra_bet = game["bet"]
+
+    success = await self.deduct_bet(
+        game["user_id"],
+        extra_bet,
+        "blackjack-double",
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    game["bet"] += extra_bet
+
+    game["player"].append(
+        game["deck"].pop()
+    )
+
+    if blackjack_hand_total(
+        game["player"]
+    ) > 21:
+
+        await self.blackjack_finish(
+            interaction,
+            view,
+            "loss",
+        )
+
+        return
+
+    await self.blackjack_stand(
+        interaction,
+        view,
+    )
+
+
+CasinoBot.blackjack_double = _blackjack_double
+
+
+@bot.tree.command(
+    name="blackjack",
+    description="Play Blackjack.",
+)
+@app_commands.describe(
+    amount="Blackjack bet.",
+    side_21_3="21+3 side bet.",
+    pairs="Perfect Pairs side bet.",
+)
+async def blackjack(
+    interaction: discord.Interaction,
+    amount: str,
+    side_21_3: Optional[str] = None,
+    pairs: Optional[str] = None,
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None or value < MIN_BET:
+
+        await interaction.response.send_message(
+            "Minimum Blackjack bet is **$0.10**.",
+            ephemeral=True,
+        )
+
+        return
+
+    success = await bot.deduct_bet(
+        interaction.user.id,
+        value,
+        "blackjack",
+    )
+
+    if not success:
+
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=True,
+        )
+
+        return
+
+    deck = blackjack_deck()
+
+    player = [
+        deck.pop(),
+        deck.pop(),
+    ]
+
+    dealer = [
+        deck.pop(),
+        "hidden",
+    ]
+
+    server_seed = bot.create_server_seed()
+
+    game = {
+        "user_id": interaction.user.id,
+        "bet": value,
+        "deck": deck,
+        "player": player,
+        "dealer": dealer,
+        "game_id": bot.next_game_id(),
+        "server_seed": server_seed,
+        "server_hash": bot.server_hash(
+            server_seed
+        ),
+        "client_seed": bot.create_client_seed(
+            interaction.user.id
+        ),
+        "nonce": 0,
+        "finished": False,
+        "side_21_3": (
+            normalize_amount(side_21_3)
+            if side_21_3
+            else Decimal("0")
+        ),
+        "pairs": (
+            normalize_amount(pairs)
+            if pairs
+            else Decimal("0")
+        ),
+    }
+
+    bot.active_games[
+        interaction.user.id
+    ] = game
+
+    view = BlackjackView(
+        bot,
+        interaction.user.id,
+        game,
+    )
+
+    file = create_blackjack_image(
+        player,
+        dealer,
+        hidden=True,
+    )
+
+    embed = base_embed(
+        title="Blackjack",
+        description=(
+            f"Bet: **{money(value)}**\n"
+            f"Player: **{blackjack_hand_total(player)}**\n"
+            f"Dealer: **?**\n\n"
+            f"Game #{game['game_id']}\n"
+            f"Server hash: `{game['server_hash']}`"
+        ),
+    )
+
+    kwargs = {
+        "embed": embed,
+        "view": view,
+    }
+
+    if file:
+        kwargs["file"] = file
+
+    await interaction.response.send_message(
+        **kwargs
+    )
+
+
+bot.tree.add_command(
+    app_commands.Command(
+        name="bj",
+        description="Play Blackjack.",
+        callback=blackjack.callback,
+    )
+)
+
+
+# ============================================================
+# /HOUSEBALANCE
+# ============================================================
+
+@bot.tree.command(
+    name="housebalance",
+    description="View house liquidity.",
+)
+async def housebalance(
+    interaction: discord.Interaction,
+):
+
+    row = await bot.db.pool.fetchrow(
+        """
+        SELECT balance
+        FROM house
+        LIMIT 1
+        """
+    )
+
+    if not row:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "House Balance",
+                "House balance is not configured yet.",
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="House Balance",
+            description=(
+                f"**Total liquidity:** "
+                f"{money(row['balance'])}"
+            ),
+        )
+    )
+
+
+# ============================================================
+# ADMIN /ADDBAL
+# ============================================================
+
+@bot.tree.command(
+    name="addbal",
+    description="Add balance to a user.",
+)
+@owner_only()
+@app_commands.describe(
+    user="User receiving balance.",
+    amount="Amount to add.",
+)
+async def addbal(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    amount: str,
+):
+
+    value = normalize_amount(
+        amount
+    )
+
+    if value is None:
+
+        await interaction.response.send_message(
+            "Invalid amount.",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.change_balance(
+        user.id,
+        value,
+        kind="admin_credit",
+        note=f"Admin: {interaction.user.id}",
+    )
+
+    await interaction.response.send_message(
+        f"Added **{money(value)}** to "
+        f"{user.mention}."
+    )
+
+
+# ============================================================
+# /RANKSETUP
+# ============================================================
+
+@bot.tree.command(
+    name="ranksetup",
+    description="Create/update casino rank roles.",
+)
+@owner_only()
+async def ranksetup(
+    interaction: discord.Interaction,
+):
+
+    guild = interaction.guild
+
+    if guild is None:
+
+        await interaction.response.send_message(
+            "This command can only be used in a server.",
+            ephemeral=True,
+        )
+
+        return
+
+    created = []
+
+    for rank in RANKS:
+
+        label = bot.rank_label(
+            rank
+        )
+
+        existing = discord.utils.get(
+            guild.roles,
+            name=label,
+        )
+
+        if existing:
+            continue
+
+        try:
+
+            role = await guild.create_role(
+                name=label,
+                reason="Casino rank setup",
+            )
+
+            created.append(
+                role.name
+            )
+
+        except discord.HTTPException:
+            continue
+
+    if created:
+
+        description = (
+            "Created:\n"
+            + "\n".join(
+                f"• {name}"
+                for name in created
+            )
+        )
+
+    else:
+
+        description = (
+            "All rank roles already exist."
+        )
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Rank Setup",
+            description,
+        )
+    )
+
+
+# ============================================================
+# AUTOMATIC RANK CHECK
+# ============================================================
+
+async def check_rank_up(
+    user_id: int,
+):
+
+    row = await bot.get_user(
+        user_id
+    )
+
+    wagered = D(
+        row["wagered"]
+    )
+
+    current_index = bot.get_rank_index(
+        wagered
+    )
+
+    previous_claimed = await bot.db.setting(
+        f"rank_notified:{user_id}",
+        "-1",
+    )
+
+    try:
+        previous_index = int(
+            previous_claimed
+        )
+    except ValueError:
+        previous_index = -1
+
+    if current_index <= previous_index:
+        return
+
+    await bot.db.set_setting(
+        f"rank_notified:{user_id}",
+        str(current_index),
+    )
+
+    rank = RANKS[
+        current_index
+    ]
+
+    user = bot.get_user(
+        user_id
+    )
+
+    if not user:
+        return
+
+    try:
+
+        await user.send(
+            f"**Rank Up!** You reached "
+            f"**{bot.rank_label(rank)}** "
+            f"and earned **{money(rank['reward'])}** — "
+            "pick your coin in the DM below, or claim "
+            "anytime with **/rank-rewards**"
+        )
+
+    except discord.HTTPException:
+        pass
+
+
+# ============================================================
+# TRANSACTION / RANK MONITOR
+# ============================================================
+
+@tasks.loop(seconds=30)
+async def rank_monitor():
+
+    if not bot.db:
+        return
+
+    try:
+
+        rows = await bot.db.pool.fetch(
+            """
+            SELECT user_id, wagered
+            FROM users
+            """
+        )
+
+        for row in rows:
+
+            await check_rank_up(
+                int(row["user_id"])
+            )
+
+    except Exception as exc:
+
+        print(
+            f"[RANK MONITOR] {exc}"
+        )
+
+
+# ============================================================
+# COMMAND ERROR HANDLER
+# ============================================================
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+):
+
+    print(
+        f"[APP COMMAND ERROR] "
+        f"{interaction.command}: {error}"
+    )
+
+    if isinstance(
+        error,
+        app_commands.CheckFailure,
+    ):
+
+        await bot.safe_send(
+            interaction,
+            content="You do not have permission to use this command.",
+            ephemeral=True,
+        )
+
+        return
+
+    if isinstance(
+        error,
+        app_commands.TransformerError,
+    ):
+
+        await bot.safe_send(
+            interaction,
+            content="One of the supplied values is invalid.",
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.safe_send(
+        interaction,
+        embed=error_embed(
+            "Something went wrong",
+            "Please try again.",
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# TASK STARTUP
+# ============================================================
+
+@rank_monitor.before_loop
+async def before_rank_monitor():
+
+    await bot.wait_until_ready()
+
+
+@private_channel_monitor.before_loop
+async def before_private_monitor():
+
+    await bot.wait_until_ready()
+
+
+# ============================================================
+# START TASKS AFTER READY
+# ============================================================
+
+_original_on_ready = bot.on_ready
+
+
+async def _final_on_ready():
+
+    await _original_on_ready()
+
+    if not rank_monitor.is_running():
+        rank_monitor.start()
+
+    if not private_channel_monitor.is_running():
+        private_channel_monitor.start()
+
+
+bot.on_ready = _final_on_ready
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    if not BOT_TOKEN:
+
+        raise RuntimeError(
+            "DISCORD_TOKEN is not configured."
+        )
+
+    bot.run(
+        BOT_TOKEN
+    )
