@@ -7777,173 +7777,94 @@ bot.tree.add_command(
         callback=blackjack.callback,
     )
 )
-# ============================================================
-# /HOUSEADD
-# ============================================================
-
-@bot.tree.command(
-    name="houseadd",
-    description="View the house deposit addresses.",
-)
-async def houseadd(
-    interaction: discord.Interaction,
-):
-    embed = base_embed(
-        title="Housebalance Credit",
-        description=(
-            "House deposit addresses"
-        ),
-    )
-
-    embed.add_field(
-        name="LTC",
-        value=(
-            "<:ltc:1550062603693457430>\n"
-            "`ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s`"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Solana",
-        value=(
-            "<:Solana:1550062641081356348>\n"
-            "`Cannot Generate an Deposit address "
-            "Message Owner for Manual Deposit`"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="USDT",
-        value=(
-            "<:usdt:1550062695380819978>\n"
-            "`Cannot Generate an Deposit address "
-            "Message Owner for Manual Deposit`"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Housebalance",
-        value=(
-            "Use these addresses to add funds to the "
-            "house balance."
-        ),
-        inline=False,
-    )
-
-    await interaction.response.send_message(
-        embed=embed
-    )
 
 # ============================================================
-# /HOUSEBALANCE
+# /HOUSEBAL
 # ============================================================
 
-@bot.tree.command(
-    name="housebalance",
-    description="View house liquidity.",
-)
-async def housebalance(
-    interaction: discord.Interaction,
-):
-    row = await bot.db.pool.fetchrow(
-        """
-        SELECT balance
-        FROM house
-        LIMIT 1
-        """
-    )
+HOUSE_BALANCE = "$48.50"
+HOUSE_LTC = "$0.00"
+HOUSE_SOL = "$38.29"
+HOUSE_USDT = "$10.21"
 
-    if not row:
+
+class HouseBalanceView(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Add Funds",
+        style=discord.ButtonStyle.success,
+        custom_id="house_add_funds",
+    )
+    async def add_funds(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         await interaction.response.send_message(
-            embed=error_embed(
-                "CryptoBet — House",
-                "House balance is not configured yet.",
-            ),
+            embed=house_add_funds_embed(),
             ephemeral=False,
         )
-        return
 
-    house_balance = Decimal(str(row["balance"]))
 
-    # --------------------------------------------------------
-    # House currency balances
-    # --------------------------------------------------------
-    #
-    # Replace these with your actual stored crypto balances
-    # if you already keep LTC / SOL / USDT separately.
-    #
-    # These are currently calculated from the total house
-    # balance so the command works with your existing `house`
-    # table.
-    # --------------------------------------------------------
-
-    ltc_usd = Decimal("0.00")
-    sol_usd = Decimal("0.00")
-    usdt_usd = house_balance
-
+@bot.tree.command(
+    name="housebal",
+    description="View the current house balance.",
+)
+async def housebal(
+    interaction: discord.Interaction,
+):
     embed = base_embed(
         title="## CryptoBet — House",
         description=(
             "> .live reserves & player-fund held\n\n"
-            f"> .house balance · **{money(house_balance)}** ·\n"
-            f"> .LTC · **{money(ltc_usd)}**\n"
-            f"> .SOL · **{money(sol_usd)}**\n"
-            f"> .USDT · **{money(usdt_usd)}**"
+            f"> .house balance · **`{HOUSE_BALANCE}`** ·\n"
+            f"> .LTC · **`{HOUSE_LTC}`**\n"
+            f"> .SOL · **`{HOUSE_SOL}`**\n"
+            f"> .USDT · **`{HOUSE_USDT}`**"
         ),
     )
 
     await interaction.response.send_message(
-        embed=embed
+        embed=embed,
+        view=HouseBalanceView(),
     )
 
 # ============================================================
-# ADMIN /ADDBAL
+# HOUSE ADD FUNDS EMBED
+# ============================================================
+
+def house_add_funds_embed():
+    return base_embed(
+        title="Housebalance Credit",
+        description=(
+            "<:ltc:1550062603693457430> "
+            "`ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s`\n\n"
+            "<:Solana:1550062641081356348> "
+            "`Cannot Generate an Deposit address Message Owner for Manual Deposit`\n\n"
+            "<:usdt:1550062695380819978> "
+            "`Cannot Generate an Deposit address Message Owner for Manual Deposit`"
+        ),
+    )
+
+
+# ============================================================
+# /HOUSEADDFUND
 # ============================================================
 
 @bot.tree.command(
-    name="addbal",
-    description="Add balance to a user.",
+    name="houseaddfund",
+    description="View house deposit addresses.",
 )
-@owner_only()
-@app_commands.describe(
-    user="User receiving balance.",
-    amount="Amount to add.",
-)
-async def addbal(
+async def houseaddfund(
     interaction: discord.Interaction,
-    user: discord.Member,
-    amount: str,
 ):
-
-    value = normalize_amount(
-        amount
-    )
-
-    if value is None:
-
-        await interaction.response.send_message(
-            "Invalid amount.",
-            ephemeral=False,
-        )
-
-        return
-
-    await bot.db.change_balance(
-        user.id,
-        value,
-        kind="admin_credit",
-        note=f"Admin: {interaction.user.id}",
-    )
-
     await interaction.response.send_message(
-        f"Added **{money(value)}** to "
-        f"{user.mention}."
+        embed=house_add_funds_embed(),
+        ephemeral=False,
     )
-
-
 # ============================================================
 # /RANKSETUP
 # ============================================================
