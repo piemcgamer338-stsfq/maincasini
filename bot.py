@@ -4175,6 +4175,10 @@ async def rain_timer(
 # COINFLIP
 # ============================================================
 
+COINFLIP_RED_STICKER_ID = 1553360108682084382
+COINFLIP_BLUE_STICKER_ID = 1553360311933734913
+
+
 @bot.tree.command(
     name="coinflip",
     description="Flip a coin against the bot.",
@@ -4200,7 +4204,6 @@ async def coinflip(
     amount: str,
     color: app_commands.Choice[str],
 ):
-
     user_id = interaction.user.id
 
     cooldown = bot.check_game_cooldown(
@@ -4219,9 +4222,7 @@ async def coinflip(
         )
         return
 
-    balance = await bot.get_balance(
-        user_id
-    )
+    balance = await bot.get_balance(user_id)
 
     bet = amount_or_all(
         amount,
@@ -4229,7 +4230,6 @@ async def coinflip(
     )
 
     if bet is None:
-
         await bot.safe_send(
             interaction,
             embed=error_embed(
@@ -4241,7 +4241,6 @@ async def coinflip(
         return
 
     if bet < MIN_BET:
-
         await bot.safe_send(
             interaction,
             embed=error_embed(
@@ -4253,7 +4252,6 @@ async def coinflip(
         return
 
     if bet > balance:
-
         await bot.safe_send(
             interaction,
             content=(
@@ -4272,17 +4270,19 @@ async def coinflip(
     server_hash = bot.server_hash(
         server_seed
     )
+
     client_seed = bot.create_client_seed(
         user_id
     )
+
     nonce = 0
 
+    # Deduct the bet exactly once.
     if not await bot.deduct_bet(
         user_id,
         bet,
         "coinflip",
     ):
-
         await bot.safe_send(
             interaction,
             content="Your balance changed. Please try again.",
@@ -4318,8 +4318,8 @@ async def coinflip(
             "## Flipping…",
             (
                 f"**{interaction.user.display_name}** "
-                f"( {selected_name}) vs Bot "
-                f"( {opponent_name})\n\n"
+                f"({selected_name}) vs Bot "
+                f"({opponent_name})\n\n"
                 f"**Bet:** {money(bet)} · "
                 f"**Game #{game_id}**"
             ),
@@ -4352,7 +4352,6 @@ async def coinflip(
     won = result == selected
 
     if won:
-
         payout = (
             bet * COINFLIP_MULTIPLIER
         ).quantize(
@@ -4383,7 +4382,6 @@ async def coinflip(
         )
 
     else:
-
         payout = Decimal("0")
 
         await bot.settle_loss(
@@ -4436,111 +4434,31 @@ async def coinflip(
         embed=embed
     )
 
-    # Actually send the configured Discord sticker after the result.
-    sticker_setting = (
-        "coinflip_red_sticker"
+    # ========================================================
+    # SEND RESULT STICKER
+    # ========================================================
+
+    sticker_id = (
+        COINFLIP_RED_STICKER_ID
         if result == "red"
-        else "coinflip_blue_sticker"
+        else COINFLIP_BLUE_STICKER_ID
     )
+
     try:
-        sticker_id = await bot.db.setting(sticker_setting, "")
-        if sticker_id:
-            sticker = await bot.fetch_sticker(int(sticker_id))
-            await interaction.followup.send(stickers=[sticker])
+        sticker = await bot.fetch_sticker(
+            sticker_id
+        )
+
+        await interaction.followup.send(
+            stickers=[sticker]
+        )
+
     except Exception as sticker_error:
-        print(f"[COINFLIP STICKER] {sticker_error}")
-
-
-# ============================================================
-# COINFLIP STICKER CONFIG
-# ============================================================
-
-@bot.tree.command(
-    name="cfred",
-    description="Set the Red coinflip sticker ID.",
-)
-@app_commands.describe(
-    sticker_id="Discord sticker ID",
-)
-async def cfred(
-    interaction: discord.Interaction,
-    sticker_id: str,
-):
-
-    if not bot.is_owner(
-        interaction.user
-    ):
-
-        await interaction.response.send_message(
-            "Only the bot owner can use this command.",
-            ephemeral=False,
+        print(
+            f"[COINFLIP STICKER] "
+            f"Failed to send sticker {sticker_id}: "
+            f"{sticker_error}"
         )
-        return
-
-    try:
-        value = int(sticker_id)
-    except ValueError:
-
-        await interaction.response.send_message(
-            "Sticker ID must be a number.",
-            ephemeral=False,
-        )
-        return
-
-    await bot.db.set_setting(
-        "coinflip_red_sticker",
-        str(value),
-    )
-
-    await interaction.response.send_message(
-        f"Red coinflip sticker set to `{value}`.",
-        ephemeral=False,
-    )
-
-
-@bot.tree.command(
-    name="cfblue",
-    description="Set the Blue coinflip sticker ID.",
-)
-@app_commands.describe(
-    sticker_id="Discord sticker ID",
-)
-async def cfblue(
-    interaction: discord.Interaction,
-    sticker_id: str,
-):
-
-    if not bot.is_owner(
-        interaction.user
-    ):
-
-        await interaction.response.send_message(
-            "Only the bot owner can use this command.",
-            ephemeral=False,
-        )
-        return
-
-    try:
-        value = int(sticker_id)
-    except ValueError:
-
-        await interaction.response.send_message(
-            "Sticker ID must be a number.",
-            ephemeral=False,
-        )
-        return
-
-    await bot.db.set_setting(
-        "coinflip_blue_sticker",
-        str(value),
-    )
-
-    await interaction.response.send_message(
-        f"Blue coinflip sticker set to `{value}`.",
-        ephemeral=False,
-    )
-
-
 # ============================================================
 # MINES
 # ============================================================
@@ -7859,6 +7777,65 @@ bot.tree.add_command(
         callback=blackjack.callback,
     )
 )
+# ============================================================
+# /HOUSEADD
+# ============================================================
+
+@bot.tree.command(
+    name="houseadd",
+    description="View the house deposit addresses.",
+)
+async def houseadd(
+    interaction: discord.Interaction,
+):
+    embed = base_embed(
+        title="Housebalance Credit",
+        description=(
+            "House deposit addresses"
+        ),
+    )
+
+    embed.add_field(
+        name="LTC",
+        value=(
+            "<:ltc:1550062603693457430>\n"
+            "`ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Solana",
+        value=(
+            "<:Solana:1550062641081356348>\n"
+            "`Cannot Generate an Deposit address "
+            "Message Owner for Manual Deposit`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="USDT",
+        value=(
+            "<:usdt:1550062695380819978>\n"
+            "`Cannot Generate an Deposit address "
+            "Message Owner for Manual Deposit`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Housebalance",
+        value=(
+            "Use these addresses to add funds to the "
+            "house balance."
+        ),
+        inline=False,
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
 
 # ============================================================
 # /HOUSEBALANCE
@@ -7871,7 +7848,6 @@ bot.tree.add_command(
 async def housebalance(
     interaction: discord.Interaction,
 ):
-
     row = await bot.db.pool.fetchrow(
         """
         SELECT balance
@@ -7881,27 +7857,47 @@ async def housebalance(
     )
 
     if not row:
-
         await interaction.response.send_message(
             embed=error_embed(
-                "House Balance",
+                "CryptoBet — House",
                 "House balance is not configured yet.",
             ),
             ephemeral=False,
         )
-
         return
 
-    await interaction.response.send_message(
-        embed=base_embed(
-            title="House Balance",
-            description=(
-                f"**Total liquidity:** "
-                f"{money(row['balance'])}"
-            ),
-        )
+    house_balance = Decimal(str(row["balance"]))
+
+    # --------------------------------------------------------
+    # House currency balances
+    # --------------------------------------------------------
+    #
+    # Replace these with your actual stored crypto balances
+    # if you already keep LTC / SOL / USDT separately.
+    #
+    # These are currently calculated from the total house
+    # balance so the command works with your existing `house`
+    # table.
+    # --------------------------------------------------------
+
+    ltc_usd = Decimal("0.00")
+    sol_usd = Decimal("0.00")
+    usdt_usd = house_balance
+
+    embed = base_embed(
+        title="## CryptoBet — House",
+        description=(
+            "> .live reserves & player-fund held\n\n"
+            f"> .house balance · **{money(house_balance)}** ·\n"
+            f"> .LTC · **{money(ltc_usd)}**\n"
+            f"> .SOL · **{money(sol_usd)}**\n"
+            f"> .USDT · **{money(usdt_usd)}**"
+        ),
     )
 
+    await interaction.response.send_message(
+        embed=embed
+    )
 
 # ============================================================
 # ADMIN /ADDBAL
