@@ -2249,7 +2249,3 @@ class Database:
                     WHERE user_id=$1
                     """,
                     user_id,
-                    rank_index,
-                )
-
-                return True
