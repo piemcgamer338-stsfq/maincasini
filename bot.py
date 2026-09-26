@@ -6872,10 +6872,7 @@ CasinoBot.mines_cashout = _mines_cashout
 # /BLACKJACK / /BJ
 # ============================================================
 
-def blackjack_card_value(
-    card: str,
-) -> int:
-
+def blackjack_card_value(card: str) -> int:
     value = card.split("_")[0].lower()
 
     if value in {
@@ -6894,13 +6891,11 @@ def blackjack_card_value(
         return 10
 
 
-def blackjack_hand_total(
-    cards: list[str],
-) -> int:
-
+def blackjack_hand_total(cards: list[str]) -> int:
     total = sum(
         blackjack_card_value(card)
         for card in cards
+        if card != "hidden"
     )
 
     aces = sum(
@@ -6910,7 +6905,6 @@ def blackjack_hand_total(
     )
 
     while total > 21 and aces:
-
         total -= 10
         aces -= 1
 
@@ -6918,7 +6912,6 @@ def blackjack_hand_total(
 
 
 def blackjack_deck() -> list[str]:
-
     suits = [
         "clubs",
         "diamonds",
@@ -6948,18 +6941,107 @@ def blackjack_deck() -> list[str]:
         for rank in ranks
     ]
 
-    random.shuffle(
-        cards
-    )
+    random.shuffle(cards)
 
     return cards
 
 
-def card_path(
-    card: str,
-) -> Path:
-
+def card_path(card: str) -> Path:
     return BASE_DIR / f"{card}.png"
+
+
+def _fit_blackjack_card(
+    image: Image.Image,
+    max_width: int = 210,
+    max_height: int = 300,
+) -> Image.Image:
+
+    image = image.convert("RGBA")
+
+    ratio = min(
+        max_width / image.width,
+        max_height / image.height,
+    )
+
+    new_size = (
+        max(1, int(image.width * ratio)),
+        max(1, int(image.height * ratio)),
+    )
+
+    return image.resize(
+        new_size,
+        Image.Resampling.LANCZOS,
+    )
+
+
+def _create_blackjack_card_back(
+    width: int,
+    height: int,
+) -> Image.Image:
+
+    card = Image.new(
+        "RGBA",
+        (width, height),
+        (15, 45, 30, 255),
+    )
+
+    draw = ImageDraw.Draw(card)
+
+    # Outer border
+    draw.rounded_rectangle(
+        (
+            0,
+            0,
+            width - 1,
+            height - 1,
+        ),
+        radius=14,
+        fill=(235, 235, 235, 255),
+    )
+
+    # Inner card
+    draw.rounded_rectangle(
+        (
+            7,
+            7,
+            width - 8,
+            height - 8,
+        ),
+        radius=10,
+        fill=(30, 80, 55, 255),
+        outline=(10, 35, 25, 255),
+        width=4,
+    )
+
+    # Diamond pattern
+    spacing = 28
+
+    for y in range(
+        18,
+        height - 18,
+        spacing,
+    ):
+
+        for x in range(
+            18,
+            width - 18,
+            spacing,
+        ):
+
+            cx = x
+            cy = y
+
+            draw.polygon(
+                [
+                    (cx, cy - 8),
+                    (cx + 8, cy),
+                    (cx, cy + 8),
+                    (cx - 8, cy),
+                ],
+                fill=(45, 110, 75, 255),
+            )
+
+    return card
 
 
 def create_blackjack_image(
@@ -6969,93 +7051,246 @@ def create_blackjack_image(
 ) -> Optional[discord.File]:
 
     try:
-
         from PIL import Image, ImageDraw
-
     except ImportError:
-
         return None
 
-    card_files = []
+    # --------------------------------------------------------
+    # GREEN CASINO TABLE
+    # --------------------------------------------------------
 
-    for card in player_cards:
+    CARD_WIDTH = 190
+    CARD_HEIGHT = 275
 
-        path = card_path(
-            card
-        )
-
-        if path.exists():
-            card_files.append(
-                path
-            )
-
-    for card in dealer_cards:
-
-        if hidden and card == "hidden":
-            continue
-
-        path = card_path(
-            card
-        )
-
-        if path.exists():
-            card_files.append(
-                path
-            )
-
-    if not card_files:
-        return None
-
-    images = []
-
-    for path in card_files:
-
-        try:
-            images.append(
-                Image.open(path)
-                .convert("RGBA")
-            )
-        except Exception:
-            pass
-
-    if not images:
-        return None
-
-    width = sum(
-        image.width
-        for image in images
-    )
-
-    height = max(
-        image.height
-        for image in images
-    )
+    TABLE_WIDTH = 1100
+    TABLE_HEIGHT = 650
 
     canvas = Image.new(
         "RGBA",
         (
-            width + 40,
-            height + 40,
+            TABLE_WIDTH,
+            TABLE_HEIGHT,
         ),
-        (20, 30, 25, 255),
+        (18, 105, 63, 255),
     )
 
-    x = 20
+    draw = ImageDraw.Draw(canvas)
 
-    for image in images:
+    # Dark outer table border
+    draw.rounded_rectangle(
+        (
+            8,
+            8,
+            TABLE_WIDTH - 8,
+            TABLE_HEIGHT - 8,
+        ),
+        radius=28,
+        fill=(10, 55, 35, 255),
+    )
 
-        canvas.alpha_composite(
-            image,
-            (x, 20),
+    # Green felt
+    draw.rounded_rectangle(
+        (
+            18,
+            18,
+            TABLE_WIDTH - 18,
+            TABLE_HEIGHT - 18,
+        ),
+        radius=22,
+        fill=(20, 125, 75, 255),
+    )
+
+    # Subtle inner felt border
+    draw.rounded_rectangle(
+        (
+            32,
+            32,
+            TABLE_WIDTH - 32,
+            TABLE_HEIGHT - 32,
+        ),
+        radius=18,
+        outline=(65, 160, 105, 255),
+        width=3,
+    )
+
+    # --------------------------------------------------------
+    # LOAD PLAYER CARDS
+    # --------------------------------------------------------
+
+    player_images = []
+
+    for card in player_cards:
+
+        if card == "hidden":
+            continue
+
+        path = card_path(card)
+
+        if not path.exists():
+            continue
+
+        try:
+            image = Image.open(path).convert("RGBA")
+
+            image = _fit_blackjack_card(
+                image,
+                CARD_WIDTH,
+                CARD_HEIGHT,
+            )
+
+            player_images.append(image)
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
+    # LOAD DEALER CARDS
+    # --------------------------------------------------------
+
+    dealer_images = []
+
+    for index, card in enumerate(dealer_cards):
+
+        if card == "hidden":
+            if hidden:
+
+                dealer_images.append(
+                    _create_blackjack_card_back(
+                        CARD_WIDTH,
+                        CARD_HEIGHT,
+                    )
+                )
+
+            continue
+
+        path = card_path(card)
+
+        if not path.exists():
+            continue
+
+        try:
+            image = Image.open(path).convert("RGBA")
+
+            image = _fit_blackjack_card(
+                image,
+                CARD_WIDTH,
+                CARD_HEIGHT,
+            )
+
+            dealer_images.append(image)
+
+        except Exception:
+            continue
+
+    if not player_images and not dealer_images:
+        return None
+
+    # --------------------------------------------------------
+    # CARD PLACEMENT
+    # --------------------------------------------------------
+
+    def place_cards(
+        images: list[Image.Image],
+        y: int,
+    ):
+
+        if not images:
+            return
+
+        spacing = 18
+
+        total_width = (
+            sum(image.width for image in images)
+            + spacing * (len(images) - 1)
         )
 
-        x += image.width
+        start_x = (
+            TABLE_WIDTH - total_width
+        ) // 2
+
+        x = start_x
+
+        for image in images:
+
+            # Shadow
+            shadow = Image.new(
+                "RGBA",
+                image.size,
+                (0, 0, 0, 0),
+            )
+
+            shadow_draw = ImageDraw.Draw(
+                shadow
+            )
+
+            shadow_draw.rounded_rectangle(
+                (
+                    5,
+                    7,
+                    image.width - 1,
+                    image.height - 1,
+                ),
+                radius=10,
+                fill=(0, 0, 0, 80),
+            )
+
+            canvas.alpha_composite(
+                shadow,
+                (
+                    x + 4,
+                    y + 7,
+                ),
+            )
+
+            canvas.alpha_composite(
+                image,
+                (
+                    x,
+                    y,
+                ),
+            )
+
+            x += image.width + spacing
+
+    # Dealer cards at top
+    place_cards(
+        dealer_images,
+        55,
+    )
+
+    # Player cards at bottom
+    place_cards(
+        player_images,
+        TABLE_HEIGHT - CARD_HEIGHT - 55,
+    )
+
+    # --------------------------------------------------------
+    # CENTER DIVIDER
+    # --------------------------------------------------------
+
+    center_y = TABLE_HEIGHT // 2
+
+    draw.line(
+        (
+            110,
+            center_y,
+            TABLE_WIDTH - 110,
+            center_y,
+        ),
+        fill=(100, 180, 130, 110),
+        width=2,
+    )
+
+    # --------------------------------------------------------
+    # EXPORT
+    # --------------------------------------------------------
 
     output = io.BytesIO()
 
     canvas.save(
         output,
         format="PNG",
+        optimize=True,
     )
 
     output.seek(0)
@@ -7091,8 +7326,14 @@ class BlackjackView(ButtonView):
         if interaction.user.id != self.user_id:
 
             await interaction.response.send_message(
-                "This Blackjack game belongs to another player.",
-                ephemeral=False,
+                embed=base_embed(
+                    title="Blackjack",
+                    description=(
+                        "This Blackjack game belongs "
+                        "to another player."
+                    ),
+                    color=0xED4245,
+                ),
             )
 
             return False
@@ -7229,12 +7470,12 @@ async def _blackjack_finish(
     embed = base_embed(
         title=title,
         description=(
-            f"**Blackjack** • "
-            f"Bet {money(game['bet'])} "
-            f"**{title.split('—')[-1].strip()} "
-            f"{money(game['bet'])}**\n\n"
+            f"**Blackjack**\n\n"
+            f"Bet: **{money(game['bet'])}**\n"
+            f"Result: **{title.split('—')[-1].strip()}**\n\n"
             f"Player: **{player_total}**\n"
             f"Dealer: **{dealer_total}**\n\n"
+            f"Game #{game['game_id']}\n"
             f"Server hash: `{game['server_hash']}`\n"
             f"Client seed: `{game['client_seed']}`\n"
             f"Nonce: `{game['nonce']}`"
@@ -7242,17 +7483,29 @@ async def _blackjack_finish(
         color=color,
     )
 
-    kwargs = {
-        "embed": embed,
-        "view": view,
-    }
+    # IMPORTANT:
+    # edit_message DOES NOT accept file=
+    # It must use attachments=[file].
 
     if file:
-        kwargs["file"] = file
 
-    await interaction.response.edit_message(
-        **kwargs
-    )
+        embed.set_image(
+            url="attachment://blackjack.png"
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=view,
+            attachments=[file],
+        )
+
+    else:
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=view,
+            attachments=[],
+        )
 
     self.active_games.pop(
         game["user_id"],
@@ -7303,21 +7556,29 @@ async def _blackjack_hit(
         description=(
             f"Player total: **{total}**\n"
             f"Dealer: **?**\n\n"
-            "Choose Hit or Stand."
+            "Choose **Hit**, **Stand**, or **Double**."
         ),
     )
 
-    kwargs = {
-        "embed": embed,
-        "view": view,
-    }
-
     if file:
-        kwargs["file"] = file
 
-    await interaction.response.edit_message(
-        **kwargs
-    )
+        embed.set_image(
+            url="attachment://blackjack.png"
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=view,
+            attachments=[file],
+        )
+
+    else:
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=view,
+            attachments=[],
+        )
 
 
 CasinoBot.blackjack_hit = _blackjack_hit
@@ -7390,8 +7651,14 @@ async def _blackjack_double(
     if len(game["player"]) != 2:
 
         await interaction.response.send_message(
-            "Double is only available on your first two cards.",
-            ephemeral=False,
+            embed=base_embed(
+                title="Blackjack",
+                description=(
+                    "Double is only available "
+                    "on your first two cards."
+                ),
+                color=0xED4245,
+            ),
         )
 
         return
@@ -7407,8 +7674,11 @@ async def _blackjack_double(
     if not success:
 
         await interaction.response.send_message(
-            "You Dont Have Enough Crypto",
-            ephemeral=False,
+            embed=base_embed(
+                title="Blackjack",
+                description="You Dont Have Enough Crypto",
+                color=0xED4245,
+            ),
         )
 
         return
@@ -7463,8 +7733,13 @@ async def blackjack(
     if value is None or value < MIN_BET:
 
         await interaction.response.send_message(
-            "Minimum Blackjack bet is **$0.10**.",
-            ephemeral=False,
+            embed=base_embed(
+                title="Blackjack",
+                description=(
+                    "Minimum Blackjack bet is **$0.10**."
+                ),
+                color=0xED4245,
+            ),
         )
 
         return
@@ -7478,8 +7753,11 @@ async def blackjack(
     if not success:
 
         await interaction.response.send_message(
-            "You Dont Have Enough Crypto",
-            ephemeral=False,
+            embed=base_embed(
+                title="Blackjack",
+                description="You Dont Have Enough Crypto",
+                color=0xED4245,
+            ),
         )
 
         return
@@ -7553,17 +7831,24 @@ async def blackjack(
         ),
     )
 
-    kwargs = {
-        "embed": embed,
-        "view": view,
-    }
-
     if file:
-        kwargs["file"] = file
 
-    await interaction.response.send_message(
-        **kwargs
-    )
+        embed.set_image(
+            url="attachment://blackjack.png"
+        )
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            file=file,
+        )
+
+    else:
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+        )
 
 
 bot.tree.add_command(
@@ -7573,7 +7858,6 @@ bot.tree.add_command(
         callback=blackjack.callback,
     )
 )
-
 
 # ============================================================
 # /HOUSEBALANCE
