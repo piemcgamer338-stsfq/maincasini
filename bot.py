@@ -372,7 +372,7 @@ class WalletView(ButtonView):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This wallet belongs to another user.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return False
 
@@ -395,7 +395,7 @@ class WalletView(ButtonView):
                 self.bot,
                 interaction.user.id,
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
     @discord.ui.button(
@@ -437,7 +437,7 @@ class DepositCurrencyView(ButtonView):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This deposit menu belongs to another user.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return False
 
@@ -604,7 +604,7 @@ class DiceSetupView(ButtonView):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This dice setup belongs to another player.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return False
 
@@ -683,7 +683,7 @@ class DiceCountView(ButtonView):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This dice setup belongs to another player.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return False
 
@@ -888,7 +888,7 @@ class MinesView(ButtonView):
             if interaction.user.id != self.game.user_id:
                 await interaction.response.send_message(
                     "This Mines game belongs to another player.",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
                 return
 
@@ -909,7 +909,7 @@ class MinesView(ButtonView):
         if interaction.user.id != self.game.user_id:
             await interaction.response.send_message(
                 "This Mines game belongs to another player.",
-                ephemeral=True,
+                ephemeral=False,
             )
             return
 
@@ -1207,6 +1207,43 @@ class CasinoBot(commands.Bot):
     # DATABASE GAME SETTLEMENT
     # ========================================================
 
+    async def send_win_log(
+        self,
+        user_id: int,
+        payout: Decimal,
+        bet: Decimal,
+        game: str,
+    ):
+        """Send a public win notification to the configured win-log channel."""
+        if payout <= 0 or bet <= 0 or self.db is None:
+            return
+
+        try:
+            channel_id = await self.db.setting("winlog_channel_id", "0")
+            if not channel_id:
+                return
+
+            channel = self.get_channel(int(channel_id))
+            if channel is None:
+                try:
+                    channel = await self.fetch_channel(int(channel_id))
+                except Exception:
+                    return
+
+            multiplier = (
+                payout / bet
+            ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+            game_name = str(game).replace("_", " ").title()
+            tick = getattr(config, "E", {}).get("win", "<:Tick:1550062215220961370>")
+
+            await channel.send(
+                f"{tick} <@{user_id}> has won **{money(payout)}** "
+                f"in **{game_name}** **{multiplier:.2f}x**"
+            )
+        except Exception as exc:
+            print(f"[WIN LOG] {exc}")
+
     async def settle_win(
         self,
         user_id: int,
@@ -1219,6 +1256,13 @@ class CasinoBot(commands.Bot):
             user_id,
             bet,
             payout,
+            game,
+        )
+
+        await self.send_win_log(
+            user_id,
+            payout,
+            bet,
             game,
         )
 
@@ -1373,7 +1417,7 @@ class CasinoBot(commands.Bot):
                     f"Please wait "
                     f"**{error.retry_after:.1f}s**."
                 ),
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1384,7 +1428,7 @@ class CasinoBot(commands.Bot):
                 "Something went wrong",
                 "Please try again in a moment.",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
     # ========================================================
@@ -1408,7 +1452,7 @@ class CasinoBot(commands.Bot):
 
             await interaction.response.send_message(
                 "A deposit address is not available yet.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1426,7 +1470,7 @@ class CasinoBot(commands.Bot):
             await interaction.response.send_message(
                 "Your deposit address is sent to your DMs. "
                 "Deposits are credited only after blockchain confirmation.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
         except discord.Forbidden:
@@ -1434,7 +1478,7 @@ class CasinoBot(commands.Bot):
             await interaction.response.send_message(
                 "I couldn't DM you. Please enable DMs "
                 "from this server and try again.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
     async def get_deposit_address(
@@ -1521,7 +1565,7 @@ class CasinoBot(commands.Bot):
 
             await interaction.response.send_message(
                 "Supported currencies: LTC, SOL, ETH, USDT.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1530,7 +1574,7 @@ class CasinoBot(commands.Bot):
 
             await interaction.response.send_message(
                 "Enter a valid withdrawal amount.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1547,7 +1591,7 @@ class CasinoBot(commands.Bot):
             await interaction.response.send_message(
                 f"Minimum {currency} withdrawal is "
                 f"{money(minimum)}.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1559,7 +1603,7 @@ class CasinoBot(commands.Bot):
 
             await interaction.response.send_message(
                 "That withdrawal address is invalid.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1573,7 +1617,7 @@ class CasinoBot(commands.Bot):
             await interaction.response.send_message(
                 "You Dont Have Enough Crypto\n"
                 "-# use /deposit to top-up Funds",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -1594,7 +1638,7 @@ class CasinoBot(commands.Bot):
 
                 await interaction.response.send_message(
                     "Your withdrawal could not be created.",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
 
                 return
@@ -1612,7 +1656,7 @@ class CasinoBot(commands.Bot):
 
                 await interaction.response.send_message(
                     "Your withdrawal could not be processed.",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
 
                 return
@@ -1620,10 +1664,9 @@ class CasinoBot(commands.Bot):
         await interaction.response.send_message(
             f"## Withdrawal Requested\n\n"
             f"**Amount:** {money(amount)}\n"
-            f"**Currency:** {currency}\n"
-            f"**Address:** `{address}`\n\n"
+            f"**Currency:** {currency}\n\n"
             "Your withdrawal is pending processing.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
     def valid_withdraw_address(
@@ -1792,7 +1835,7 @@ async def require_database(
         await bot.safe_send(
             interaction,
             content="Database is not ready yet.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return False
@@ -1813,7 +1856,7 @@ async def require_bet_amount(
                 "Invalid Bet",
                 f"The minimum bet is **{money(MIN_BET)}**.",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return False
@@ -1839,7 +1882,7 @@ async def require_sufficient_balance(
                 "You Dont Have Enough Crypto\n"
                 "-# use /deposit to top-up Funds",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return False
@@ -1879,7 +1922,7 @@ async def balance_command(
             bot,
             interaction.user.id,
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -1901,7 +1944,7 @@ async def deposit_command(
             bot,
             interaction.user.id,
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -1979,7 +2022,8 @@ HELP_ADMIN = (
     "`/ranksetup` — Configure rank roles\n"
     "`/code` — Create a promotional code\n"
     "`/race start` — Start a wager race\n"
-    "`/race end` — End a wager race"
+    "`/race end` — End a wager race\n"
+    "`/winlogs` — Set the win-log channel"
 )
 
 
@@ -2003,7 +2047,7 @@ async def help_command(
 
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2079,7 +2123,7 @@ async def howtoplay_command(
 
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2165,7 +2209,7 @@ async def stats_command(
 
         await interaction.response.send_message(
             "Your account could not be found.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -2229,7 +2273,7 @@ async def stats_command(
 
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2349,7 +2393,7 @@ async def affiliates_command(
 
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2388,7 +2432,7 @@ async def affiliate_claim_command(
                     "Affiliate Earnings Claimed",
                     f"You received **{money(amount)}**.",
                 ),
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -2398,7 +2442,7 @@ async def affiliate_claim_command(
             "Affiliate Earnings",
             "You have $0 to claim.",
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2467,7 +2511,7 @@ async def rewardinfo(
             text,
             0x00E676,
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 # ============================================================
 # /AFFILIATEINFO
@@ -2498,7 +2542,7 @@ async def affiliateinfo(
             text,
             0x00E676,
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 # /HISTORY
@@ -2623,7 +2667,7 @@ async def history_command(
 
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2650,14 +2694,14 @@ async def tip_command(
     if user.bot:
         await interaction.response.send_message(
             "You cannot tip a bot.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
     if user.id == sender_id:
         await interaction.response.send_message(
             "You cannot tip yourself.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -2668,14 +2712,14 @@ async def tip_command(
     if value is None:
         await interaction.response.send_message(
             "Enter a valid amount such as `1`, `1$`, `0.10`, or `0.10$`.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
     if value <= 0:
         await interaction.response.send_message(
             "The tip must be greater than $0.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -2687,7 +2731,7 @@ async def tip_command(
         await interaction.response.send_message(
             "You Dont Have Enough Crypto\n"
             "-# use /deposit to top-up Funds",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -2729,7 +2773,7 @@ async def tip_command(
 
                 await interaction.response.send_message(
                     "You Dont Have Enough Crypto",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
                 return
 
@@ -2843,7 +2887,7 @@ async def ranks_command(
             "\n".join(lines),
             0x00E676,
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2900,7 +2944,7 @@ async def rank_rewards_command(
 
         await interaction.response.send_message(
             "You have no rank rewards available.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -2943,7 +2987,7 @@ async def rank_rewards_command(
             user_id,
             available[0][0],
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2976,7 +3020,7 @@ class RankRewardView(ButtonView):
 
             await interaction.response.send_message(
                 "This reward belongs to another user.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -3013,7 +3057,7 @@ class RankRewardView(ButtonView):
             await interaction.response.send_message(
                 "This reward has already been claimed "
                 "or is not available.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -3212,7 +3256,7 @@ async def mines_click_impl(
 
         await interaction.response.send_message(
             "This Mines game has already ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3221,7 +3265,7 @@ async def mines_click_impl(
 
         await interaction.response.send_message(
             "That tile is already open.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3362,7 +3406,7 @@ async def mines_cashout_impl(
 
         await interaction.response.send_message(
             "This Mines game has already ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3371,7 +3415,7 @@ async def mines_cashout_impl(
 
         await interaction.response.send_message(
             "Open at least one safe tile before cashing out.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3500,7 +3544,7 @@ async def mines_command(
                 f"Please wait **{cooldown:.1f}s** "
                 "before starting another game."
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -3514,7 +3558,7 @@ async def mines_command(
                 "Invalid Bet",
                 f"Minimum bet is {money(MIN_MINES_BET)}.",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3531,7 +3575,7 @@ async def mines_command(
                 "You Dont Have Enough Crypto\n"
                 "-# use /deposit to top-up Funds"
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3543,7 +3587,7 @@ async def mines_command(
             content=(
                 "You already have an active Mines game."
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3552,7 +3596,7 @@ async def mines_command(
         await bot.safe_send(
             interaction,
             content="Choose between 1 and 20 mines.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -3567,7 +3611,7 @@ async def mines_command(
         await bot.safe_send(
             interaction,
             content="Your balance changed. Please try again.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3685,7 +3729,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "This rain has already ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3696,7 +3740,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "You need the verified role to join rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3710,7 +3754,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "You need at least **$1** wagered today to join rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3719,7 +3763,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "You already joined this rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3730,7 +3774,7 @@ async def join_rain(
 
     await interaction.response.send_message(
         "You joined the rain.",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -3907,7 +3951,7 @@ async def rain_command(
         await bot.safe_send(
             interaction,
             content="Enter a valid rain amount.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3924,7 +3968,7 @@ async def rain_command(
                 "You Dont Have Enough Crypto\n"
                 "-# use /deposit to top-up Funds"
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -3941,7 +3985,7 @@ async def rain_command(
         await bot.safe_send(
             interaction,
             content="Your balance changed. Please try again.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -4049,7 +4093,7 @@ async def coinflip(
                 f"Please wait **{cooldown:.1f}s** "
                 "before playing again."
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4070,7 +4114,7 @@ async def coinflip(
                 "Invalid Amount",
                 "Enter a valid amount such as `$1`, `1`, or `0.10`.",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4082,7 +4126,7 @@ async def coinflip(
                 "Minimum Bet",
                 f"The minimum bet is **{money(MIN_BET)}**.",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4094,7 +4138,7 @@ async def coinflip(
                 "You Dont Have Enough Crypto\n"
                 "-# use /deposit to top-up Funds"
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4120,7 +4164,7 @@ async def coinflip(
         await bot.safe_send(
             interaction,
             content="Your balance changed. Please try again.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4293,7 +4337,7 @@ async def cfred(
 
         await interaction.response.send_message(
             "Only the bot owner can use this command.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4303,7 +4347,7 @@ async def cfred(
 
         await interaction.response.send_message(
             "Sticker ID must be a number.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4314,7 +4358,7 @@ async def cfred(
 
     await interaction.response.send_message(
         f"Red coinflip sticker set to `{value}`.",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -4336,7 +4380,7 @@ async def cfblue(
 
         await interaction.response.send_message(
             "Only the bot owner can use this command.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4346,7 +4390,7 @@ async def cfblue(
 
         await interaction.response.send_message(
             "Sticker ID must be a number.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4357,7 +4401,7 @@ async def cfblue(
 
     await interaction.response.send_message(
         f"Blue coinflip sticker set to `{value}`.",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -4452,7 +4496,7 @@ async def mines_click(
 
         await interaction.response.send_message(
             "This Mines game has ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4460,7 +4504,7 @@ async def mines_click(
 
         await interaction.response.send_message(
             "That tile is already open.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4599,7 +4643,7 @@ async def mines_cashout(
 
         await interaction.response.send_message(
             "This Mines game has already ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4607,7 +4651,7 @@ async def mines_cashout(
 
         await interaction.response.send_message(
             "Open at least one tile before cashing out.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4792,7 +4836,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "This Rain has already ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4800,7 +4844,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "Rain is only available in servers.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4808,7 +4852,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "You already joined this Rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4820,7 +4864,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             "You must be a server member to join.",
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4833,7 +4877,7 @@ async def join_rain(
 
         await interaction.response.send_message(
             reason,
-            ephemeral=True,
+            ephemeral=False,
         )
         return
 
@@ -4843,7 +4887,7 @@ async def join_rain(
 
     await interaction.response.send_message(
         "You joined the Rain!",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -5175,7 +5219,7 @@ async def rakeback(
         await interaction.response.send_message(
             "You Dont have any rakeback avalable . "
             "try again later",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -5209,7 +5253,7 @@ async def rakeback(
         await interaction.response.send_message(
             "You Dont have any rakeback avalable . "
             "try again later",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -5511,7 +5555,7 @@ async def retrigger(
 
         await interaction.response.send_message(
             "Your active game has been restored.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -5520,7 +5564,7 @@ async def retrigger(
 
         await interaction.response.send_message(
             "Your Mines game is still active.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -5529,14 +5573,14 @@ async def retrigger(
 
         await interaction.response.send_message(
             "Your Dice game is still active.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
 
     await interaction.response.send_message(
         "No recoverable game was found.",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -5560,14 +5604,14 @@ async def fix_dice(
 
         await interaction.response.send_message(
             "No active Dice game was found.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
 
     await interaction.response.send_message(
         "Your active Dice game is available again.",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -5599,7 +5643,7 @@ class PrivateChannelView(ButtonView):
 
             await interaction.response.send_message(
                 "Only the channel owner can use these controls.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return False
@@ -5656,7 +5700,7 @@ class PrivateChannelView(ButtonView):
 
         await interaction.response.send_message(
             "Deleting this private channel.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         await channel.delete(
@@ -5709,7 +5753,7 @@ class PrivateMemberModal(discord.ui.Modal):
 
             await interaction.response.send_message(
                 "Channel not found.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -5724,7 +5768,7 @@ class PrivateMemberModal(discord.ui.Modal):
 
             await interaction.response.send_message(
                 "Invalid user ID.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -5743,7 +5787,7 @@ class PrivateMemberModal(discord.ui.Modal):
 
                 await interaction.response.send_message(
                     "Member not found.",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
 
                 return
@@ -5767,7 +5811,7 @@ class PrivateMemberModal(discord.ui.Modal):
                 if self.add_member_mode
                 else f"{member.mention} was removed."
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
 
@@ -5788,7 +5832,7 @@ async def private_channel(
         await interaction.response.send_message(
             "You need at least **$25.00** balance "
             "to create a private channel.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -5799,7 +5843,7 @@ async def private_channel(
 
         await interaction.response.send_message(
             "This command can only be used in a server.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -5838,7 +5882,7 @@ async def private_channel(
 
     await interaction.response.send_message(
         f"Private channel created: {channel.mention}",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -5975,7 +6019,7 @@ async def claim(
 
             await interaction.response.send_message(
                 "That code is invalid, expired, or already claimed.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6004,7 +6048,7 @@ async def claim(
 
             await interaction.response.send_message(
                 "Invalid promo code.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6013,7 +6057,7 @@ async def claim(
 
             await interaction.response.send_message(
                 "That code has expired.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6033,7 +6077,7 @@ async def claim(
 
             await interaction.response.send_message(
                 "You already claimed this code.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6083,6 +6127,41 @@ async def claim(
 
 
 # ============================================================
+# /WINLOGS
+# ============================================================
+
+@bot.tree.command(
+    name="winlogs",
+    description="Set the channel where all wins are logged.",
+)
+@app_commands.describe(
+    channel="The server channel to receive win logs.",
+)
+@owner_only()
+async def winlogs_command(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+):
+
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used in a server.",
+            ephemeral=False,
+        )
+        return
+
+    await bot.db.set_setting(
+        "winlog_channel_id",
+        str(channel.id),
+    )
+
+    await interaction.response.send_message(
+        f"Win logs are now enabled in {channel.mention}.",
+        ephemeral=False,
+    )
+
+
+# ============================================================
 # /CODE
 # ============================================================
 
@@ -6111,7 +6190,7 @@ async def code_command(
 
         await interaction.response.send_message(
             "Invalid amount.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6120,7 +6199,7 @@ async def code_command(
 
         await interaction.response.send_message(
             "Max uses must be greater than zero.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6129,7 +6208,7 @@ async def code_command(
 
         await interaction.response.send_message(
             "Requirement must be 1, 2, or 3.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6174,7 +6253,7 @@ async def code_command(
                 f"{requirement_data['name']}"
             ),
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -6198,7 +6277,7 @@ async def _join_rain(
 
         await interaction.response.send_message(
             "This rain has ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6207,7 +6286,7 @@ async def _join_rain(
 
         await interaction.response.send_message(
             "The rain creator cannot join their own rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6228,7 +6307,7 @@ async def _join_rain(
 
             await interaction.response.send_message(
                 "You need the verified role to join rain.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6253,7 +6332,7 @@ async def _join_rain(
         await interaction.response.send_message(
             "You must wager at least **$1 today** "
             "to join rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6262,7 +6341,7 @@ async def _join_rain(
 
         await interaction.response.send_message(
             "You already joined this rain.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6273,7 +6352,7 @@ async def _join_rain(
 
     await interaction.response.send_message(
         "You joined the rain!",
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -6475,7 +6554,7 @@ class FrogRunView(ButtonView):
 
                 await interaction.response.send_message(
                     "This Frog Run belongs to another player.",
-                    ephemeral=True,
+                    ephemeral=False,
                 )
 
                 return
@@ -6497,7 +6576,7 @@ class FrogRunView(ButtonView):
 
             await interaction.response.send_message(
                 "This game has ended.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6506,7 +6585,7 @@ class FrogRunView(ButtonView):
 
             await interaction.response.send_message(
                 "This game belongs to another player.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return
@@ -6552,7 +6631,7 @@ async def _frog_step(
 
         await interaction.response.send_message(
             "This game has ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6659,7 +6738,7 @@ async def frog_run(
 
         await interaction.response.send_message(
             "Minimum Frog Run bet is $0.10.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6673,7 +6752,7 @@ async def frog_run(
 
         await interaction.response.send_message(
             f"Please wait **{remaining:.1f}s**.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6688,7 +6767,7 @@ async def frog_run(
 
         await interaction.response.send_message(
             "You Dont Have Enough Crypto",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6737,7 +6816,7 @@ async def dice(
 
         await interaction.response.send_message(
             "Minimum bet is **$0.10**.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6750,7 +6829,7 @@ async def dice(
 
         await interaction.response.send_message(
             "You Dont Have Enough Crypto",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6873,7 +6952,7 @@ async def roll(
 
         await interaction.response.send_message(
             "You don't have an active Dice game.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -6884,7 +6963,7 @@ async def roll(
 
         await interaction.response.send_message(
             "You have already rolled all your dice.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7077,7 +7156,7 @@ async def _mines_click(
 
         await interaction.response.send_message(
             "This game has ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7086,7 +7165,7 @@ async def _mines_click(
 
         await interaction.response.send_message(
             "That tile is already open.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7234,7 +7313,7 @@ async def _mines_cashout(
 
         await interaction.response.send_message(
             "This game has ended.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7243,7 +7322,7 @@ async def _mines_cashout(
 
         await interaction.response.send_message(
             "Open at least one tile before cashing out.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7506,7 +7585,7 @@ class BlackjackView(ButtonView):
 
             await interaction.response.send_message(
                 "This Blackjack game belongs to another player.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
             return False
@@ -7805,7 +7884,7 @@ async def _blackjack_double(
 
         await interaction.response.send_message(
             "Double is only available on your first two cards.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7822,7 +7901,7 @@ async def _blackjack_double(
 
         await interaction.response.send_message(
             "You Dont Have Enough Crypto",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7878,7 +7957,7 @@ async def blackjack(
 
         await interaction.response.send_message(
             "Minimum Blackjack bet is **$0.10**.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -7893,7 +7972,7 @@ async def blackjack(
 
         await interaction.response.send_message(
             "You Dont Have Enough Crypto",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -8016,7 +8095,7 @@ async def housebalance(
                 "House Balance",
                 "House balance is not configured yet.",
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -8059,7 +8138,7 @@ async def addbal(
 
         await interaction.response.send_message(
             "Invalid amount.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -8096,7 +8175,7 @@ async def ranksetup(
 
         await interaction.response.send_message(
             "This command can only be used in a server.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -8275,7 +8354,7 @@ async def on_app_command_error(
         await bot.safe_send(
             interaction,
             content="You do not have permission to use this command.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -8288,7 +8367,7 @@ async def on_app_command_error(
         await bot.safe_send(
             interaction,
             content="One of the supplied values is invalid.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         return
@@ -8299,7 +8378,7 @@ async def on_app_command_error(
             "Something went wrong",
             "Please try again.",
         ),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
