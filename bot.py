@@ -27,6 +27,7 @@ from discord.ext import commands, tasks
 
 import config
 from database import Database
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ============================================================
