@@ -271,6 +271,15 @@ class Database:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS house (
+                    id INTEGER PRIMARY KEY,
+                    balance NUMERIC(20,8) NOT NULL DEFAULT 0
+                );
+
+                INSERT INTO house(id, balance)
+                VALUES(1, 0)
+                ON CONFLICT(id) DO NOTHING;
+
                 CREATE TABLE IF NOT EXISTS races (
                     id BIGSERIAL PRIMARY KEY,
 
@@ -375,7 +384,26 @@ class Database:
             # -------------------------------------------------
 
             migrations = [
+                                """
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS
+                balance_after NUMERIC(20,8)
+                """,
+
                 """
+                CREATE TABLE IF NOT EXISTS house (
+                    id INTEGER PRIMARY KEY,
+                    balance NUMERIC(20,8) NOT NULL DEFAULT 0
+                )
+                """,
+
+                """
+                INSERT INTO house(id, balance)
+                VALUES(1, 0)
+                ON CONFLICT(id) DO NOTHING
+                """,
+
+"""
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS
                 lifetime_withdraw NUMERIC(20,8)
