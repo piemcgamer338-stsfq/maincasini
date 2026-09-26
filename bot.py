@@ -976,7 +976,7 @@ class CasinoBot(commands.Bot):
 
         self.db: Optional[Database] = None
 
-        self.http: Optional[aiohttp.ClientSession] = None
+        self.http_session: Optional[aiohttp.ClientSession] = None
 
         self.started_at = datetime.now(timezone.utc)
 
@@ -1253,7 +1253,7 @@ class CasinoBot(commands.Bot):
 
         await self.db.connect()
 
-        self.http = aiohttp.ClientSession()
+        self.http_session = aiohttp.ClientSession()
 
         self.add_view(
             RainView(
@@ -1288,8 +1288,9 @@ class CasinoBot(commands.Bot):
             except asyncio.CancelledError:
                 pass
 
-        if self.http:
-            await self.http.close()
+        if self.http_session:
+            await self.http_session.close()
+            self.http_session = None
 
         if self.db:
             await self.db.close()
@@ -1697,7 +1698,7 @@ class CasinoBot(commands.Bot):
         if not endpoint:
             return
 
-        if not self.http:
+        if not self.http_session:
             return
 
         headers = {}
@@ -1713,7 +1714,7 @@ class CasinoBot(commands.Bot):
                 f"Bearer {api_key}"
             )
 
-        async with self.http.get(
+        async with self.http_session.get(
             endpoint,
             headers=headers,
             timeout=aiohttp.ClientTimeout(
