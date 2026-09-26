@@ -446,7 +446,6 @@ class DepositCurrencyView(ButtonView):
     @discord.ui.button(
         label="LTC",
         style=discord.ButtonStyle.secondary,
-        emoji="Ł",
         custom_id="deposit_ltc",
     )
     async def ltc_button(
@@ -463,7 +462,6 @@ class DepositCurrencyView(ButtonView):
     @discord.ui.button(
         label="SOL",
         style=discord.ButtonStyle.secondary,
-        emoji="◎",
         custom_id="deposit_sol",
     )
     async def sol_button(
@@ -1154,7 +1152,7 @@ class CasinoBot(commands.Bot):
     # USER / BALANCE
     # ========================================================
 
-    async def get_user(
+    async def get_db_user(
         self,
         user_id: int,
     ):
@@ -1173,7 +1171,7 @@ class CasinoBot(commands.Bot):
         user_id: int,
     ) -> Decimal:
 
-        row = await self.get_user(
+        row = await self.get_db_user(
             user_id
         )
 
@@ -1296,6 +1294,26 @@ class CasinoBot(commands.Bot):
         )
 
         await self.db.connect()
+
+        # Compatibility migrations for databases created by older bot versions.
+        # These are idempotent and keep existing balances/data intact.
+        async with self.db.pool.acquire() as connection:
+            await connection.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ
+                NOT NULL DEFAULT NOW()
+            """)
+            await connection.execute("""
+                CREATE TABLE IF NOT EXISTS house (
+                    id INTEGER PRIMARY KEY,
+                    balance NUMERIC(20,4) NOT NULL DEFAULT 0
+                )
+            """)
+            await connection.execute("""
+                INSERT INTO house(id, balance)
+                VALUES(1, 0)
+                ON CONFLICT(id) DO NOTHING
+            """)
 
         self.http_session = aiohttp.ClientSession()
 
@@ -2201,7 +2219,7 @@ async def stats_command(
     if not await require_database(interaction):
         return
 
-    row = await bot.get_user(
+    row = await bot.get_db_user(
         interaction.user.id
     )
 
@@ -2905,7 +2923,7 @@ async def rank_rewards_command(
 
     user_id = interaction.user.id
 
-    row = await bot.get_user(
+    row = await bot.get_db_user(
         user_id
     )
 
@@ -3037,7 +3055,6 @@ class RankRewardView(ButtonView):
             success = await self.bot.db.claim_rank_reward(
                 self.user_id,
                 self.rank_index,
-                rank["reward"],
             )
 
         else:
@@ -3678,7 +3695,7 @@ async def rain_daily_wager(
             )
         )
 
-    row = await bot_instance.get_user(
+    row = await bot_instance.get_db_user(
         user_id
     )
 
@@ -5206,7 +5223,7 @@ async def rakeback(
     interaction: discord.Interaction,
 ):
 
-    row = await bot.get_user(
+    row = await bot.get_db_user(
         interaction.user.id
     )
 
@@ -8242,7 +8259,7 @@ async def check_rank_up(
     user_id: int,
 ):
 
-    row = await bot.get_user(
+    row = await bot.get_db_user(
         user_id
     )
 
