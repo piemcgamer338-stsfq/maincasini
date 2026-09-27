@@ -1055,36 +1055,33 @@ class Database:
 
         return row["address"] if row else None
 
-    async def save_deposit_address(
-        self,
-        user_id: int,
-        currency: str,
-        address: str,
-        derivation_index: Optional[int] = None,
-    ):
+   async def save_deposit_address(
+    self,
+    user_id: int,
+    currency: str,
+    address: str,
+    derivation_index: Optional[int] = None,
+):
+    currency = currency.upper()
 
-        return await self.pool.fetchrow(
-            """
-            INSERT INTO deposit_addresses(
-                user_id,
-                currency,
-                address,
-                derivation_index
-            )
-            VALUES($1,$2,$3,$4)
-            ON CONFLICT(user_id,currency)
-            DO UPDATE SET
-                address=EXCLUDED.address,
-                derivation_index=
-                    EXCLUDED.derivation_index
-            RETURNING *
-            """,
+    return await self.pool.fetchrow(
+        """
+        INSERT INTO deposit_addresses(
             user_id,
-            currency.upper(),
+            currency,
             address,
-            derivation_index,
+            derivation_index
         )
-
+        VALUES($1,$2,$3,$4)
+        ON CONFLICT(user_id,currency)
+        DO NOTHING
+        RETURNING *
+        """,
+        user_id,
+        currency,
+        address,
+        derivation_index,
+    )
     # =========================================================
     # DEPOSITS
     # =========================================================
