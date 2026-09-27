@@ -7808,6 +7808,20 @@ async def frog_run(interaction: discord.Interaction, amount: str):
 
 
 # ============================================================
+# DICE STICKERS
+# ============================================================
+
+DICE_STICKERS = {
+    1: 1553656486637338714,
+    2: 1553656882361794712,
+    3: 1553656975206649967,
+    4: 1553657070547378237,
+    5: 1553657144384163870,
+    6: 1553657240077209672,
+}
+
+
+# ============================================================
 # /DICE
 # ============================================================
 
@@ -7823,9 +7837,7 @@ async def dice(
     amount: str,
 ):
 
-    value = normalize_amount(
-        amount
-    )
+    value = normalize_amount(amount)
 
     if value is None or value < MIN_BET:
 
@@ -7866,7 +7878,7 @@ async def dice(
 
 
 # ============================================================
-# DICE GAME
+# START DICE GAME
 # ============================================================
 
 async def _start_dice_game(
@@ -7896,6 +7908,7 @@ async def _start_dice_game(
     game_id = self.next_game_id()
 
     server_seed = self.create_server_seed()
+
     server_hash = self.server_hash(
         server_seed
     )
@@ -7928,7 +7941,8 @@ async def _start_dice_game(
         else "Normal"
     )
 
-    await interaction.edit_original_response(
+    # Edit the original setup message.
+    game_message = await interaction.edit_original_response(
         content=(
             f"## Dice - /roll to proceed\n\n"
             f"Mode: **{dice_count} Rolls "
@@ -7936,10 +7950,16 @@ async def _start_dice_game(
             f"Bet: **{money(amount)}**\n"
             f"{interaction.user.mention} vs Bot\n\n"
             f"{interaction.user.display_name}: "
-            + " + ".join("?" for _ in range(dice_count))
+            + " + ".join(
+                "?"
+                for _ in range(dice_count)
+            )
             + " = ?\n"
             f"Bot: "
-            + " + ".join("?" for _ in range(dice_count))
+            + " + ".join(
+                "?"
+                for _ in range(dice_count)
+            )
             + " = ?\n\n"
             f"Game #{game_id} · Provably fair.\n"
             f"Server hash: `{server_hash}`"
@@ -7947,9 +7967,58 @@ async def _start_dice_game(
         view=None,
     )
 
+    # Save the actual Discord message ID.
+    self.active_dice[user_id]["message_id"] = (
+        game_message.id
+    )
+
 
 CasinoBot.start_dice_game = _start_dice_game
 
+
+# ============================================================
+# GET DICE STICKER
+# ============================================================
+
+async def get_dice_sticker(
+    number: int,
+):
+
+    sticker_id = DICE_STICKERS.get(
+        int(number)
+    )
+
+    if not sticker_id:
+        return None
+
+    try:
+
+        sticker = await bot.fetch_sticker(
+            sticker_id
+        )
+
+        print(
+            f"[DICE STICKER] "
+            f"{number} = {sticker.name} "
+            f"({sticker.id})"
+        )
+
+        return sticker
+
+    except Exception as e:
+
+        print(
+            f"[DICE STICKER ERROR] "
+            f"Number {number}: "
+            f"{type(e).__name__}: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# /ROLL
+# ============================================================
 
 @bot.tree.command(
     name="roll",
@@ -7983,6 +8052,35 @@ async def roll(
 
         return
 
+    # --------------------------------------------------------
+    # FIND ORIGINAL GAME MESSAGE
+    # --------------------------------------------------------
+
+    game_message = None
+
+    try:
+
+        channel = bot.get_channel(
+            game["channel_id"]
+        )
+
+        if channel is not None:
+
+            game_message = await channel.fetch_message(
+                game["message_id"]
+            )
+
+    except Exception as e:
+
+        print(
+            f"[DICE MESSAGE ERROR] "
+            f"{type(e).__name__}: {e}"
+        )
+
+    # --------------------------------------------------------
+    # PLAYER ROLL
+    # --------------------------------------------------------
+
     index = len(
         game["player_rolls"]
     )
@@ -8000,23 +8098,62 @@ async def roll(
         player_roll
     )
 
+    # Get sticker matching the actual roll.
+    sticker = await get_dice_sticker(
+        player_roll
+    )
+
+    # --------------------------------------------------------
+    # SEND ROLL RESULT
+    # --------------------------------------------------------
+
+    roll_number = len(
+        game["player_rolls"]
+    )
+
+    roll_content = (
+        f"🎲 **{interaction.user.display_name} "
+        f"rolled `{player_roll}` against BOT**\n\n"
+        f"Roll **{roll_number}/{game['dice_count']}**"
+    )
+
+    if game_message:
+
+        await interaction.response.send_message(
+            content=roll_content,
+            stickers=(
+                [sticker]
+                if sticker
+                else []
+            ),
+            reference=game_message,
+            mention_author=False,
+        )
+
+    else:
+
+        await interaction.response.send_message(
+            content=roll_content,
+            stickers=(
+                [sticker]
+                if sticker
+                else []
+            ),
+        )
+
+    # --------------------------------------------------------
+    # MORE ROLLS REQUIRED
+    # --------------------------------------------------------
+
     if len(
         game["player_rolls"]
     ) < game["dice_count"]:
 
-        player_text = " + ".join(
-            str(x)
-            for x in game["player_rolls"]
-        )
-
-        player_text += " + ?"
-
-        await interaction.response.send_message(
-            f"🎲 You rolled **{player_roll}**\n"
-            f"Current total: **{sum(game['player_rolls'])}**"
-        )
-
         return
+
+    # --------------------------------------------------------
+    # BOT ROLLS
+    # --------------------------------------------------------
 
     game["bot_rolls"] = [
         bot.fair_int(
@@ -8031,6 +8168,10 @@ async def roll(
             game["dice_count"]
         )
     ]
+
+    # --------------------------------------------------------
+    # TOTALS
+    # --------------------------------------------------------
 
     player_total = sum(
         game["player_rolls"]
@@ -8052,12 +8193,25 @@ async def roll(
             player_total > bot_total
         )
 
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
+
     if player_total == bot_total:
+
         result = "Push"
+
     elif player_wins:
+
         result = "Win"
+
     else:
+
         result = "Loss"
+
+    # --------------------------------------------------------
+    # PAYOUT
+    # --------------------------------------------------------
 
     if result == "Win":
 
@@ -8069,25 +8223,49 @@ async def roll(
             rounding=ROUND_DOWN,
         )
 
-        await bot.settle_win(
+        # Save the complete provably-fair information.
+        await bot.db.record_game(
             game["user_id"],
             game["amount"],
             payout,
             "dice",
+            result=result,
+            game_id=game["game_id"],
+            server_hash=game["server_hash"],
+            server_seed=game["server_seed"],
+            client_seed=game["client_seed"],
+            nonce=game["nonce"],
+        )
+
+        # Add payout after the original stake
+        # was already deducted.
+        await bot.db.change_balance(
+            game["user_id"],
+            payout,
+            kind="game_payout",
+            note="dice",
         )
 
     elif result == "Loss":
 
         payout = Decimal("0")
 
-        await bot.settle_loss(
+        await bot.db.record_game(
             game["user_id"],
             game["amount"],
+            Decimal("0"),
             "dice",
+            result=result,
+            game_id=game["game_id"],
+            server_hash=game["server_hash"],
+            server_seed=game["server_seed"],
+            client_seed=game["client_seed"],
+            nonce=game["nonce"],
         )
 
     else:
 
+        # Push returns the original stake.
         payout = game["amount"]
 
         await bot.db.change_balance(
@@ -8102,7 +8280,17 @@ async def roll(
             game["amount"],
             Decimal("0"),
             "dice_push",
+            result=result,
+            game_id=game["game_id"],
+            server_hash=game["server_hash"],
+            server_seed=game["server_seed"],
+            client_seed=game["client_seed"],
+            nonce=game["nonce"],
         )
+
+    # --------------------------------------------------------
+    # DISPLAY VALUES
+    # --------------------------------------------------------
 
     player_values = " + ".join(
         str(x)
@@ -8115,39 +8303,62 @@ async def roll(
     )
 
     if result == "Win":
+
         color = 0x57F287
+
     elif result == "Loss":
+
         color = 0xED4245
+
     else:
+
         color = 0xFEE75C
 
-    await interaction.response.send_message(
-        embed=base_embed(
-            title=f"Dice — {result}!",
-            description=(
-                f"**{interaction.user.display_name}:** "
-                f"{player_values} = **{player_total}**\n"
-                f"**Bot:** "
-                f"{bot_values} = **{bot_total}**\n\n"
-                f"**Bet:** {money(game['amount'])}\n"
-                f"**Payout:** {money(payout)}\n\n"
-                f"Game #{game['game_id']}\n"
-                f"Server hash: `{game['server_hash']}`\n"
-                f"Client seed: `{game['client_seed']}`\n"
-                f"Nonce: `{game['nonce']}`"
-            ),
-            color=color,
-        )
+    # --------------------------------------------------------
+    # FINAL GAME RESULT
+    # --------------------------------------------------------
+
+    final_embed = base_embed(
+        title=f"Dice — {result}!",
+        description=(
+            f"**{interaction.user.display_name}:** "
+            f"{player_values} = **{player_total}**\n"
+            f"**Bot:** "
+            f"{bot_values} = **{bot_total}**\n\n"
+            f"**Bet:** {money(game['amount'])}\n"
+            f"**Payout:** {money(payout)}\n\n"
+            f"Game #{game['game_id']}\n"
+            f"Server hash: `{game['server_hash']}`\n"
+            f"Client seed: `{game['client_seed']}`\n"
+            f"Nonce: `{game['nonce']}`"
+        ),
+        color=color,
     )
+
+    # Send the final result as a reply to the
+    # original Dice game message.
+    if game_message:
+
+        await interaction.followup.send(
+            embed=final_embed,
+            reference=game_message,
+            mention_author=False,
+        )
+
+    else:
+
+        await interaction.followup.send(
+            embed=final_embed,
+        )
+
+    # --------------------------------------------------------
+    # REMOVE ACTIVE GAME
+    # --------------------------------------------------------
 
     bot.active_dice.pop(
         interaction.user.id,
         None,
     )
-
-
-
-
 
 # ============================================================
 # /MINES
