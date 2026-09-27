@@ -6018,7 +6018,70 @@ async def code_command(
         ),
         ephemeral=False,
     )
+# ============================================================
+# /ADDBAL
+# ============================================================
 
+@bot.tree.command(
+    name="addbal",
+    description="Add balance to a user's wallet.",
+)
+@app_commands.describe(
+    user="The user who will receive the balance.",
+    amount="Amount to add.",
+)
+@owner_only()
+async def addbal_command(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    amount: str,
+):
+
+    if not await require_database(interaction):
+        return
+
+    value = normalize_amount(amount)
+
+    if value is None:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Amount",
+                "Please enter a valid amount greater than **$0.00**.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    success = await bot.db.change_balance(
+        user.id,
+        value,
+        kind="admin_addbal",
+        note=f"Added by {interaction.user.id}",
+    )
+
+    if not success:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Failed",
+                "The balance could not be updated.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    new_balance = await bot.get_balance(user.id)
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Balance Added",
+            (
+                f"**User:** {user.mention}\n"
+                f"**Added:** {money(value)}\n"
+                f"**New Balance:** {money(new_balance)}"
+            ),
+        ),
+        ephemeral=False,
+    )
 
 # ============================================================
 # /RAIN
