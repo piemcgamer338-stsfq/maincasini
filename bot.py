@@ -3343,6 +3343,271 @@ def rank_progress(
 
     return current, upcoming
 
+# ============================================================
+# /WITHDRAW
+# ============================================================
+
+@bot.tree.command(
+    name="withdraw",
+    description="Withdraw LTC or SOL.",
+)
+@app_commands.describe(
+    address="Your LTC or SOL withdrawal address.",
+    amount="USD amount to withdraw.",
+)
+async def withdraw_command(
+    interaction: discord.Interaction,
+    address: str,
+    amount: str,
+):
+
+    # ========================================================
+    # DATABASE
+    # ========================================================
+
+    if not await require_database(interaction):
+        return
+
+    user_id = interaction.user.id
+
+    address = address.strip()
+
+    # ========================================================
+    # AMOUNT
+    # ========================================================
+
+    value = normalize_amount(amount)
+
+    if value is None or value <= 0:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Amount",
+                "Enter a valid withdrawal amount.",
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # MINIMUM
+    # ========================================================
+
+    minimum = Decimal("0.50")
+
+    if value < minimum:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Minimum Withdrawal",
+                "The minimum withdrawal is **$0.50**.",
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # DETECT CURRENCY
+    # ========================================================
+
+    if address.lower().startswith("ltc1"):
+
+        currency = "LTC"
+
+    elif address.startswith(
+        (
+            "L",
+            "M",
+            "m",
+        )
+    ) and len(address) >= 26:
+
+        currency = "LTC"
+
+    elif 32 <= len(address) <= 50:
+
+        currency = "SOL"
+
+    else:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Address",
+                (
+                    "Enter a valid **LTC** or **SOL** "
+                    "withdrawal address."
+                ),
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # VALIDATE ADDRESS
+    # ========================================================
+
+    if not bot.valid_withdraw_address(
+        currency,
+        address,
+    ):
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Address",
+                f"The **{currency}** withdrawal address is invalid.",
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # LIFETIME DEPOSIT REQUIREMENT
+    # ========================================================
+
+    lifetime_deposit = await bot.db.pool.fetchval(
+        """
+        SELECT lifetime_deposit
+        FROM users
+        WHERE user_id=$1
+        """,
+        user_id,
+    )
+
+    lifetime_deposit = Decimal(
+        str(lifetime_deposit or 0)
+    )
+
+    if lifetime_deposit < Decimal("1"):
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Withdrawal Unavailable",
+                (
+                    "You must have deposited at least "
+                    "**$1.00 lifetime** before withdrawing."
+                ),
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # BALANCE CHECK
+    # ========================================================
+
+    balance = await bot.get_balance(
+        user_id
+    )
+
+    if value > balance:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Insufficient Balance",
+                (
+                    f"Your balance is **{money(balance)}**.\n"
+                    f"You cannot withdraw **{money(value)}**."
+                ),
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # CREATE WITHDRAWAL
+    #
+    # IMPORTANT:
+    # create_withdrawal() already deducts the balance.
+    # DO NOT call change_balance() here.
+    # ========================================================
+
+    created = await bot.db.create_withdrawal(
+        user_id=user_id,
+        currency=currency,
+        address=address,
+        amount=value,
+    )
+
+    if not created:
+
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Withdrawal Failed",
+                (
+                    "Your withdrawal could not be created. "
+                    "Your balance was not changed."
+                ),
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # WITHDRAWAL LOG
+    # ========================================================
+
+    log_channel = None
+
+    channel_id = getattr(
+        bot,
+        "withdraw_log_channel_id",
+        None,
+    )
+
+    if channel_id:
+
+        log_channel = bot.get_channel(
+            channel_id
+        )
+
+    if log_channel:
+
+        try:
+
+            await log_channel.send(
+                embed=base_embed(
+                    "CryptoBet Withdrawal",
+                    (
+                        f"**User:** {interaction.user.mention}\n"
+                        f"**User ID:** `{user_id}`\n\n"
+                        f"**Amount:** {money(value)}\n"
+                        f"**Currency:** `{currency}`\n"
+                        f"**Address:** `{address}`\n\n"
+                        "**Status:** `Pending`"
+                    ),
+                )
+            )
+
+        except Exception as exc:
+
+            print(
+                f"[WITHDRAW] Log error: {exc}"
+            )
+
+    # ========================================================
+    # SUCCESS
+    # ========================================================
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Withdrawal Requested",
+            (
+                f"**Amount:** {money(value)}\n"
+                f"**Currency:** `{currency}`\n\n"
+                f"**Address:** `{address}`\n\n"
+                "Your withdrawal has been created and is "
+                "**pending processing**."
+            ),
+        ),
+        ephemeral=False,
+    )
 
 # ============================================================
 # /STATS
