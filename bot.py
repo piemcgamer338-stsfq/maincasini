@@ -6849,7 +6849,6 @@ async def _mines_cashout(
 
 CasinoBot.mines_cashout = _mines_cashout
 
-
 # ============================================================
 # /BLACKJACK / /BJ
 # ============================================================
@@ -6932,262 +6931,290 @@ def card_path(card: str) -> Path:
     return BASE_DIR / f"{card}.png"
 
 
-def _fit_blackjack_card(
-    image: Image.Image,
-    max_width: int = 210,
-    max_height: int = 300,
-) -> Image.Image:
-
-    image = image.convert("RGBA")
-
-    ratio = min(
-        max_width / image.width,
-        max_height / image.height,
-    )
-
-    new_size = (
-        max(1, int(image.width * ratio)),
-        max(1, int(image.height * ratio)),
-    )
-
-    return image.resize(
-        new_size,
-        Image.Resampling.LANCZOS,
-    )
-
-
-def _create_blackjack_card_back(
-    width: int,
-    height: int,
-) -> Image.Image:
-
-    card = Image.new(
-        "RGBA",
-        (width, height),
-        (15, 45, 30, 255),
-    )
-
-    draw = ImageDraw.Draw(card)
-
-    # Outer border
-    draw.rounded_rectangle(
-        (
-            0,
-            0,
-            width - 1,
-            height - 1,
-        ),
-        radius=14,
-        fill=(235, 235, 235, 255),
-    )
-
-    # Inner card
-    draw.rounded_rectangle(
-        (
-            7,
-            7,
-            width - 8,
-            height - 8,
-        ),
-        radius=10,
-        fill=(30, 80, 55, 255),
-        outline=(10, 35, 25, 255),
-        width=4,
-    )
-
-    # Diamond pattern
-    spacing = 28
-
-    for y in range(
-        18,
-        height - 18,
-        spacing,
-    ):
-
-        for x in range(
-            18,
-            width - 18,
-            spacing,
-        ):
-
-            cx = x
-            cy = y
-
-            draw.polygon(
-                [
-                    (cx, cy - 8),
-                    (cx + 8, cy),
-                    (cx, cy + 8),
-                    (cx - 8, cy),
-                ],
-                fill=(45, 110, 75, 255),
-            )
-
-    return card
-
+# ============================================================
+# BLACKJACK IMAGE
+# ============================================================
 
 def create_blackjack_image(
     player_cards: list[str],
     dealer_cards: list[str],
+    bet=0,
     hidden: bool = True,
+    result: Optional[str] = None,
 ) -> Optional[discord.File]:
 
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         return None
 
-    # --------------------------------------------------------
-    # GREEN CASINO TABLE
-    # --------------------------------------------------------
+    # ========================================================
+    # CANVAS
+    # ========================================================
 
-    CARD_WIDTH = 190
-    CARD_HEIGHT = 275
+    WIDTH = 940
+    HEIGHT = 650
 
-    TABLE_WIDTH = 1100
-    TABLE_HEIGHT = 650
+    BACKGROUND = (35, 36, 38, 255)
+    WHITE = (235, 235, 235, 255)
+    RED = (190, 25, 25, 255)
 
     canvas = Image.new(
         "RGBA",
-        (
-            TABLE_WIDTH,
-            TABLE_HEIGHT,
-        ),
-        (18, 105, 63, 255),
+        (WIDTH, HEIGHT),
+        BACKGROUND,
     )
 
     draw = ImageDraw.Draw(canvas)
 
-    # Dark outer table border
-    draw.rounded_rectangle(
-        (
-            8,
-            8,
-            TABLE_WIDTH - 8,
-            TABLE_HEIGHT - 8,
-        ),
-        radius=28,
-        fill=(10, 55, 35, 255),
+    # ========================================================
+    # FONTS
+    # ========================================================
+
+    def load_font(size: int, bold: bool = False):
+
+        if bold:
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ]
+        else:
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ]
+
+        for font_path in font_paths:
+            try:
+                return ImageFont.truetype(
+                    font_path,
+                    size,
+                )
+            except Exception:
+                continue
+
+        return ImageFont.load_default()
+
+    title_font = load_font(
+        27,
+        True,
     )
 
-    # Green felt
-    draw.rounded_rectangle(
-        (
-            18,
-            18,
-            TABLE_WIDTH - 18,
-            TABLE_HEIGHT - 18,
-        ),
-        radius=22,
-        fill=(20, 125, 75, 255),
+    result_font = load_font(
+        39,
+        True,
     )
 
-    # Subtle inner felt border
-    draw.rounded_rectangle(
-        (
-            32,
-            32,
-            TABLE_WIDTH - 32,
-            TABLE_HEIGHT - 32,
-        ),
-        radius=18,
-        outline=(65, 160, 105, 255),
-        width=3,
+    bet_font = load_font(
+        19,
+        True,
     )
 
-    # --------------------------------------------------------
-    # LOAD PLAYER CARDS
-    # --------------------------------------------------------
+    side_font = load_font(
+        18,
+        True,
+    )
 
-    player_images = []
+    chip_font = load_font(
+        21,
+        True,
+    )
 
-    for card in player_cards:
+    # ========================================================
+    # TEXT HELPER
+    # ========================================================
+
+    def centered_text(
+        text: str,
+        y: int,
+        font,
+        fill,
+    ):
+
+        bbox = draw.textbbox(
+            (0, 0),
+            text,
+            font=font,
+        )
+
+        width = bbox[2] - bbox[0]
+
+        draw.text(
+            (
+                (WIDTH - width) // 2,
+                y,
+            ),
+            text,
+            font=font,
+            fill=fill,
+        )
+
+    # ========================================================
+    # LOAD CARD
+    # ========================================================
+
+    def load_card(card: str):
 
         if card == "hidden":
-            continue
+            return None
 
         path = card_path(card)
 
         if not path.exists():
-            continue
+            return None
 
         try:
-            image = Image.open(path).convert("RGBA")
 
-            image = _fit_blackjack_card(
-                image,
-                CARD_WIDTH,
-                CARD_HEIGHT,
+            image = Image.open(
+                path
+            ).convert("RGBA")
+
+            max_width = 125
+            max_height = 190
+
+            ratio = min(
+                max_width / image.width,
+                max_height / image.height,
             )
 
-            player_images.append(image)
+            new_size = (
+                max(
+                    1,
+                    int(image.width * ratio),
+                ),
+                max(
+                    1,
+                    int(image.height * ratio),
+                ),
+            )
+
+            return image.resize(
+                new_size,
+                Image.Resampling.LANCZOS,
+            )
 
         except Exception:
-            continue
+            return None
 
-    # --------------------------------------------------------
-    # LOAD DEALER CARDS
-    # --------------------------------------------------------
+    # ========================================================
+    # CARD BACK
+    # ========================================================
 
-    dealer_images = []
+    def create_card_back():
 
-    for index, card in enumerate(dealer_cards):
+        card_width = 125
+        card_height = 190
 
-        if card == "hidden":
-            if hidden:
+        card = Image.new(
+            "RGBA",
+            (
+                card_width,
+                card_height,
+            ),
+            (45, 46, 49, 255),
+        )
 
-                dealer_images.append(
-                    _create_blackjack_card_back(
-                        CARD_WIDTH,
-                        CARD_HEIGHT,
-                    )
+        card_draw = ImageDraw.Draw(
+            card
+        )
+
+        # Outer border
+        card_draw.rounded_rectangle(
+            (
+                0,
+                0,
+                card_width - 1,
+                card_height - 1,
+            ),
+            radius=7,
+            fill=(48, 49, 52, 255),
+            outline=(180, 180, 180, 255),
+            width=2,
+        )
+
+        # Inner border
+        card_draw.rounded_rectangle(
+            (
+                7,
+                7,
+                card_width - 8,
+                card_height - 8,
+            ),
+            radius=5,
+            outline=(100, 101, 104, 255),
+            width=2,
+        )
+
+        # Diamond pattern
+        for y in range(
+            20,
+            card_height - 15,
+            20,
+        ):
+
+            for x in range(
+                20,
+                card_width - 15,
+                20,
+            ):
+
+                card_draw.polygon(
+                    [
+                        (x, y - 5),
+                        (x + 5, y),
+                        (x, y + 5),
+                        (x - 5, y),
+                    ],
+                    fill=(75, 76, 79, 255),
                 )
 
-            continue
+        return card
 
-        path = card_path(card)
+    # ========================================================
+    # DRAW CARDS
+    # ========================================================
 
-        if not path.exists():
-            continue
-
-        try:
-            image = Image.open(path).convert("RGBA")
-
-            image = _fit_blackjack_card(
-                image,
-                CARD_WIDTH,
-                CARD_HEIGHT,
-            )
-
-            dealer_images.append(image)
-
-        except Exception:
-            continue
-
-    if not player_images and not dealer_images:
-        return None
-
-    # --------------------------------------------------------
-    # CARD PLACEMENT
-    # --------------------------------------------------------
-
-    def place_cards(
-        images: list[Image.Image],
+    def draw_cards(
+        cards: list[str],
         y: int,
+        hide_hidden: bool = False,
     ):
+
+        images = []
+
+        for card in cards:
+
+            if card == "hidden":
+
+                if hide_hidden:
+                    images.append(
+                        create_card_back()
+                    )
+
+                continue
+
+            image = load_card(card)
+
+            if image:
+                images.append(image)
 
         if not images:
             return
 
-        spacing = 18
+        spacing = 12
 
         total_width = (
-            sum(image.width for image in images)
-            + spacing * (len(images) - 1)
+            sum(
+                image.width
+                for image in images
+            )
+            + spacing * (
+                len(images) - 1
+            )
         )
 
         start_x = (
-            TABLE_WIDTH - total_width
+            WIDTH - total_width
         ) // 2
 
         x = start_x
@@ -7207,20 +7234,20 @@ def create_blackjack_image(
 
             shadow_draw.rounded_rectangle(
                 (
+                    3,
                     5,
-                    7,
                     image.width - 1,
                     image.height - 1,
                 ),
-                radius=10,
-                fill=(0, 0, 0, 80),
+                radius=7,
+                fill=(0, 0, 0, 100),
             )
 
             canvas.alpha_composite(
                 shadow,
                 (
-                    x + 4,
-                    y + 7,
+                    x + 3,
+                    y + 5,
                 ),
             )
 
@@ -7232,40 +7259,268 @@ def create_blackjack_image(
                 ),
             )
 
-            x += image.width + spacing
+            x += (
+                image.width
+                + spacing
+            )
 
-    # Dealer cards at top
-    place_cards(
-        dealer_images,
-        55,
+    # ========================================================
+    # DEALER TOTAL
+    # ========================================================
+
+    if hidden:
+
+        dealer_text = "DEALER — ?"
+
+    else:
+
+        dealer_total = (
+            blackjack_hand_total(
+                dealer_cards
+            )
+        )
+
+        dealer_text = (
+            f"DEALER — {dealer_total}"
+        )
+
+    centered_text(
+        dealer_text,
+        16,
+        title_font,
+        WHITE,
     )
 
-    # Player cards at bottom
-    place_cards(
-        player_images,
-        TABLE_HEIGHT - CARD_HEIGHT - 55,
+    # ========================================================
+    # DEALER CARDS
+    # ========================================================
+
+    draw_cards(
+        dealer_cards,
+        49,
+        hide_hidden=hidden,
     )
 
-    # --------------------------------------------------------
-    # CENTER DIVIDER
-    # --------------------------------------------------------
+    # ========================================================
+    # RESULT BANNER
+    # ========================================================
 
-    center_y = TABLE_HEIGHT // 2
+    if result:
 
-    draw.line(
+        result = result.lower().strip()
+
+        if result == "win":
+            result_text = "PLAYER WINS"
+
+        elif result == "loss":
+            result_text = "DEALER WINS"
+
+        elif result == "push":
+            result_text = "PUSH"
+
+        else:
+            result_text = result.upper()
+
+        # Dark horizontal strip
+        draw.rectangle(
+            (
+                0,
+                232,
+                WIDTH,
+                294,
+            ),
+            fill=(24, 25, 27, 255),
+        )
+
+        centered_text(
+            result_text,
+            245,
+            result_font,
+            RED,
+        )
+
+    # ========================================================
+    # PLAYER CARDS
+    # ========================================================
+
+    draw_cards(
+        player_cards,
+        303,
+        hide_hidden=False,
+    )
+
+    # ========================================================
+    # BET CHIP
+    # ========================================================
+
+    def draw_chip(amount):
+
+        try:
+            amount_text = (
+                f"${float(amount):.2f}"
+            )
+        except Exception:
+            amount_text = "$0.00"
+
+        cx = WIDTH // 2
+        cy = 548
+
+        # Shadow
+        draw.ellipse(
+            (
+                cx - 48 + 3,
+                cy - 48 + 5,
+                cx + 48 + 3,
+                cy + 48 + 5,
+            ),
+            fill=(0, 0, 0, 100),
+        )
+
+        # Main chip
+        draw.ellipse(
+            (
+                cx - 48,
+                cy - 48,
+                cx + 48,
+                cy + 48,
+            ),
+            fill=(38, 50, 70, 255),
+            outline=(175, 185, 200, 255),
+            width=3,
+        )
+
+        # Inner circle
+        draw.ellipse(
+            (
+                cx - 39,
+                cy - 39,
+                cx + 39,
+                cy + 39,
+            ),
+            outline=(200, 205, 215, 255),
+            width=2,
+        )
+
+        # Chip marks
+        import math
+
+        for angle in range(
+            0,
+            360,
+            45,
+        ):
+
+            radians = math.radians(
+                angle
+            )
+
+            x1 = cx + int(
+                math.cos(radians) * 34
+            )
+
+            y1 = cy + int(
+                math.sin(radians) * 34
+            )
+
+            x2 = cx + int(
+                math.cos(radians) * 43
+            )
+
+            y2 = cy + int(
+                math.sin(radians) * 43
+            )
+
+            draw.line(
+                (
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                ),
+                fill=(225, 228, 235, 255),
+                width=5,
+            )
+
+        # Amount
+        bbox = draw.textbbox(
+            (0, 0),
+            amount_text,
+            font=chip_font,
+        )
+
+        text_width = (
+            bbox[2] - bbox[0]
+        )
+
+        text_height = (
+            bbox[3] - bbox[1]
+        )
+
+        draw.text(
+            (
+                cx - text_width // 2,
+                cy - text_height // 2 - 1,
+            ),
+            amount_text,
+            font=chip_font,
+            fill=(240, 240, 240, 255),
+        )
+
+    draw_chip(
+        bet
+    )
+
+    # ========================================================
+    # BET TEXT
+    # ========================================================
+
+    centered_text(
+        "BET",
+        601,
+        bet_font,
+        WHITE,
+    )
+
+    # ========================================================
+    # SIDE BET LABELS
+    # ========================================================
+
+    draw.text(
         (
-            110,
-            center_y,
-            TABLE_WIDTH - 110,
-            center_y,
+            164,
+            608,
         ),
-        fill=(100, 180, 130, 110),
-        width=2,
+        "21+3",
+        font=side_font,
+        fill=(115, 115, 115, 255),
     )
 
-    # --------------------------------------------------------
+    pairs_text = "PAIRS"
+
+    pairs_bbox = draw.textbbox(
+        (0, 0),
+        pairs_text,
+        font=side_font,
+    )
+
+    pairs_width = (
+        pairs_bbox[2]
+        - pairs_bbox[0]
+    )
+
+    draw.text(
+        (
+            WIDTH - 164 - pairs_width,
+            608,
+        ),
+        pairs_text,
+        font=side_font,
+        fill=(115, 115, 115, 255),
+    )
+
+    # ========================================================
     # EXPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     output = io.BytesIO()
 
@@ -7282,6 +7537,10 @@ def create_blackjack_image(
         filename="blackjack.png",
     )
 
+
+# ============================================================
+# BLACKJACK VIEW
+# ============================================================
 
 class BlackjackView(ButtonView):
 
@@ -7368,6 +7627,10 @@ class BlackjackView(ButtonView):
         )
 
 
+# ============================================================
+# BLACKJACK FINISH
+# ============================================================
+
 async def _blackjack_finish(
     self,
     interaction: discord.Interaction,
@@ -7390,6 +7653,10 @@ async def _blackjack_finish(
         game["dealer"]
     )
 
+    # ========================================================
+    # WIN
+    # ========================================================
+
     if result == "win":
 
         payout = (
@@ -7406,6 +7673,10 @@ async def _blackjack_finish(
 
         title = "Blackjack — Won"
         color = 0x57F287
+
+    # ========================================================
+    # PUSH
+    # ========================================================
 
     elif result == "push":
 
@@ -7428,6 +7699,10 @@ async def _blackjack_finish(
         title = "Blackjack — Push"
         color = 0xFEE75C
 
+    # ========================================================
+    # LOSS
+    # ========================================================
+
     else:
 
         payout = Decimal("0")
@@ -7441,13 +7716,24 @@ async def _blackjack_finish(
         title = "Blackjack — Lost"
         color = 0xED4245
 
+    # Remove buttons
     view.clear_items()
+
+    # ========================================================
+    # FINAL BLACKJACK IMAGE
+    # ========================================================
 
     file = create_blackjack_image(
         game["player"],
         game["dealer"],
+        bet=game["bet"],
         hidden=False,
+        result=result,
     )
+
+    # ========================================================
+    # FINAL EMBED
+    # ========================================================
 
     embed = base_embed(
         title=title,
@@ -7464,10 +7750,6 @@ async def _blackjack_finish(
         ),
         color=color,
     )
-
-    # IMPORTANT:
-    # edit_message DOES NOT accept file=
-    # It must use attachments=[file].
 
     if file:
 
@@ -7498,6 +7780,10 @@ async def _blackjack_finish(
 CasinoBot.blackjack_finish = _blackjack_finish
 
 
+# ============================================================
+# BLACKJACK HIT
+# ============================================================
+
 async def _blackjack_hit(
     self,
     interaction: discord.Interaction,
@@ -7517,6 +7803,7 @@ async def _blackjack_hit(
         game["player"]
     )
 
+    # Bust
     if total > 21:
 
         await self.blackjack_finish(
@@ -7527,9 +7814,14 @@ async def _blackjack_hit(
 
         return
 
+    # ========================================================
+    # UPDATED IMAGE
+    # ========================================================
+
     file = create_blackjack_image(
         game["player"],
         game["dealer"],
+        bet=game["bet"],
         hidden=True,
     )
 
@@ -7566,6 +7858,10 @@ async def _blackjack_hit(
 CasinoBot.blackjack_hit = _blackjack_hit
 
 
+# ============================================================
+# BLACKJACK STAND
+# ============================================================
+
 async def _blackjack_stand(
     self,
     interaction: discord.Interaction,
@@ -7577,6 +7873,7 @@ async def _blackjack_stand(
     if game["finished"]:
         return
 
+    # Dealer draws until 17+
     while blackjack_hand_total(
         game["dealer"]
     ) < 17:
@@ -7592,6 +7889,10 @@ async def _blackjack_stand(
     dealer_total = blackjack_hand_total(
         game["dealer"]
     )
+
+    # ========================================================
+    # DETERMINE RESULT
+    # ========================================================
 
     if dealer_total > 21:
 
@@ -7619,6 +7920,10 @@ async def _blackjack_stand(
 CasinoBot.blackjack_stand = _blackjack_stand
 
 
+# ============================================================
+# BLACKJACK DOUBLE
+# ============================================================
+
 async def _blackjack_double(
     self,
     interaction: discord.Interaction,
@@ -7630,6 +7935,7 @@ async def _blackjack_double(
     if game["finished"]:
         return
 
+    # Double only on first two cards
     if len(game["player"]) != 2:
 
         await interaction.response.send_message(
@@ -7665,12 +7971,15 @@ async def _blackjack_double(
 
         return
 
+    # Double the wager
     game["bet"] += extra_bet
 
+    # Draw exactly one card
     game["player"].append(
         game["deck"].pop()
     )
 
+    # Bust
     if blackjack_hand_total(
         game["player"]
     ) > 21:
@@ -7683,6 +7992,7 @@ async def _blackjack_double(
 
         return
 
+    # Automatically stand
     await self.blackjack_stand(
         interaction,
         view,
@@ -7691,6 +8001,10 @@ async def _blackjack_double(
 
 CasinoBot.blackjack_double = _blackjack_double
 
+
+# ============================================================
+# /BLACKJACK
+# ============================================================
 
 @bot.tree.command(
     name="blackjack",
@@ -7712,6 +8026,10 @@ async def blackjack(
         amount
     )
 
+    # ========================================================
+    # MINIMUM BET
+    # ========================================================
+
     if value is None or value < MIN_BET:
 
         await interaction.response.send_message(
@@ -7725,6 +8043,10 @@ async def blackjack(
         )
 
         return
+
+    # ========================================================
+    # TAKE BET
+    # ========================================================
 
     success = await bot.deduct_bet(
         interaction.user.id,
@@ -7744,6 +8066,10 @@ async def blackjack(
 
         return
 
+    # ========================================================
+    # DECK
+    # ========================================================
+
     deck = blackjack_deck()
 
     player = [
@@ -7756,31 +8082,51 @@ async def blackjack(
         "hidden",
     ]
 
+    # ========================================================
+    # PROVABLY FAIR
+    # ========================================================
+
     server_seed = bot.create_server_seed()
 
     game = {
         "user_id": interaction.user.id,
+
         "bet": value,
+
         "deck": deck,
+
         "player": player,
+
         "dealer": dealer,
+
         "game_id": bot.next_game_id(),
+
         "server_seed": server_seed,
+
         "server_hash": bot.server_hash(
             server_seed
         ),
+
         "client_seed": bot.create_client_seed(
             interaction.user.id
         ),
+
         "nonce": 0,
+
         "finished": False,
+
         "side_21_3": (
-            normalize_amount(side_21_3)
+            normalize_amount(
+                side_21_3
+            )
             if side_21_3
             else Decimal("0")
         ),
+
         "pairs": (
-            normalize_amount(pairs)
+            normalize_amount(
+                pairs
+            )
             if pairs
             else Decimal("0")
         ),
@@ -7790,17 +8136,30 @@ async def blackjack(
         interaction.user.id
     ] = game
 
+    # ========================================================
+    # VIEW
+    # ========================================================
+
     view = BlackjackView(
         bot,
         interaction.user.id,
         game,
     )
 
+    # ========================================================
+    # IMAGE
+    # ========================================================
+
     file = create_blackjack_image(
         player,
         dealer,
+        bet=value,
         hidden=True,
     )
+
+    # ========================================================
+    # EMBED
+    # ========================================================
 
     embed = base_embed(
         title="Blackjack",
@@ -7832,6 +8191,10 @@ async def blackjack(
             view=view,
         )
 
+
+# ============================================================
+# /BJ ALIAS
+# ============================================================
 
 bot.tree.add_command(
     app_commands.Command(
