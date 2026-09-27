@@ -10641,8 +10641,8 @@ bot.tree.add_command(
 # /HOUSEBAL
 # ============================================================
 
-HOUSE_BALANCE = "$48.50"
-HOUSE_LTC = "$0.00"
+HOUSE_BALANCE = "$68.93"
+HOUSE_LTC = "$20.43"
 HOUSE_SOL = "$38.29"
 HOUSE_USDT = "$10.21"
 
