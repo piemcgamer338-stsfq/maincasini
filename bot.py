@@ -3329,7 +3329,202 @@ async def help_command(
         embed=embed,
         ephemeral=False,
     )
+# ============================================================
+# /FAIR
+# ============================================================
 
+@bot.tree.command(
+    name="fair",
+    description="Verify a previous game using its server hash.",
+)
+@app_commands.describe(
+    server_hash="The server hash from the game."
+)
+async def fair(
+    interaction: discord.Interaction,
+    server_hash: str,
+):
+    if not await bot.require_database(interaction):
+        return
+
+    server_hash = server_hash.strip().lower()
+
+    if len(server_hash) != 64:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Server Hash",
+                "Please enter the **64-character server hash** from the game.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    try:
+        game = await bot.db.get_game_by_server_hash(server_hash)
+    except Exception as exc:
+        print(f"[FAIR] Database lookup failed: {exc}")
+
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Fair Verification Error",
+                "I couldn't look up that server hash.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if not game:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Game Not Found",
+                "No saved game was found with that server hash.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    def get_value(name, default=None):
+        if hasattr(game, "get"):
+            return game.get(name, default)
+
+        try:
+            return game[name]
+        except Exception:
+            return default
+
+    game_name = str(
+        get_value("game", get_value("game_name", "Unknown"))
+    ).replace("_", " ").title()
+
+    game_id = get_value(
+        "game_id",
+        get_value("id", "Unknown")
+    )
+
+    result = get_value(
+        "result",
+        get_value("outcome", None)
+    )
+
+    payout = get_value("payout", None)
+    bet = get_value("bet", None)
+
+    client_seed = get_value(
+        "client_seed",
+        "Not saved"
+    )
+
+    nonce = get_value(
+        "nonce",
+        "Not saved"
+    )
+
+    # --------------------------------------------------------
+    # WINNING CHANCES
+    # --------------------------------------------------------
+
+    chances = ""
+
+    if game_name.lower() == "coinflip":
+        chances = (
+            "🔴 **Red:** 50.00%\n"
+            "🔵 **Blue:** 50.00%"
+        )
+
+    elif game_name.lower() == "limbo":
+        target = get_value(
+            "target",
+            get_value("multiplier", None)
+        )
+
+        if target:
+            try:
+                target = Decimal(str(target))
+                chance = (
+                    Decimal("0.99") / target * Decimal("100")
+                )
+
+                if chance > 100:
+                    chance = Decimal("100")
+
+                chances = (
+                    f"🎯 **Target:** {target:.2f}x\n"
+                    f"🎯 **Win Chance:** {chance:.2f}%"
+                )
+            except Exception:
+                chances = "Target information unavailable."
+
+        else:
+            chances = "Target information unavailable."
+
+    else:
+        chances = "Game-specific winning chances are unavailable."
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
+
+    if result is None:
+        result_text = "Not saved"
+    else:
+        result_text = str(result).replace("_", " ").title()
+
+    # --------------------------------------------------------
+    # EMBED
+    # --------------------------------------------------------
+
+    description = (
+        f"**Server Hash**\n"
+        f"`{server_hash}`\n\n"
+
+        f"**Game**\n"
+        f"`{game_name}`\n\n"
+
+        f"**Result**\n"
+        f"`{result_text}`\n\n"
+
+        f"**Winning Chances**\n"
+        f"{chances}\n\n"
+
+        f"**Game ID:** `{game_id}`\n"
+        f"**Nonce:** `{nonce}`\n"
+        f"**Client Seed:** `{client_seed}`"
+    )
+
+    if bet is not None:
+        try:
+            description += (
+                f"\n**Bet:** {money(D(bet))}"
+            )
+        except Exception:
+            pass
+
+    if payout is not None:
+        try:
+            description += (
+                f"\n**Payout:** {money(D(payout))}"
+            )
+        except Exception:
+            pass
+
+    embed = base_embed(
+        title="## 🔐 Provably Fair",
+        description=description,
+        color=0x5865F2,
+    )
+
+    embed.set_footer(
+        text="CryptoBet • Provably Fair Verification"
+    )
+
+    await bot.safe_send(
+        interaction,
+        embed=embed,
+        ephemeral=False,
+    )
 
 # ============================================================
 # /HOWTOPLAY
