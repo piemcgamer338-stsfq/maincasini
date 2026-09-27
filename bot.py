@@ -3329,59 +3329,50 @@ async def help_command(
         embed=embed,
         ephemeral=False,
     )
-# ============================================================
-# /FAIR
-# ============================================================
-
 @bot.tree.command(
     name="fair",
-    description="Verify a game using its server hash.",
+    description="Verify a completed game's provably fair result."
 )
 @app_commands.describe(
-    server_hash="The 64-character server hash from the game."
+    server_hash="The server hash from the game result."
 )
 async def fair_command(
     interaction: discord.Interaction,
     server_hash: str,
 ):
-    # require_database() is a global function in this bot.py
     if not await require_database(interaction):
         return
 
-    server_hash = server_hash.strip().lower()
+    server_hash = server_hash.strip()
 
-    # SHA-256 hashes are 64 hexadecimal characters
-    if len(server_hash) != 64:
+    if not server_hash:
         await interaction.response.send_message(
             embed=error_embed(
                 "Invalid Server Hash",
-                "The server hash must contain exactly **64 characters**."
+                "Please provide a valid server hash."
             ),
             ephemeral=False,
         )
         return
-
-    try:
-        int(server_hash, 16)
-    except ValueError:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Server Hash",
-                "The server hash must contain only hexadecimal characters."
-            ),
-            ephemeral=False,
-        )
-        return
-
-    # --------------------------------------------------------
-    # Look for a saved game using the existing database pool.
-    # --------------------------------------------------------
 
     try:
         row = await bot.db.pool.fetchrow(
             """
-            SELECT *
-            FROM games
+            SELECT
+                id,
+                user_id,
+                game,
+                bet,
+                payout,
+                profit,
+                result,
+                game_id,
+                server_hash,
+                server_seed,
+                client_seed,
+                nonce,
+                created_at
+            FROM game_history
             WHERE server_hash = $1
             ORDER BY id DESC
             LIMIT 1
@@ -3389,8 +3380,8 @@ async def fair_command(
             server_hash,
         )
 
-    except Exception as exc:
-        print(f"[FAIR] Database lookup failed: {exc}")
+    except Exception as e:
+        print(f"[FAIR ERROR] {type(e).__name__}: {e}")
 
         await interaction.response.send_message(
             embed=error_embed(
@@ -3405,168 +3396,114 @@ async def fair_command(
         await interaction.response.send_message(
             embed=error_embed(
                 "Game Not Found",
-                (
-                    "No saved game was found for this server hash.\n\n"
-                    "Make sure you copied the **full server hash**."
-                ),
+                "No completed game was found with that server hash."
             ),
             ephemeral=False,
         )
         return
 
-    # --------------------------------------------------------
-    # Safely read values from the database row.
-    # --------------------------------------------------------
+    game = str(row["game"] or "Unknown").lower()
+    bet = Decimal(str(row["bet"] or 0))
+    payout = Decimal(str(row["payout"] or 0))
+    profit = Decimal(str(row["profit"] or 0))
+    result = str(row["result"] or "Unknown")
+    game_id = row["game_id"]
+    stored_hash = row["server_hash"]
+    server_seed = row["server_seed"]
+    client_seed = row["client_seed"]
+    nonce = row["nonce"]
 
-    def row_value(name, default=None):
+    # ---------------------------------------------------------
+    # WINNING CHANCE
+    # ---------------------------------------------------------
+
+    if game in ("coinflip", "coin flip", "cf"):
+        chance_text = "50.00% per side"
+    elif game == "limbo":
+        # If result is stored as something like "4.64x",
+        # calculate the probability of reaching that target.
         try:
-            return row[name]
+            target_text = result.lower().replace("x", "").strip()
+            target = Decimal(target_text)
+
+            if target > 0:
+                chance = (
+                    Decimal("0.99") / target * Decimal("100")
+                )
+
+                if chance > 100:
+                    chance = Decimal("100")
+
+                chance_text = f"{chance.quantize(Decimal('0.01'))}%"
+            else:
+                chance_text = "Game-specific"
         except Exception:
-            return default
-
-    game_name = (
-        row_value("game")
-        or row_value("game_name")
-        or row_value("type")
-        or "Unknown"
-    )
-
-    game_id = (
-        row_value("game_id")
-        or row_value("id")
-        or "Unknown"
-    )
-
-    result = (
-        row_value("result")
-        or row_value("outcome")
-        or "Unknown"
-    )
-
-    bet = row_value("bet")
-    payout = row_value("payout")
-
-    client_seed = (
-        row_value("client_seed")
-        or "Not saved"
-    )
-
-    nonce = (
-        row_value("nonce")
-        if row_value("nonce") is not None
-        else 0
-    )
-
-    # --------------------------------------------------------
-    # Winning chance
-    # --------------------------------------------------------
-
-    game_lower = str(game_name).lower()
-
-    if "coinflip" in game_lower:
-        chances = (
-            "**Red:** 50.00%\n"
-            "**Blue:** 50.00%"
-        )
-
-    elif "limbo" in game_lower:
-        # If the database contains the target multiplier,
-        # calculate the probability from the 99% RTP model.
-        target = (
-            row_value("target")
-            or row_value("multiplier")
-        )
-
-        if target is not None:
-            try:
-                target_decimal = Decimal(str(target))
-
-                if target_decimal > 0:
-                    chance = (
-                        Decimal("0.99")
-                        / target_decimal
-                        * Decimal("100")
-                    )
-
-                    if chance > 100:
-                        chance = Decimal("100")
-
-                    chances = (
-                        f"**Target:** {target_decimal:.2f}x\n"
-                        f"**Win Chance:** {chance:.2f}%"
-                    )
-                else:
-                    chances = "Unable to calculate."
-            except Exception:
-                chances = "Unable to calculate."
-        else:
-            chances = "Target multiplier was not saved."
-
+            chance_text = "Game-specific"
+    elif game in ("mines", "mine"):
+        chance_text = "Depends on mines and tiles selected"
+    elif game in ("blackjack", "bj"):
+        chance_text = "Depends on the game state"
     else:
-        chances = "Game-specific chance is not available."
+        chance_text = "Game-specific"
 
-    # --------------------------------------------------------
-    # Build result embed
-    # --------------------------------------------------------
+    # ---------------------------------------------------------
+    # RESULT
+    # ---------------------------------------------------------
 
-    embed = base_embed(
+    if payout > 0:
+        result_status = "WIN"
+    else:
+        result_status = "LOSS"
+
+    embed = discord.Embed(
         title="Provably Fair Verification",
         description=(
-            f"**Game:** `{game_name}`\n"
-            f"**Result:** `{result}`\n\n"
-            f"**Winning Chances**\n"
-            f"{chances}"
+            f"**Game:** `{row['game']}`\n"
+            f"**Result:** `{result}`\n"
+            f"**Status:** **{result_status}**"
         ),
-        color=0x00E676,
+        color=discord.Color.gold(),
     )
 
     embed.add_field(
-        name="Server Hash",
-        value=f"`{server_hash}`",
+        name="Game Details",
+        value=(
+            f"**Bet:** `{money(bet)}`\n"
+            f"**Payout:** `{money(payout)}`\n"
+            f"**Profit:** `{money(profit)}`\n"
+            f"**Winning Chance:** `{chance_text}`"
+        ),
         inline=False,
     )
 
     embed.add_field(
-        name="Game ID",
-        value=f"`#{game_id}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Nonce",
-        value=f"`{nonce}`",
-        inline=True,
-    )
-
-    if bet is not None:
-        embed.add_field(
-            name="Bet",
-            value=f"`{money(D(bet))}`",
-            inline=True,
-        )
-
-    if payout is not None:
-        embed.add_field(
-            name="Payout",
-            value=f"`{money(D(payout))}`",
-            inline=True,
-        )
-
-    embed.add_field(
-        name="Client Seed",
-        value=f"`{client_seed}`",
+        name="Fairness Data",
+        value=(
+            f"**Server Hash:** `{stored_hash}`\n"
+            f"**Client Seed:** `{client_seed or 'N/A'}`\n"
+            f"**Nonce:** `{nonce if nonce is not None else 'N/A'}`\n"
+            f"**Game ID:** `{game_id if game_id is not None else row['id']}`"
+        ),
         inline=False,
     )
+
+    # Do NOT expose the server seed before your normal
+    # seed-reveal system is supposed to reveal it.
+    if server_seed:
+        embed.add_field(
+            name="Server Seed",
+            value="`Hidden until seed reveal`",
+            inline=False,
+        )
 
     embed.set_footer(
-        text="Server hash verification • Provably Fair"
+        text="CryptoBet • Provably Fair"
     )
 
     await interaction.response.send_message(
         embed=embed,
         ephemeral=False,
     )
-
 # ============================================================
 # /HOWTOPLAY
 # ============================================================
