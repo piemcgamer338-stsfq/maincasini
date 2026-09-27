@@ -2892,18 +2892,24 @@ async def balance_command(
         interaction.user.id
     )
 
-    # ========================================================
-    # CREATE IMAGE
-    # ========================================================
+    try:
 
-    file = await create_balance_image(
-        interaction.user,
-        balance,
-    )
+        file = await create_balance_image(
+            interaction.user,
+            balance,
+        )
 
-    # ========================================================
-    # SEND
-    # ========================================================
+    except Exception as exc:
+
+        print(
+            f"[BALANCE] Image generation error: {exc}"
+        )
+
+        file = None
+
+    # --------------------------------------------------------
+    # IMAGE
+    # --------------------------------------------------------
 
     if file:
 
@@ -2926,100 +2932,23 @@ async def balance_command(
             ephemeral=False,
         )
 
-    else:
-
-        # Fallback if image generation fails
-        embed = base_embed(
-            title=(
-                f"## {interaction.user.display_name}'s Wallet"
-            ),
-            description=(
-                f"**Balance:** {money(balance)}"
-            ),
-        )
-
-        await interaction.response.send_message(
-            embed=embed,
-            view=WalletView(
-                bot,
-                interaction.user.id,
-            ),
-            ephemeral=False,
-        )
-
-    # --------------------------------------------------------
-    # ADDRESS VALIDATION
-    # --------------------------------------------------------
-
-    if not bot.valid_withdraw_address(
-        currency,
-        address,
-    ):
-        await interaction.response.send_message(
-            f"Invalid {currency} withdrawal address.",
-            ephemeral=False,
-        )
         return
 
     # --------------------------------------------------------
-    # CREATE WITHDRAWAL
-    # --------------------------------------------------------
-    # create_withdrawal() already:
-    # - checks balance
-    # - deducts balance
-    # - records lifetime withdrawal
-    # - creates withdrawal record
-    # - creates transaction record
-
-    created = await bot.db.create_withdrawal(
-        user_id=user_id,
-        currency=currency,
-        address=address,
-        amount=value,
-    )
-
-    if not created:
-        await interaction.response.send_message(
-            "Your withdrawal could not be processed. "
-            "Please check your balance and try again.",
-            ephemeral=False,
-        )
-        return
-
-    # --------------------------------------------------------
-    # WITHDRAW LOG
-    # --------------------------------------------------------
-
-    channel = None
-
-    if getattr(
-        bot,
-        "withdraw_log_channel_id",
-        None,
-    ):
-        channel = bot.get_channel(
-            bot.withdraw_log_channel_id
-        )
-
-    if channel:
-        await channel.send(
-            "**CryptoBet Withdrawal!**\n"
-            f"``{interaction.user}`` has successfully withdrawn "
-            f"**{value:.6f} {currency}** "
-            f"(~${value:.2f})!   "
-            f"**ID:** `Private TX`"
-        )
-
-    # --------------------------------------------------------
-    # SUCCESS
+    # FALLBACK
     # --------------------------------------------------------
 
     await interaction.response.send_message(
-        f"**Withdrawal Requested**\n"
-        f"Amount: **${value:.2f}**\n"
-        f"Currency: **{currency}**\n"
-        f"Address: `{address}`\n\n"
-        "Your withdrawal is pending processing.",
+        embed=base_embed(
+            title="Wallet",
+            description=(
+                f"**Balance:** {money(balance)}"
+            ),
+        ),
+        view=WalletView(
+            bot,
+            interaction.user.id,
+        ),
         ephemeral=False,
     )
 
