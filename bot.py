@@ -2014,6 +2014,627 @@ async def require_sufficient_balance(
 
 
 # ============================================================
+# BALANCE IMAGE
+# ============================================================
+
+def create_balance_image(
+    user: discord.User | discord.Member,
+    balance,
+) -> Optional[discord.File]:
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    # ========================================================
+    # CANVAS
+    # Same dark background used by Blackjack
+    # ========================================================
+
+    WIDTH = 1600
+    HEIGHT = 600
+
+    BACKGROUND = (35, 36, 38, 255)
+
+    WHITE = (245, 245, 245, 255)
+
+    GREY = (165, 165, 165, 255)
+
+    YELLOW = (255, 205, 0, 255)
+
+    DARK_BORDER = (15, 16, 18, 255)
+
+    canvas = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        BACKGROUND,
+    )
+
+    draw = ImageDraw.Draw(canvas)
+
+    # ========================================================
+    # FONT
+    # ========================================================
+
+    def load_font(
+        size: int,
+        bold: bool = False,
+    ):
+
+        if bold:
+
+            paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ]
+
+        else:
+
+            paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ]
+
+        for path in paths:
+
+            try:
+
+                return ImageFont.truetype(
+                    path,
+                    size,
+                )
+
+            except Exception:
+                pass
+
+        return ImageFont.load_default()
+
+    name_font = load_font(
+        70,
+        True,
+    )
+
+    username_font = load_font(
+        52,
+        False,
+    )
+
+    balance_font = load_font(
+        120,
+        True,
+    )
+
+    brand_font = load_font(
+        48,
+        True,
+    )
+
+    # ========================================================
+    # BORDER
+    # ========================================================
+
+    draw.rounded_rectangle(
+        (
+            18,
+            18,
+            WIDTH - 18,
+            HEIGHT - 18,
+        ),
+        radius=40,
+        fill=BACKGROUND,
+        outline=DARK_BORDER,
+        width=8,
+    )
+
+    # ========================================================
+    # AVATAR
+    # ========================================================
+
+    avatar_size = 270
+
+    avatar_x = 55
+    avatar_y = 72
+
+    try:
+
+        avatar_url = str(
+            user.display_avatar.with_size(
+                256
+            ).url
+        )
+
+        # Use the bot's existing aiohttp session.
+        # This avoids needing another HTTP library.
+        import asyncio
+
+        async def download_avatar():
+
+            try:
+
+                async with bot.http_session.get(
+                    avatar_url
+                ) as response:
+
+                    if response.status != 200:
+                        return None
+
+                    return await response.read()
+
+            except Exception:
+
+                return None
+
+        # This function is synchronous, so run the
+        # download in the existing event loop safely.
+        # The actual avatar is handled below by the
+        # asynchronous wrapper if available.
+
+    except Exception:
+
+        avatar_url = None
+
+    # ========================================================
+    # AVATAR PLACEHOLDER
+    # ========================================================
+
+    # We initially draw a simple circle.
+    # The async balance function below replaces it
+    # with the real Discord avatar.
+    draw.ellipse(
+        (
+            avatar_x,
+            avatar_y,
+            avatar_x + avatar_size,
+            avatar_y + avatar_size,
+        ),
+        fill=(55, 56, 59, 255),
+        outline=YELLOW,
+        width=8,
+    )
+
+    # ========================================================
+    # USER TEXT
+    # ========================================================
+
+    name = user.display_name
+
+    username = (
+        f"@{user.name}"
+    )
+
+    # Name
+    draw.text(
+        (
+            335,
+            105,
+        ),
+        name,
+        font=name_font,
+        fill=WHITE,
+    )
+
+    # Username
+    draw.text(
+        (
+            335,
+            200,
+        ),
+        username,
+        font=username_font,
+        fill=GREY,
+    )
+
+    # ========================================================
+    # BALANCE
+    # ========================================================
+
+    balance_text = money(
+        balance
+    )
+
+    draw.text(
+        (
+            335,
+            295,
+        ),
+        balance_text,
+        font=balance_font,
+        fill=YELLOW,
+    )
+
+    # ========================================================
+    # CRYPTOBET BRAND
+    # ========================================================
+
+    brand = "CryptoBet"
+
+    brand_bbox = draw.textbbox(
+        (0, 0),
+        brand,
+        font=brand_font,
+    )
+
+    brand_width = (
+        brand_bbox[2]
+        - brand_bbox[0]
+    )
+
+    draw.text(
+        (
+            WIDTH - brand_width - 65,
+            90,
+        ),
+        brand,
+        font=brand_font,
+        fill=YELLOW,
+    )
+
+    # ========================================================
+    # EXPORT
+    # ========================================================
+
+    output = io.BytesIO()
+
+    canvas.save(
+        output,
+        format="PNG",
+        optimize=True,
+    )
+
+    output.seek(0)
+
+    return discord.File(
+        output,
+        filename="balance.png",
+    )
+
+
+# ============================================================
+# ASYNC BALANCE IMAGE WITH REAL DISCORD AVATAR
+# ============================================================
+
+async def create_balance_image_async(
+    user: discord.User | discord.Member,
+    balance,
+) -> Optional[discord.File]:
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    WIDTH = 1600
+    HEIGHT = 600
+
+    BACKGROUND = (35, 36, 38, 255)
+
+    WHITE = (245, 245, 245, 255)
+
+    GREY = (165, 165, 165, 255)
+
+    YELLOW = (255, 205, 0, 255)
+
+    DARK_BORDER = (15, 16, 18, 255)
+
+    canvas = Image.new(
+        "RGBA",
+        (
+            WIDTH,
+            HEIGHT,
+        ),
+        BACKGROUND,
+    )
+
+    draw = ImageDraw.Draw(
+        canvas
+    )
+
+    # ========================================================
+    # FONTS
+    # ========================================================
+
+    def load_font(
+        size: int,
+        bold: bool = False,
+    ):
+
+        if bold:
+
+            paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ]
+
+        else:
+
+            paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ]
+
+        for path in paths:
+
+            try:
+
+                return ImageFont.truetype(
+                    path,
+                    size,
+                )
+
+            except Exception:
+                continue
+
+        return ImageFont.load_default()
+
+    name_font = load_font(
+        70,
+        True,
+    )
+
+    username_font = load_font(
+        52,
+        False,
+    )
+
+    balance_font = load_font(
+        120,
+        True,
+    )
+
+    brand_font = load_font(
+        48,
+        True,
+    )
+
+    # ========================================================
+    # BORDER
+    # ========================================================
+
+    draw.rounded_rectangle(
+        (
+            18,
+            18,
+            WIDTH - 18,
+            HEIGHT - 18,
+        ),
+        radius=40,
+        fill=BACKGROUND,
+        outline=DARK_BORDER,
+        width=8,
+    )
+
+    # ========================================================
+    # AVATAR
+    # ========================================================
+
+    avatar_size = 270
+
+    avatar_x = 55
+    avatar_y = 72
+
+    avatar_data = None
+
+    try:
+
+        avatar_url = str(
+            user.display_avatar.with_size(
+                256
+            ).url
+        )
+
+        async with bot.http_session.get(
+            avatar_url
+        ) as response:
+
+            if response.status == 200:
+
+                avatar_data = await response.read()
+
+    except Exception as exc:
+
+        print(
+            f"[BALANCE IMAGE] Avatar error: {exc}"
+        )
+
+    if avatar_data:
+
+        try:
+
+            avatar = Image.open(
+                io.BytesIO(
+                    avatar_data
+                )
+            ).convert("RGBA")
+
+            avatar = avatar.resize(
+                (
+                    avatar_size,
+                    avatar_size,
+                ),
+                Image.Resampling.LANCZOS,
+            )
+
+            # Circular mask
+            mask = Image.new(
+                "L",
+                (
+                    avatar_size,
+                    avatar_size,
+                ),
+                0,
+            )
+
+            mask_draw = ImageDraw.Draw(
+                mask
+            )
+
+            mask_draw.ellipse(
+                (
+                    0,
+                    0,
+                    avatar_size,
+                    avatar_size,
+                ),
+                fill=255,
+            )
+
+            # Avatar border
+            draw.ellipse(
+                (
+                    avatar_x - 7,
+                    avatar_y - 7,
+                    avatar_x + avatar_size + 7,
+                    avatar_y + avatar_size + 7,
+                ),
+                fill=YELLOW,
+            )
+
+            canvas.paste(
+                avatar,
+                (
+                    avatar_x,
+                    avatar_y,
+                ),
+                mask,
+            )
+
+        except Exception as exc:
+
+            print(
+                f"[BALANCE IMAGE] Avatar processing error: {exc}"
+            )
+
+            draw.ellipse(
+                (
+                    avatar_x,
+                    avatar_y,
+                    avatar_x + avatar_size,
+                    avatar_y + avatar_size,
+                ),
+                fill=(55, 56, 59, 255),
+                outline=YELLOW,
+                width=8,
+            )
+
+    else:
+
+        draw.ellipse(
+            (
+                avatar_x,
+                avatar_y,
+                avatar_x + avatar_size,
+                avatar_y + avatar_size,
+            ),
+            fill=(55, 56, 59, 255),
+            outline=YELLOW,
+            width=8,
+        )
+
+    # ========================================================
+    # USERNAME
+    # ========================================================
+
+    name = user.display_name
+
+    username = (
+        f"@{user.name}"
+    )
+
+    # ========================================================
+    # NAME
+    # ========================================================
+
+    draw.text(
+        (
+            335,
+            105,
+        ),
+        name,
+        font=name_font,
+        fill=WHITE,
+    )
+
+    # ========================================================
+    # USERNAME
+    # ========================================================
+
+    draw.text(
+        (
+            335,
+            200,
+        ),
+        username,
+        font=username_font,
+        fill=GREY,
+    )
+
+    # ========================================================
+    # BALANCE
+    # ========================================================
+
+    balance_text = money(
+        balance
+    )
+
+    draw.text(
+        (
+            335,
+            295,
+        ),
+        balance_text,
+        font=balance_font,
+        fill=YELLOW,
+    )
+
+    # ========================================================
+    # CRYPTOBET
+    # ========================================================
+
+    brand = "CryptoBet"
+
+    brand_bbox = draw.textbbox(
+        (0, 0),
+        brand,
+        font=brand_font,
+    )
+
+    brand_width = (
+        brand_bbox[2]
+        - brand_bbox[0]
+    )
+
+    draw.text(
+        (
+            WIDTH - brand_width - 65,
+            90,
+        ),
+        brand,
+        font=brand_font,
+        fill=YELLOW,
+    )
+
+    # ========================================================
+    # EXPORT
+    # ========================================================
+
+    output = io.BytesIO()
+
+    canvas.save(
+        output,
+        format="PNG",
+        optimize=True,
+    )
+
+    output.seek(0)
+
+    return discord.File(
+        output,
+        filename="balance.png",
+    )
+
+
+# ============================================================
 # /BALANCE
 # ============================================================
 
@@ -2025,28 +2646,69 @@ async def balance_command(
     interaction: discord.Interaction,
 ):
 
-    if not await require_database(interaction):
+    if not await require_database(
+        interaction
+    ):
         return
 
     balance = await bot.get_balance(
         interaction.user.id
     )
 
-    embed = base_embed(
-        title=f"## {interaction.user.display_name}'s Wallet",
-        description=(
-            f"**Balance:** {money(balance)}"
-        ),
+    # ========================================================
+    # CREATE BALANCE IMAGE
+    # ========================================================
+
+    file = await create_balance_image_async(
+        interaction.user,
+        balance,
     )
 
-    await interaction.response.send_message(
-        embed=embed,
-        view=WalletView(
-            bot,
-            interaction.user.id,
-        ),
-        ephemeral=False,
+    # ========================================================
+    # EMBED
+    # ========================================================
+
+    embed = base_embed(
+        title="",
+        description="",
     )
+
+    if file:
+
+        embed.set_image(
+            url="attachment://balance.png"
+        )
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=WalletView(
+                bot,
+                interaction.user.id,
+            ),
+            file=file,
+            ephemeral=False,
+        )
+
+    else:
+
+        # Fallback if image generation fails.
+        embed = base_embed(
+            title=(
+                f"## {interaction.user.display_name}'s Wallet"
+            ),
+            description=(
+                f"**Balance:** {money(balance)}"
+            ),
+        )
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=WalletView(
+                bot,
+                interaction.user.id,
+            ),
+            ephemeral=False,
+        )
 
 
 # ============================================================
