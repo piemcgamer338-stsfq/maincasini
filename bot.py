@@ -3271,6 +3271,7 @@ HELP_GAMES = (
     "`/roll` — Roll your dice\n"
     "`/coinflip` — Play Red or Blue coinflip\n"
     "`/mines` — Play Mines\n"
+     "`/limbo` — Play Limbo\n"
     "`/blackjack` — Play Blackjack\n"
     "`/frog-run` — Play Frog Run\n"
     "`/retrigger` — Retrigger an unfinished game\n"
@@ -9431,6 +9432,953 @@ def house_add_funds_embed():
         ),
     )
 
+# ============================================================
+# LIMBO — STAKE-STYLE
+# ============================================================
+#
+# Command:
+# /limbo amount multi
+#
+# Example:
+# /limbo 1 2.00
+#
+# Mechanics:
+# - Stake-style 99% RTP
+# - 1% house edge
+# - Target minimum: 1.01x
+# - Target maximum: 1,000,000x
+# - Payout = bet × target
+# - Result is generated independently from the target
+# - Provably fair using this bot's existing HMAC system
+# - Generates a Stake-inspired dark Limbo result image
+#
+# ============================================================
+
+LIMBO_RTP = Decimal("0.99")
+LIMBO_MIN_TARGET = Decimal("1.01")
+LIMBO_MAX_TARGET = Decimal("1000000.00")
+LIMBO_MAX_RESULT = Decimal("1000000.00")
+
+
+# ============================================================
+# LIMBO RESULT
+# ============================================================
+
+def limbo_result(
+    server_seed: str,
+    client_seed: str,
+    nonce: int,
+) -> Decimal:
+    """
+    Stake-style Limbo result.
+
+    Stake's documented Limbo translation is effectively:
+
+        result = house_edge / float
+
+    where:
+        house_edge = 0.99
+
+    The result is rounded down to 2 decimals and values below
+    1.00x are consolidated to 1.00x.
+    """
+
+    digest = bot.fair_digest(
+        server_seed,
+        client_seed,
+        nonce,
+        "limbo",
+    )
+
+    # Use the first 8 bytes exactly as a deterministic 64-bit
+    # random value.
+    number = int.from_bytes(
+        digest[:8],
+        "big",
+    )
+
+    # Convert to [0, 1).
+    float_point = (
+        Decimal(number)
+        / Decimal(2**64)
+    )
+
+    # Extremely unlikely zero case.
+    if float_point <= 0:
+        return LIMBO_MAX_RESULT
+
+    # Stake-style Limbo distribution:
+    #
+    # 0.99 / random_float
+    #
+    raw_result = (
+        LIMBO_RTP
+        / float_point
+    )
+
+    # Stake-style two-decimal flooring.
+    result = raw_result.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    # Results below 1.00 become 1.00x.
+    if result < Decimal("1.00"):
+        result = Decimal("1.00")
+
+    # Keep the displayed result within the bot's max.
+    if result > LIMBO_MAX_RESULT:
+        result = LIMBO_MAX_RESULT
+
+    return result
+
+
+# ============================================================
+# LIMBO FONT HELPER
+# ============================================================
+
+def limbo_font(
+    size: int,
+    bold: bool = False,
+):
+    """
+    Find a usable system font.
+
+    This prevents the Limbo image from falling back to the
+    tiny Pillow default font.
+    """
+
+    candidates = []
+
+    if bold:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+        ])
+
+    for font_path in candidates:
+        try:
+            if Path(font_path).exists():
+                return ImageFont.truetype(
+                    font_path,
+                    size,
+                )
+        except Exception:
+            continue
+
+    # Final fallback.
+    try:
+        return ImageFont.load_default(
+            size=size
+        )
+    except TypeError:
+        return ImageFont.load_default()
+
+
+# ============================================================
+# LIMBO IMAGE GENERATOR
+# ============================================================
+
+def create_limbo_image(
+    result: Decimal,
+    target: Decimal,
+    won: bool,
+):
+    """
+    Creates the Limbo result card.
+
+    Visual style:
+    - Dark Stake-inspired casino interface
+    - Clean blue/navy background
+    - Large multiplier
+    - Target at top
+    - Progress bar
+    - Result indicator
+    - Provably fair footer
+    """
+
+    WIDTH = 1100
+    HEIGHT = 650
+
+    # --------------------------------------------------------
+    # COLORS
+    # --------------------------------------------------------
+
+    BG = (18, 23, 30)
+    PANEL = (23, 29, 38)
+    BORDER = (47, 59, 73)
+
+    WHITE = (245, 247, 250)
+    MUTED = (145, 154, 166)
+    BLUE = (65, 145, 255)
+
+    GREEN = (0, 220, 130)
+    RED = (245, 75, 75)
+
+    BAR_BG = (45, 53, 64)
+
+    # --------------------------------------------------------
+    # CANVAS
+    # --------------------------------------------------------
+
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BG,
+    )
+
+    draw = ImageDraw.Draw(
+        image
+    )
+
+    # --------------------------------------------------------
+    # OUTER PANEL
+    # --------------------------------------------------------
+
+    draw.rounded_rectangle(
+        (
+            20,
+            20,
+            WIDTH - 20,
+            HEIGHT - 20,
+        ),
+        radius=22,
+        fill=PANEL,
+        outline=BORDER,
+        width=2,
+    )
+
+    # --------------------------------------------------------
+    # FONTS
+    # --------------------------------------------------------
+
+    brand_font = limbo_font(
+        30,
+        bold=True,
+    )
+
+    small_font = limbo_font(
+        24,
+        bold=False,
+    )
+
+    small_bold = limbo_font(
+        24,
+        bold=True,
+    )
+
+    label_font = limbo_font(
+        28,
+        bold=True,
+    )
+
+    result_font = limbo_font(
+        112,
+        bold=True,
+    )
+
+    footer_font = limbo_font(
+        20,
+        bold=False,
+    )
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    draw.text(
+        (
+            55,
+            48,
+        ),
+        "CRYPTOBET",
+        font=brand_font,
+        fill=BLUE,
+    )
+
+    target_text = (
+        f"Target: {target:.2f}x"
+    )
+
+    target_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        target_text,
+        font=small_bold,
+    )
+
+    target_width = (
+        target_box[2]
+        - target_box[0]
+    )
+
+    draw.text(
+        (
+            WIDTH - 55 - target_width,
+            54,
+        ),
+        target_text,
+        font=small_bold,
+        fill=WHITE,
+    )
+
+    # --------------------------------------------------------
+    # CENTER LABEL
+    # --------------------------------------------------------
+
+    crashed_text = (
+        "CRASHED AT"
+    )
+
+    crashed_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        crashed_text,
+        font=label_font,
+    )
+
+    crashed_width = (
+        crashed_box[2]
+        - crashed_box[0]
+    )
+
+    draw.text(
+        (
+            (WIDTH - crashed_width) / 2,
+            150,
+        ),
+        crashed_text,
+        font=label_font,
+        fill=MUTED,
+    )
+
+    # --------------------------------------------------------
+    # RESULT MULTIPLIER
+    # --------------------------------------------------------
+
+    result_text = (
+        f"{result:.2f}x"
+    )
+
+    result_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        result_text,
+        font=result_font,
+    )
+
+    result_width = (
+        result_box[2]
+        - result_box[0]
+    )
+
+    result_height = (
+        result_box[3]
+        - result_box[1]
+    )
+
+    result_color = (
+        GREEN
+        if won
+        else RED
+    )
+
+    draw.text(
+        (
+            (WIDTH - result_width) / 2,
+            205,
+        ),
+        result_text,
+        font=result_font,
+        fill=result_color,
+    )
+
+    # --------------------------------------------------------
+    # PROGRESS BAR
+    # --------------------------------------------------------
+    #
+    # Logarithmic scale keeps both small and very large
+    # multipliers visually useful.
+    # --------------------------------------------------------
+
+    bar_x1 = 85
+    bar_x2 = WIDTH - 85
+    bar_y1 = 390
+    bar_y2 = 412
+
+    draw.rounded_rectangle(
+        (
+            bar_x1,
+            bar_y1,
+            bar_x2,
+            bar_y2,
+        ),
+        radius=11,
+        fill=BAR_BG,
+    )
+
+    try:
+        import math
+
+        # Display scale:
+        # 1x -> start
+        # 1,000,000x -> end
+        result_float = max(
+            1.0,
+            float(result),
+        )
+
+        max_float = float(
+            LIMBO_MAX_RESULT
+        )
+
+        log_min = math.log10(
+            1.0
+        )
+
+        log_max = math.log10(
+            max_float
+        )
+
+        log_value = math.log10(
+            min(
+                result_float,
+                max_float,
+            )
+        )
+
+        ratio = (
+            (log_value - log_min)
+            / (log_max - log_min)
+        )
+
+    except Exception:
+        ratio = 0.0
+
+    ratio = max(
+        0.0,
+        min(
+            1.0,
+            ratio,
+        ),
+    )
+
+    marker_x = int(
+        bar_x1
+        + (
+            (bar_x2 - bar_x1)
+            * ratio
+        )
+    )
+
+    # Green/red progress line.
+    draw.rounded_rectangle(
+        (
+            bar_x1,
+            bar_y1,
+            marker_x,
+            bar_y2,
+        ),
+        radius=11,
+        fill=result_color,
+    )
+
+    # Marker.
+    marker_radius = 15
+
+    draw.ellipse(
+        (
+            marker_x - marker_radius,
+            bar_y1 - 8,
+            marker_x + marker_radius,
+            bar_y2 + 8,
+        ),
+        fill=result_color,
+        outline=WHITE,
+        width=3,
+    )
+
+    # --------------------------------------------------------
+    # RESULT STATUS
+    # --------------------------------------------------------
+
+    status_text = (
+        "TARGET HIT"
+        if won
+        else "TARGET MISSED"
+    )
+
+    status_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        status_text,
+        font=small_bold,
+    )
+
+    status_width = (
+        status_box[2]
+        - status_box[0]
+    )
+
+    draw.text(
+        (
+            (WIDTH - status_width) / 2,
+            455,
+        ),
+        status_text,
+        font=small_bold,
+        fill=result_color,
+    )
+
+    # --------------------------------------------------------
+    # PROVABLY FAIR
+    # --------------------------------------------------------
+
+    fair_text = (
+        "Provably fair result"
+    )
+
+    fair_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        fair_text,
+        font=footer_font,
+    )
+
+    fair_width = (
+        fair_box[2]
+        - fair_box[0]
+    )
+
+    draw.text(
+        (
+            (WIDTH - fair_width) / 2,
+            525,
+        ),
+        fair_text,
+        font=footer_font,
+        fill=MUTED,
+    )
+
+    # --------------------------------------------------------
+    # FOOTER
+    # --------------------------------------------------------
+
+    footer_text = (
+        "CRYPTOBET LIMBO"
+    )
+
+    footer_box = draw.textbbox(
+        (
+            0,
+            0,
+        ),
+        footer_text,
+        font=footer_font,
+    )
+
+    footer_width = (
+        footer_box[2]
+        - footer_box[0]
+    )
+
+    draw.text(
+        (
+            (WIDTH - footer_width) / 2,
+            580,
+        ),
+        footer_text,
+        font=footer_font,
+        fill=BORDER,
+    )
+
+    # --------------------------------------------------------
+    # EXPORT
+    # --------------------------------------------------------
+
+    buffer = io.BytesIO()
+
+    image.save(
+        buffer,
+        format="PNG",
+        optimize=True,
+    )
+
+    buffer.seek(0)
+
+    return discord.File(
+        buffer,
+        filename="limbo.png",
+    )
+
+
+# ============================================================
+# /LIMBO
+# ============================================================
+
+@bot.tree.command(
+    name="limbo",
+    description="Play Stake-style Limbo.",
+)
+@app_commands.describe(
+    amount="Amount to bet.",
+    multi="Target multiplier, for example 2.00",
+)
+async def limbo(
+    interaction: discord.Interaction,
+    amount: str,
+    multi: str,
+):
+    user_id = interaction.user.id
+
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
+
+    if not await require_database(
+        interaction
+    ):
+        return
+
+    # --------------------------------------------------------
+    # COOLDOWN
+    # --------------------------------------------------------
+
+    cooldown = bot.check_game_cooldown(
+        user_id,
+        "limbo",
+    )
+
+    if cooldown:
+        await bot.safe_send(
+            interaction,
+            content=(
+                f"Please wait "
+                f"**{cooldown:.1f}s** before playing again."
+            ),
+            ephemeral=False,
+        )
+        return
+
+    # --------------------------------------------------------
+    # BALANCE
+    # --------------------------------------------------------
+
+    balance = await bot.get_balance(
+        user_id
+    )
+
+    bet = amount_or_all(
+        amount,
+        balance,
+    )
+
+    if bet is None:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Amount",
+                "Enter a valid bet amount.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if bet < MIN_BET:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Bet",
+                f"Minimum bet is **{money(MIN_BET)}**.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if bet > balance:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Insufficient Balance",
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    # --------------------------------------------------------
+    # TARGET MULTIPLIER
+    # --------------------------------------------------------
+
+    target_raw = str(
+        multi
+    ).strip().lower()
+
+    if target_raw.endswith("x"):
+        target_raw = target_raw[:-1]
+
+    target_raw = target_raw.strip()
+
+    try:
+        target = Decimal(
+            target_raw
+        )
+    except (InvalidOperation, ValueError):
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Multiplier",
+                (
+                    "Enter a multiplier between "
+                    f"**{LIMBO_MIN_TARGET:.2f}x** and "
+                    f"**{LIMBO_MAX_TARGET:,.0f}x**."
+                ),
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if not target.is_finite():
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Multiplier",
+                "The multiplier must be a normal number.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if (
+        target < LIMBO_MIN_TARGET
+        or target > LIMBO_MAX_TARGET
+    ):
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Multiplier",
+                (
+                    "Target must be between "
+                    f"**{LIMBO_MIN_TARGET:.2f}x** and "
+                    f"**{LIMBO_MAX_TARGET:,.0f}x**."
+                ),
+            ),
+            ephemeral=False,
+        )
+        return
+
+    target = target.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    # --------------------------------------------------------
+    # DEDUCT BET
+    # --------------------------------------------------------
+
+    deducted = await bot.deduct_bet(
+        user_id,
+        bet,
+        "limbo",
+    )
+
+    if not deducted:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Bet Failed",
+                "Your bet could not be placed.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    # --------------------------------------------------------
+    # PROVABLY FAIR DATA
+    # --------------------------------------------------------
+
+    game_id = bot.next_game_id()
+
+    server_seed = (
+        bot.create_server_seed()
+    )
+
+    server_hash = (
+        bot.server_hash(
+            server_seed
+        )
+    )
+
+    client_seed = (
+        bot.create_client_seed(
+            user_id
+        )
+    )
+
+    # One nonce per Limbo round.
+    nonce = game_id
+
+    # --------------------------------------------------------
+    # GENERATE RESULT
+    # --------------------------------------------------------
+
+    result = limbo_result(
+        server_seed,
+        client_seed,
+        nonce,
+    )
+
+    won = (
+        result >= target
+    )
+
+    # --------------------------------------------------------
+    # WIN
+    # --------------------------------------------------------
+
+    if won:
+
+        payout = (
+            bet * target
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_DOWN,
+        )
+
+        await bot.settle_win(
+            user_id,
+            bet,
+            payout,
+            "limbo",
+        )
+
+        title = (
+            "## Limbo — Won"
+        )
+
+        description = (
+            f"**Target:** `{target:.2f}x`\n"
+            f"**Result:** `{result:.2f}x`\n"
+            f"**Bet:** {money(bet)}\n"
+            f"**Payout:** {money(payout)}\n"
+            f"**Profit:** {money(payout - bet)}"
+        )
+
+        color = 0x57F287
+
+    # --------------------------------------------------------
+    # LOSS
+    # --------------------------------------------------------
+
+    else:
+
+        payout = Decimal("0")
+
+        await bot.settle_loss(
+            user_id,
+            bet,
+            "limbo",
+        )
+
+        title = (
+            "## Limbo — Lost"
+        )
+
+        description = (
+            f"**Target:** `{target:.2f}x`\n"
+            f"**Result:** `{result:.2f}x`\n"
+            f"**Bet:** {money(bet)}\n"
+            f"**Lost:** {money(bet)}"
+        )
+
+        color = 0xED4245
+
+    # --------------------------------------------------------
+    # CREATE IMAGE
+    # --------------------------------------------------------
+
+    file = create_limbo_image(
+        result=result,
+        target=target,
+        won=won,
+    )
+
+    # --------------------------------------------------------
+    # RESULT EMBED
+    # --------------------------------------------------------
+
+    embed = base_embed(
+        title=title,
+        description=description,
+        color=color,
+    )
+
+    embed.add_field(
+        name="Game",
+        value=f"`#{game_id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="RTP",
+        value="**99.00%**",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="House Edge",
+        value="**1.00%**",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Provably Fair",
+        value=(
+            f"**Server Hash:** `{server_hash}`\n"
+            f"**Client Seed:** `{client_seed}`\n"
+            f"**Nonce:** `{nonce}`"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(
+        text="Verify this result with /provably-fair"
+    )
+
+    # --------------------------------------------------------
+    # SEND
+    # --------------------------------------------------------
+
+    await interaction.response.send_message(
+        embed=embed,
+        file=file,
+        ephemeral=False,
+    )
+
+
+# ============================================================
+# END LIMBO
+# ============================================================
 
 # ============================================================
 # /HOUSEADDFUND
