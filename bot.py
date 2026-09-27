@@ -505,43 +505,121 @@ class MainWalletV2(V2LayoutView):
         self.add_item(container)
 
 
-class WithdrawModal(discord.ui.Modal):
+class WithdrawCurrencyView(ButtonView):
 
     def __init__(
         self,
         bot: "CasinoBot",
         user_id: int,
     ):
+        super().__init__(timeout=180)
+
+        self.bot = bot
+        self.user_id = user_id
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This withdrawal menu belongs to another user.",
+                ephemeral=False,
+            )
+            return False
+
+        return True
+
+    @discord.ui.button(
+        label="LTC",
+        style=discord.ButtonStyle.secondary,
+        custom_id="withdraw_ltc",
+    )
+    async def ltc(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await interaction.response.send_modal(
+            WithdrawModal(
+                self.bot,
+                self.user_id,
+                "LTC",
+            )
+        )
+
+    @discord.ui.button(
+        label="SOL",
+        style=discord.ButtonStyle.secondary,
+        custom_id="withdraw_sol",
+    )
+    async def sol(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await interaction.response.send_modal(
+            WithdrawModal(
+                self.bot,
+                self.user_id,
+                "SOL",
+            )
+        )
+
+    @discord.ui.button(
+        label="USDT",
+        style=discord.ButtonStyle.secondary,
+        custom_id="withdraw_usdt",
+    )
+    async def usdt(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await interaction.response.send_modal(
+            WithdrawModal(
+                self.bot,
+                self.user_id,
+                "USDT",
+            )
+        )
+
+
+class WithdrawModal(discord.ui.Modal):
+
+    def __init__(
+        self,
+        bot: "CasinoBot",
+        user_id: int,
+        currency: str,
+    ):
         super().__init__(
-            title="Withdraw",
+            title=f"Withdraw {currency}",
             timeout=300,
         )
 
         self.bot = bot
         self.user_id = user_id
-
-        self.currency = discord.ui.TextInput(
-            label="Currency",
-            placeholder="LTC / SOL / ETH / USDT",
-            required=True,
-            max_length=10,
-        )
+        self.currency_name = currency
 
         self.address = discord.ui.TextInput(
-            label="Withdrawal Address",
+            label=f"{currency} Withdrawal Address",
             placeholder="Enter your wallet address",
             required=True,
             max_length=150,
         )
 
         self.amount = discord.ui.TextInput(
-            label="Amount",
-            placeholder="Example: 10.00",
+            label="Amount in USD",
+            placeholder="Example: 1.00",
             required=True,
             max_length=30,
         )
 
-        self.add_item(self.currency)
         self.add_item(self.address)
         self.add_item(self.amount)
 
@@ -553,7 +631,7 @@ class WithdrawModal(discord.ui.Modal):
         await self.bot.handle_withdrawal(
             interaction=interaction,
             user_id=self.user_id,
-            currency=self.currency.value,
+            currency=self.currency_name,
             address=self.address.value,
             amount_text=self.amount.value,
         )
@@ -1511,175 +1589,232 @@ class CasinoBot(commands.Bot):
             
         return None
         
+async def handle_withdrawal(
+    self,
+    interaction: discord.Interaction,
+    user_id: int,
+    currency: str,
+    address: str,
+    amount_text: str,
+):
+
+    currency = currency.strip().upper()
+    address = address.strip()
+
+    amount = normalize_amount(
+        amount_text
+    )
+
     # ========================================================
-    # WITHDRAWAL
+    # SUPPORTED CURRENCIES
     # ========================================================
 
-    async def handle_withdrawal(
-        self,
-        interaction: discord.Interaction,
-        user_id: int,
-        currency: str,
-        address: str,
-        amount_text: str,
+    if currency not in {
+        "LTC",
+        "SOL",
+        "USDT",
+    }:
+
+        await interaction.response.send_message(
+            "Supported currencies: LTC, SOL, USDT.",
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # VALID AMOUNT
+    # ========================================================
+
+    if amount is None or amount <= 0:
+
+        await interaction.response.send_message(
+            "Enter a valid withdrawal amount.",
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # MINIMUM WITHDRAWAL
+    # ========================================================
+
+    minimum = Decimal("0.50")
+
+    if amount < minimum:
+
+        await interaction.response.send_message(
+            "Minimum $0.50 withdrawal.",
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # LIFETIME DEPOSIT REQUIREMENT
+    # ========================================================
+
+    user_row = await self.get_db_user(
+        user_id
+    )
+
+    lifetime_deposit = Decimal("0")
+
+    if user_row:
+
+        lifetime_deposit = D(
+            user_row["lifetime_deposit"]
+        )
+
+    if lifetime_deposit < Decimal("1"):
+
+        await interaction.response.send_message(
+            "User Must have $1 Deposited Lifetime.",
+            ephemeral=False,
+        )
+
+        return
+
+    # ========================================================
+    # ADDRESS CHECK
+    # ========================================================
+
+    if not self.valid_withdraw_address(
+        currency,
+        address,
     ):
 
-        currency = currency.strip().upper()
-        address = address.strip()
-
-        amount = normalize_amount(
-            amount_text
+        await interaction.response.send_message(
+            "That withdrawal address is invalid.",
+            ephemeral=False,
         )
 
-        if currency not in {
-            "LTC",
-            "SOL",
-            "ETH",
-            "USDT",
-        }:
+        return
 
-            await interaction.response.send_message(
-                "Supported currencies: LTC, SOL, ETH, USDT.",
-                ephemeral=False,
-            )
+    # ========================================================
+    # BALANCE CHECK
+    # ========================================================
 
-            return
+    balance = await self.get_balance(
+        user_id
+    )
 
-        if amount is None:
+    if amount > balance:
 
-            await interaction.response.send_message(
-                "Enter a valid withdrawal amount.",
-                ephemeral=False,
-            )
-
-            return
-
-        minimum = D(
-            config.MIN_WITHDRAW.get(
-                currency,
-                0,
-            )
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto\n"
+            "-# use /deposit to top-up Funds",
+            ephemeral=False,
         )
 
-        if minimum and amount < minimum:
+        return
 
-            await interaction.response.send_message(
-                f"Minimum {currency} withdrawal is "
-                f"{money(minimum)}.",
-                ephemeral=False,
-            )
+    # ========================================================
+    # DEDUCT BALANCE
+    # ========================================================
 
-            return
+    deducted = await self.db.change_balance(
+        user_id,
+        -amount,
+        kind="withdraw",
+        note=f"{currency}:{address}",
+    )
 
-        if not self.valid_withdraw_address(
-            currency,
-            address,
-        ):
+    if not deducted:
 
-            await interaction.response.send_message(
-                "That withdrawal address is invalid.",
-                ephemeral=False,
-            )
-
-            return
-
-        balance = await self.get_balance(
-            user_id
+        await interaction.response.send_message(
+            "Your withdrawal could not be processed.",
+            ephemeral=False,
         )
 
-        if amount > balance:
+        return
 
-            await interaction.response.send_message(
-                "You Dont Have Enough Crypto\n"
-                "-# use /deposit to top-up Funds",
-                ephemeral=False,
-            )
+    # ========================================================
+    # CREATE WITHDRAWAL RECORD
+    # ========================================================
 
-            return
+    if hasattr(
+        self.db,
+        "create_withdrawal",
+    ):
 
-        if hasattr(
-            self.db,
-            "create_withdrawal",
-        ):
+        try:
 
-            created = await self.db.create_withdrawal(
+            await self.db.create_withdrawal(
                 user_id=user_id,
                 currency=currency,
                 address=address,
                 amount=amount,
             )
 
-            if not created:
+        except Exception as exc:
 
-                await interaction.response.send_message(
-                    "Your withdrawal could not be created.",
-                    ephemeral=False,
-                )
-
-                return
-
-        else:
-
-            deducted = await self.db.change_balance(
-                user_id,
-                -amount,
-                kind="withdraw",
-                note=f"{currency}:{address}",
+            print(
+                f"[WITHDRAWAL RECORD] {exc}"
             )
 
-            if not deducted:
+    # ========================================================
+    # WITHDRAWAL LOG
+    # ========================================================
 
-                await interaction.response.send_message(
-                    "Your withdrawal could not be processed.",
-                    ephemeral=False,
-                )
+    try:
 
-                return
-
-        await interaction.response.send_message(
-            f"## Withdrawal Requested\n\n"
-            f"**Amount:** {money(amount)}\n"
-            f"**Currency:** {currency}\n\n"
-            "Your withdrawal is pending processing.",
-            ephemeral=False,
+        channel_id = await self.db.setting(
+            "withdrawlog_channel_id",
+            "0",
         )
 
-    def valid_withdraw_address(
-        self,
-        currency: str,
-        address: str,
-    ) -> bool:
+        channel = None
 
-        if not address:
-            return False
+        if channel_id:
 
-        if currency == "LTC":
-            return (
-                address.startswith(
-                    (
-                        "ltc1",
-                        "M",
-                        "m",
-                        "L",
+            channel = self.get_channel(
+                int(channel_id)
+            )
+
+            if channel is None:
+
+                try:
+
+                    channel = await self.fetch_channel(
+                        int(channel_id)
                     )
-                )
-                and len(address) >= 26
+
+                except Exception:
+
+                    channel = None
+
+        if channel:
+
+            log_message = (
+                "**CryptoBet Withdrawal!**\n"
+                f"``{interaction.user}`` has successfully "
+                f"withdrawn **{amount:.6f} {currency}** "
+                f"(~${amount:.2f})!   "
+                f"**ID:** `Private TX`"
             )
 
-        if currency == "SOL":
-            return 32 <= len(address) <= 50
-
-        if currency in {
-            "ETH",
-            "USDT",
-        }:
-            return (
-                address.startswith("0x")
-                and len(address) == 42
+            await channel.send(
+                log_message
             )
 
-        return False
+    except Exception as exc:
 
+        print(
+            f"[WITHDRAW LOG] {exc}"
+        )
+
+    # ========================================================
+    # USER RESPONSE
+    # ========================================================
+
+    await interaction.response.send_message(
+        f"## Withdrawal Requested\n\n"
+        f"**Amount:** {money(amount)}\n"
+        f"**Currency:** {currency}\n\n"
+        "Your withdrawal is pending processing.",
+        ephemeral=False,
+    )
 
 # ============================================================
 # BOT INSTANCE
@@ -3055,25 +3190,27 @@ async def balance_command(
             ),
             ephemeral=False,
         )
-# ============================================================
-# /WITHDRAW
-# ============================================================
-
 @bot.tree.command(
     name="withdraw",
-    description="Withdraw funds to a cryptocurrency address.",
+    description="Withdraw funds.",
 )
 async def withdraw_command(
     interaction: discord.Interaction,
 ):
 
-    await interaction.response.send_modal(
-        WithdrawModal(
+    await interaction.response.send_message(
+        embed=base_embed(
+            title="Withdraw",
+            description=(
+                "Select a Currency Below to Withdraw"
+            ),
+        ),
+        view=WithdrawCurrencyView(
             bot,
             interaction.user.id,
-        )
+        ),
+        ephemeral=False,
     )
-
 
 # ============================================================
 # /HELP
@@ -3794,6 +3931,33 @@ async def rewardinfo(
         ),
         ephemeral=False,
     )
+
+# ============================================================
+# /WITHDRAWLOG
+# ============================================================
+
+@bot.tree.command(
+    name="withdrawlog",
+    description="Set the current channel as the withdrawal log channel.",
+)
+async def withdrawlog_command(
+    interaction: discord.Interaction,
+):
+
+    if not allowed_admin(interaction):
+        await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True,
+        )
+        return
+
+    bot.withdraw_log_channel_id = interaction.channel.id
+
+    await interaction.response.send_message(
+        f"Withdrawal logs will now be sent to {interaction.channel.mention}.",
+        ephemeral=False,
+    )
+    
 # ============================================================
 # /AFFILIATEINFO
 # ============================================================
