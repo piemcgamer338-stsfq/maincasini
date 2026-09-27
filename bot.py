@@ -399,24 +399,6 @@ class WalletView(ButtonView):
             ephemeral=False,
         )
 
-    @discord.ui.button(
-        label="Withdraw",
-        style=discord.ButtonStyle.secondary,
-        custom_id="wallet_withdraw",
-    )
-    async def withdraw_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await interaction.response.send_modal(
-            WithdrawModal(
-                self.bot,
-                interaction.user.id,
-            )
-        )
-
 
 class DepositCurrencyView(ButtonView):
 
