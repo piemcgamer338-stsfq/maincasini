@@ -445,22 +445,6 @@ class DepositCurrencyView(ButtonView):
         return True
 
     @discord.ui.button(
-        label="LTC",
-        style=discord.ButtonStyle.secondary,
-        custom_id="deposit_ltc",
-    )
-    async def ltc_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await self.bot.send_deposit_dm(
-            interaction,
-            "LTC",
-        )
-
-    @discord.ui.button(
         label="SOL",
         style=discord.ButtonStyle.secondary,
         custom_id="deposit_sol",
@@ -995,7 +979,6 @@ class CasinoBot(commands.Bot):
             float,
         ] = {}
 
-        self.ltc_watcher_task = None
 
     # ========================================================
     # GAME IDS
@@ -1338,20 +1321,8 @@ class CasinoBot(commands.Bot):
                 f"[BOT] Slash command sync failed: {exc}"
             )
 
-        self.ltc_watcher_task = asyncio.create_task(
-            self.ltc_deposit_watcher()
-        )
-
     async def close(self):
-
-        if self.ltc_watcher_task:
-            self.ltc_watcher_task.cancel()
-
-            try:
-                await self.ltc_watcher_task
-            except asyncio.CancelledError:
-                pass
-
+        
         if self.http_session:
             await self.http_session.close()
             self.http_session = None
@@ -1537,37 +1508,9 @@ class CasinoBot(commands.Bot):
                 "SOL_DEPOSIT_ADDRESS",
                 "",
             ) or None
-
-        if currency == "LTC":
-
-            return await self.generate_ltc_address(
-                user_id
-            )
-
+            
         return None
-
-    # ========================================================
-    # LTC ADDRESS PLACEHOLDER
-    # ========================================================
-
-    async def generate_ltc_address(
-        self,
-        user_id: int,
-    ) -> Optional[str]:
-
-        if hasattr(
-            self.db,
-            "get_or_create_ltc_address",
-        ):
-
-            return await self.db.get_or_create_ltc_address(
-                user_id,
-                config.LTC_XPUB,
-                config.LTC_DERIVATION_PATH,
-            )
-
-        return None
-
+        
     # ========================================================
     # WITHDRAWAL
     # ========================================================
@@ -6220,7 +6163,488 @@ async def mines_cashout(
 CasinoBot.mines_click = mines_click
 CasinoBot.mines_cashout = mines_cashout
 
+# ============================================================
+# DEPOSIT SYSTEM
+# ============================================================
 
+SOL_DEPOSIT_ADDRESS = (
+    "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
+)
+
+USDT_DEPOSIT_ADDRESSES = {
+    "Polygon": "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2",
+    "Solana": "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6",
+    "Tron": "TLmtud4AMeZy5VqetHW9VEGp8dfQCLu5Bp",
+    "ETH": "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2",
+}
+
+LTC_MINIMUM_DEPOSIT_USD = Decimal("0.10")
+
+
+# ============================================================
+# DEPOSIT DM HELPER
+# ============================================================
+
+async def send_deposit_dm(
+    interaction: discord.Interaction,
+    currency: str,
+    address: str,
+    network: str | None = None,
+):
+    currency = currency.upper()
+
+    if currency == "LTC":
+
+        dm_message = (
+            f"**{interaction.user.mention}**, "
+            f"deposit **LTC** only:\n\n"
+            f"`{address}`\n\n"
+            f"Minimum: **$0.10 LTC**"
+        )
+
+        server_message = (
+            "Your **LTC** deposit address has been "
+            "sent to your DMs."
+        )
+
+    elif currency == "SOL":
+
+        dm_message = (
+            f"**{interaction.user.mention}**, "
+            f"deposit **SOL** only:\n\n"
+            f"`{address}`"
+        )
+
+        server_message = (
+            "Your **SOL** deposit address has been "
+            "sent to your DMs."
+        )
+
+    elif currency == "USDT":
+
+        if not network:
+            network = "Unknown"
+
+        dm_message = (
+            f"**{interaction.user.mention}**, "
+            f"deposit **USDT ({network})** only:\n\n"
+            f"`{address}`"
+        )
+
+        server_message = (
+            f"Your **USDT ({network})** deposit address "
+            "has been sent to your DMs."
+        )
+
+    else:
+
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Deposit Error",
+                "Unsupported cryptocurrency.",
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    try:
+
+        await interaction.user.send(
+            dm_message
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            embed=base_embed(
+                "DMs Disabled",
+                (
+                    "I couldn't send you a DM.\n\n"
+                    "Please enable Direct Messages "
+                    "from this server and try again."
+                ),
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    except Exception as e:
+
+        print(
+            f"[DEPOSIT] DM error: {e}"
+        )
+
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Deposit Error",
+                "Something went wrong while sending your deposit address.",
+            ),
+            ephemeral=False,
+        )
+
+        return
+
+    await interaction.response.send_message(
+        embed=base_embed(
+            "Deposit Address Sent",
+            server_message,
+        ),
+        ephemeral=False,
+    )
+
+
+# ============================================================
+# LTC ADDRESS
+# ============================================================
+
+async def get_ltc_deposit_address(
+    user_id: int,
+):
+    """
+    Get or create the unique LTC deposit address
+    belonging to this Discord user.
+
+    The actual xpub derivation and database storage
+    are handled by database.py.
+    """
+
+    try:
+
+        if not config.LTC_XPUB:
+            print(
+                "[DEPOSIT] LTC_XPUB is missing."
+            )
+
+            return None
+
+        if not hasattr(
+            bot.db,
+            "get_or_create_ltc_address",
+        ):
+
+            print(
+                "[DEPOSIT] "
+                "database.get_or_create_ltc_address() "
+                "is missing."
+            )
+
+            return None
+
+        address = await bot.db.get_or_create_ltc_address(
+            user_id,
+            config.LTC_XPUB,
+            getattr(
+                config,
+                "LTC_DERIVATION_PATH",
+                "m/0",
+            ),
+        )
+
+        return address
+
+    except Exception as e:
+
+        print(
+            f"[DEPOSIT] LTC address generation error: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# MAIN DEPOSIT MENU
+# ============================================================
+
+class DepositCurrencyView(
+    discord.ui.View
+):
+
+    def __init__(
+        self,
+        user_id: int,
+    ):
+        super().__init__(
+            timeout=180
+        )
+
+        self.user_id = user_id
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                embed=base_embed(
+                    "Deposit Menu",
+                    "This deposit menu belongs to another user.",
+                ),
+                ephemeral=False,
+            )
+
+            return False
+
+        return True
+
+    # ========================================================
+    # LTC
+    # ========================================================
+
+    @discord.ui.button(
+        label="LTC",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_ltc_new",
+    )
+    async def ltc_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        address = await get_ltc_deposit_address(
+            interaction.user.id
+        )
+
+        if not address:
+
+            await interaction.response.send_message(
+                embed=base_embed(
+                    "LTC Deposit",
+                    (
+                        "Your LTC deposit address "
+                        "could not be generated right now."
+                    ),
+                ),
+                ephemeral=False,
+            )
+
+            return
+
+        await send_deposit_dm(
+            interaction,
+            "LTC",
+            address,
+        )
+
+    # ========================================================
+    # SOL
+    # ========================================================
+
+    @discord.ui.button(
+        label="SOL",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_sol_new",
+    )
+    async def sol_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await send_deposit_dm(
+            interaction,
+            "SOL",
+            SOL_DEPOSIT_ADDRESS,
+        )
+
+    # ========================================================
+    # USDT
+    # ========================================================
+
+    @discord.ui.button(
+        label="USDT",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_usdt_new",
+    )
+    async def usdt_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        embed = base_embed(
+            "Tether USDT: Select Network",
+            (
+                "Choose the network you want to use "
+                "for your USDT deposit."
+            ),
+        )
+
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=USDTNetworkView(
+                self.user_id
+            ),
+        )
+
+
+# ============================================================
+# USDT NETWORK MENU
+# ============================================================
+
+class USDTNetworkView(
+    discord.ui.View
+):
+
+    def __init__(
+        self,
+        user_id: int,
+    ):
+        super().__init__(
+            timeout=180
+        )
+
+        self.user_id = user_id
+
+    async def interaction_check(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        if interaction.user.id != self.user_id:
+
+            await interaction.response.send_message(
+                embed=base_embed(
+                    "USDT Deposit",
+                    "This deposit menu belongs to another user.",
+                ),
+                ephemeral=False,
+            )
+
+            return False
+
+        return True
+
+    # ========================================================
+    # POLYGON
+    # ========================================================
+
+    @discord.ui.button(
+        label="Polygon",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_usdt_polygon_new",
+        row=0,
+    )
+    async def polygon_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await send_deposit_dm(
+            interaction,
+            "USDT",
+            USDT_DEPOSIT_ADDRESSES["Polygon"],
+            "Polygon",
+        )
+
+    # ========================================================
+    # SOLANA
+    # ========================================================
+
+    @discord.ui.button(
+        label="Solana",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_usdt_solana_new",
+        row=0,
+    )
+    async def solana_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await send_deposit_dm(
+            interaction,
+            "USDT",
+            USDT_DEPOSIT_ADDRESSES["Solana"],
+            "Solana",
+        )
+
+    # ========================================================
+    # TRON
+    # ========================================================
+
+    @discord.ui.button(
+        label="Tron",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_usdt_tron_new",
+        row=1,
+    )
+    async def tron_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await send_deposit_dm(
+            interaction,
+            "USDT",
+            USDT_DEPOSIT_ADDRESSES["Tron"],
+            "Tron",
+        )
+
+    # ========================================================
+    # ETH
+    # ========================================================
+
+    @discord.ui.button(
+        label="ETH",
+        style=discord.ButtonStyle.secondary,
+        custom_id="deposit_usdt_eth_new",
+        row=1,
+    )
+    async def eth_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await send_deposit_dm(
+            interaction,
+            "USDT",
+            USDT_DEPOSIT_ADDRESSES["ETH"],
+            "ETH",
+        )
+
+
+# ============================================================
+# /DEPOSIT
+# ============================================================
+
+@bot.tree.command(
+    name="deposit",
+    description="Get your cryptocurrency deposit address.",
+)
+async def deposit_command(
+    interaction: discord.Interaction,
+):
+
+    embed = base_embed(
+        "New Deposit: Select Crypto",
+        (
+            "Choose the cryptocurrency you want to deposit.\n\n"
+            "**Litecoin (LTC)** and **Solana (SOL)** "
+            "are native and faster, while the rest of the "
+            "cryptocurrencies require automatic conversion "
+            "to Litecoin which may take longer and have "
+            "network fees."
+        ),
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=DepositCurrencyView(
+            interaction.user.id
+        ),
+        ephemeral=False,
+    )
+    
 # ============================================================
 # /HELP
 # ============================================================
@@ -10112,453 +10536,7 @@ async def housebal(
         embed=embed,
         view=HouseBalanceView(),
     )
-# ============================================================
-# DEPOSIT SYSTEM
-# ============================================================
 
-SOL_DEPOSIT_ADDRESS = (
-    "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
-)
-
-USDT_DEPOSIT_ADDRESSES = {
-    "Polygon": "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2",
-    "Solana": "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6",
-    "Tron": "TLmtud4AMeZy5VqetHW9VEGp8dfQCLu5Bp",
-    "ETH": "0xc21F13F95afb0d53D54ccCa378E177F50f41ECF2",
-}
-
-
-# ============================================================
-# MAIN DEPOSIT MENU
-# ============================================================
-
-class DepositCurrencyView(discord.ui.View):
-
-    def __init__(
-        self,
-        user_id: int,
-    ):
-        super().__init__(timeout=180)
-
-        self.user_id = user_id
-
-    async def interaction_check(
-        self,
-        interaction: discord.Interaction,
-    ) -> bool:
-
-        if interaction.user.id != self.user_id:
-
-            await interaction.response.send_message(
-                "This deposit menu belongs to another user.",
-                ephemeral=False,
-            )
-
-            return False
-
-        return True
-
-    @discord.ui.button(
-        label="LTC",
-        emoji="⭐",
-        style=discord.ButtonStyle.secondary,
-        custom_id="deposit_ltc",
-    )
-    async def ltc_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await send_crypto_deposit(
-            interaction,
-            "LTC",
-        )
-
-    @discord.ui.button(
-        label="SOL",
-        emoji="⭐",
-        style=discord.ButtonStyle.secondary,
-        custom_id="deposit_sol",
-    )
-    async def sol_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await send_crypto_deposit(
-            interaction,
-            "SOL",
-        )
-
-    @discord.ui.button(
-        label="USDT",
-        emoji="⭐",
-        style=discord.ButtonStyle.secondary,
-        custom_id="deposit_usdt",
-    )
-    async def usdt_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        embed = base_embed(
-            title="Select Network for Tether USDT",
-            description=(
-                "Choose the network you want to use "
-                "for your USDT deposit."
-            ),
-        )
-
-        await interaction.response.edit_message(
-            content=None,
-            embed=embed,
-            view=USDTNetworkView(
-                self.user_id,
-            ),
-        )
-
-
-# ============================================================
-# USDT NETWORK MENU
-# ============================================================
-
-class USDTNetworkView(discord.ui.View):
-
-    def __init__(
-        self,
-        user_id: int,
-    ):
-        super().__init__(timeout=180)
-
-        self.user_id = user_id
-
-    async def interaction_check(
-        self,
-        interaction: discord.Interaction,
-    ) -> bool:
-
-        if interaction.user.id != self.user_id:
-
-            await interaction.response.send_message(
-                "This deposit menu belongs to another user.",
-                ephemeral=False,
-            )
-
-            return False
-
-        return True
-
-    @discord.ui.button(
-        label="Polygon",
-        style=discord.ButtonStyle.secondary,
-        custom_id="usdt_polygon",
-    )
-    async def polygon_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await send_usdt_deposit(
-            interaction,
-            "Polygon",
-        )
-
-    @discord.ui.button(
-        label="Solana",
-        style=discord.ButtonStyle.secondary,
-        custom_id="usdt_solana",
-    )
-    async def solana_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await send_usdt_deposit(
-            interaction,
-            "Solana",
-        )
-
-    @discord.ui.button(
-        label="Tron",
-        style=discord.ButtonStyle.secondary,
-        custom_id="usdt_tron",
-    )
-    async def tron_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await send_usdt_deposit(
-            interaction,
-            "Tron",
-        )
-
-    @discord.ui.button(
-        label="ETH",
-        style=discord.ButtonStyle.secondary,
-        custom_id="usdt_eth",
-    )
-    async def eth_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-
-        await send_usdt_deposit(
-            interaction,
-            "ETH",
-        )
-
-
-# ============================================================
-# GET LTC ADDRESS
-# ============================================================
-
-async def get_ltc_deposit_address(
-    user_id: int,
-):
-
-    try:
-
-        if hasattr(
-            bot.db,
-            "get_or_create_ltc_address",
-        ):
-
-            address = await bot.db.get_or_create_ltc_address(
-                user_id,
-                config.LTC_XPUB,
-                getattr(
-                    config,
-                    "LTC_DERIVATION_PATH",
-                    "m/0",
-                ),
-            )
-
-            if address:
-                return address
-
-    except Exception as e:
-
-        print(
-            f"[DEPOSIT] LTC address error: {e}"
-        )
-
-    return None
-
-
-# ============================================================
-# SEND LTC / SOL
-# ============================================================
-
-async def send_crypto_deposit(
-    interaction: discord.Interaction,
-    currency: str,
-):
-
-    currency = currency.upper()
-
-    # --------------------------------------------------------
-    # LTC
-    # --------------------------------------------------------
-
-    if currency == "LTC":
-
-        address = await get_ltc_deposit_address(
-            interaction.user.id
-        )
-
-        if not address:
-
-            await interaction.response.send_message(
-                "Your LTC deposit address could not "
-                "be generated right now.",
-                ephemeral=False,
-            )
-
-            return
-
-    # --------------------------------------------------------
-    # SOL
-    # --------------------------------------------------------
-
-    elif currency == "SOL":
-
-        address = SOL_DEPOSIT_ADDRESS
-
-    else:
-
-        await interaction.response.send_message(
-            "Unsupported cryptocurrency.",
-            ephemeral=False,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # DM
-    # --------------------------------------------------------
-
-    dm_message = (
-        f"**Your {currency} Deposit Address**\n\n"
-        f"**{interaction.user.mention}**, "
-        f"deposit **{currency}** only:\n\n"
-        f"```"
-        f"{address}"
-        f"```\n"
-        f"Minimum: **$0.05**\n"
-        f"Fee: **0%**"
-    )
-
-    try:
-
-        await interaction.user.send(
-            dm_message
-        )
-
-    except discord.Forbidden:
-
-        await interaction.response.send_message(
-            "I couldn't DM you. "
-            "Please enable Direct Messages "
-            "from this server and try again.",
-            ephemeral=False,
-        )
-
-        return
-
-    except Exception as e:
-
-        print(
-            f"[DEPOSIT] DM error: {e}"
-        )
-
-        await interaction.response.send_message(
-            "Something went wrong while sending "
-            "your deposit address.",
-            ephemeral=False,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Confirmation in server
-    # --------------------------------------------------------
-
-    await interaction.response.send_message(
-        f"Your **{currency}** deposit address "
-        f"has been sent to your DMs.",
-        ephemeral=False,
-    )
-
-
-# ============================================================
-# SEND USDT
-# ============================================================
-
-async def send_usdt_deposit(
-    interaction: discord.Interaction,
-    network: str,
-):
-
-    address = USDT_DEPOSIT_ADDRESSES.get(
-        network
-    )
-
-    if not address:
-
-        await interaction.response.send_message(
-            "Invalid USDT network.",
-            ephemeral=False,
-        )
-
-        return
-
-    dm_message = (
-        f"**Your USDT Deposit Address**\n\n"
-        f"**{interaction.user.mention}**, "
-        f"deposit **USDT ({network})** only:\n\n"
-        f"```"
-        f"{address}"
-        f"```\n"
-        f"Minimum: **$0.05**\n"
-        f"Fee: **0%**"
-    )
-
-    try:
-
-        await interaction.user.send(
-            dm_message
-        )
-
-    except discord.Forbidden:
-
-        await interaction.response.send_message(
-            "I couldn't DM you. "
-            "Please enable Direct Messages "
-            "from this server and try again.",
-            ephemeral=False,
-        )
-
-        return
-
-    except Exception as e:
-
-        print(
-            f"[DEPOSIT] USDT DM error: {e}"
-        )
-
-        await interaction.response.send_message(
-            "Something went wrong while sending "
-            "your USDT address.",
-            ephemeral=False,
-        )
-
-        return
-
-    await interaction.response.send_message(
-        f"Your **USDT ({network})** deposit address "
-        f"has been sent to your DMs.",
-        ephemeral=False,
-    )
-
-
-# ============================================================
-# /DEPOSIT
-# ============================================================
-
-@bot.tree.command(
-    name="deposit",
-    description="Get your cryptocurrency deposit address.",
-)
-async def deposit_command(
-    interaction: discord.Interaction,
-):
-
-    embed = base_embed(
-        title="New Deposit: Select Crypto",
-        description=(
-            "Choose the cryptocurrency you want to deposit.\n\n"
-            "⭐ **Litecoin (LTC)** and "
-            "**Solana (SOL)** are native and fastest.\n\n"
-            "Other currencies may take more time "
-            "to get converted."
-        ),
-    )
-
-    await interaction.response.send_message(
-        embed=embed,
-        view=DepositCurrencyView(
-            interaction.user.id,
-        ),
-        ephemeral=False,
-    )
 # ============================================================
 # HOUSE ADD FUNDS EMBED
 # ============================================================
