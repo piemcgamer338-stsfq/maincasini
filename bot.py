@@ -5336,6 +5336,121 @@ COINFLIP_RED_STICKER_ID = 1553360108682084382
 COINFLIP_BLUE_STICKER_ID = 1553360311933734913
 
 
+# ============================================================
+# COINFLIP STICKER SENDER
+# ============================================================
+
+async def send_coinflip_sticker(
+    interaction: discord.Interaction,
+    result: str,
+):
+    """
+    Send the appropriate Coinflip sticker.
+
+    Tries the interaction webhook first.
+    If that fails, tries the actual Discord channel.
+
+    Returns True if the sticker was sent successfully.
+    """
+
+    if result == "red":
+        sticker_id = COINFLIP_RED_STICKER_ID
+    else:
+        sticker_id = COINFLIP_BLUE_STICKER_ID
+
+    # --------------------------------------------------------
+    # FETCH STICKER
+    # --------------------------------------------------------
+
+    try:
+        sticker = await bot.fetch_sticker(
+            sticker_id
+        )
+
+        print(
+            f"[COINFLIP STICKER] "
+            f"Fetched sticker: "
+            f"{sticker.id} | "
+            f"{getattr(sticker, 'name', 'Unknown')} | "
+            f"{getattr(sticker, 'type', 'Unknown')}"
+        )
+
+    except Exception as exc:
+        print(
+            f"[COINFLIP STICKER] "
+            f"Could not fetch sticker "
+            f"{sticker_id}: {exc}"
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # METHOD 1 — INTERACTION FOLLOWUP
+    # --------------------------------------------------------
+
+    try:
+        await interaction.followup.send(
+            stickers=[sticker],
+            wait=True,
+        )
+
+        print(
+            f"[COINFLIP STICKER] "
+            f"Sent {result} sticker "
+            f"through interaction followup."
+        )
+
+        return True
+
+    except Exception as exc:
+        print(
+            f"[COINFLIP STICKER] "
+            f"Followup sticker send failed: {exc}"
+        )
+
+    # --------------------------------------------------------
+    # METHOD 2 — CHANNEL SEND
+    # --------------------------------------------------------
+
+    try:
+        channel = interaction.channel
+
+        if channel is not None:
+            await channel.send(
+                stickers=[sticker]
+            )
+
+            print(
+                f"[COINFLIP STICKER] "
+                f"Sent {result} sticker "
+                f"through channel."
+            )
+
+            return True
+
+    except Exception as exc:
+        print(
+            f"[COINFLIP STICKER] "
+            f"Channel sticker send failed: {exc}"
+        )
+
+    # --------------------------------------------------------
+    # FAILED
+    # --------------------------------------------------------
+
+    print(
+        f"[COINFLIP STICKER] "
+        f"FAILED TO SEND {result.upper()} "
+        f"STICKER {sticker_id}"
+    )
+
+    return False
+
+
+# ============================================================
+# COINFLIP COMMAND
+# ============================================================
+
 @bot.tree.command(
     name="coinflip",
     description="Flip a coin against the bot.",
@@ -5363,6 +5478,10 @@ async def coinflip(
 ):
     user_id = interaction.user.id
 
+    # ========================================================
+    # COOLDOWN
+    # ========================================================
+
     cooldown = bot.check_game_cooldown(
         user_id,
         "coinflip",
@@ -5379,7 +5498,13 @@ async def coinflip(
         )
         return
 
-    balance = await bot.get_balance(user_id)
+    # ========================================================
+    # BALANCE
+    # ========================================================
+
+    balance = await bot.get_balance(
+        user_id
+    )
 
     bet = amount_or_all(
         amount,
@@ -5391,7 +5516,10 @@ async def coinflip(
             interaction,
             embed=error_embed(
                 "Invalid Amount",
-                "Enter a valid amount such as `$1`, `1`, or `0.10`.",
+                (
+                    "Enter a valid amount such as "
+                    "`$1`, `1`, or `0.10`."
+                ),
             ),
             ephemeral=False,
         )
@@ -5402,7 +5530,10 @@ async def coinflip(
             interaction,
             embed=error_embed(
                 "Minimum Bet",
-                f"The minimum bet is **{money(MIN_BET)}**.",
+                (
+                    f"The minimum bet is "
+                    f"**{money(MIN_BET)}**."
+                ),
             ),
             ephemeral=False,
         )
@@ -5419,44 +5550,11 @@ async def coinflip(
         )
         return
 
+    # ========================================================
+    # SELECTED COLOR
+    # ========================================================
+
     selected = color.value
-
-    game_id = bot.next_game_id()
-
-    server_seed = bot.create_server_seed()
-    server_hash = bot.server_hash(
-        server_seed
-    )
-
-    client_seed = bot.create_client_seed(
-        user_id
-    )
-
-    nonce = 0
-
-    # Deduct the bet exactly once.
-    if not await bot.deduct_bet(
-        user_id,
-        bet,
-        "coinflip",
-    ):
-        await bot.safe_send(
-            interaction,
-            content="Your balance changed. Please try again.",
-            ephemeral=False,
-        )
-        return
-
-    bot.active_games[user_id] = {
-        "type": "coinflip",
-        "game_id": game_id,
-        "bet": bet,
-        "selected": selected,
-        "server_seed": server_seed,
-        "server_hash": server_hash,
-        "client_seed": client_seed,
-        "nonce": nonce,
-    }
 
     selected_name = (
         "Red"
@@ -5469,6 +5567,70 @@ async def coinflip(
         if selected == "red"
         else "Red"
     )
+
+    # ========================================================
+    # GAME DATA
+    # ========================================================
+
+    game_id = bot.next_game_id()
+
+    server_seed = (
+        bot.create_server_seed()
+    )
+
+    server_hash = (
+        bot.server_hash(
+            server_seed
+        )
+    )
+
+    client_seed = (
+        bot.create_client_seed(
+            user_id
+        )
+    )
+
+    nonce = 0
+
+    # ========================================================
+    # DEDUCT BET
+    # ========================================================
+
+    deducted = await bot.deduct_bet(
+        user_id,
+        bet,
+        "coinflip",
+    )
+
+    if not deducted:
+        await bot.safe_send(
+            interaction,
+            content=(
+                "Your balance changed. "
+                "Please try again."
+            ),
+            ephemeral=False,
+        )
+        return
+
+    # ========================================================
+    # SAVE ACTIVE GAME
+    # ========================================================
+
+    bot.active_games[user_id] = {
+        "type": "coinflip",
+        "game_id": game_id,
+        "bet": bet,
+        "selected": selected,
+        "server_seed": server_seed,
+        "server_hash": server_hash,
+        "client_seed": client_seed,
+        "nonce": nonce,
+    }
+
+    # ========================================================
+    # FLIPPING MESSAGE
+    # ========================================================
 
     await interaction.response.send_message(
         embed=neutral_embed(
@@ -5483,7 +5645,15 @@ async def coinflip(
         )
     )
 
+    # ========================================================
+    # FLIP DELAY
+    # ========================================================
+
     await asyncio.sleep(2)
+
+    # ========================================================
+    # GET GAME
+    # ========================================================
 
     game = bot.active_games.pop(
         user_id,
@@ -5493,6 +5663,10 @@ async def coinflip(
     if not game:
         return
 
+    # ========================================================
+    # FAIR ROLL
+    # ========================================================
+
     roll = bot.fair_roll(
         game["server_seed"],
         game["client_seed"],
@@ -5500,15 +5674,27 @@ async def coinflip(
         "coinflip",
     )
 
+    # --------------------------------------------------------
+    # RED: 0 - 49.99
+    # BLUE: 50 - 99.99
+    # --------------------------------------------------------
+
     result = (
         "red"
         if roll < Decimal("50")
         else "blue"
     )
 
-    won = result == selected
+    won = (
+        result == selected
+    )
+
+    # ========================================================
+    # WIN
+    # ========================================================
 
     if won:
+
         payout = (
             bet * COINFLIP_MULTIPLIER
         ).quantize(
@@ -5538,7 +5724,12 @@ async def coinflip(
             f"**(1.92x)**"
         )
 
+    # ========================================================
+    # LOSS
+    # ========================================================
+
     else:
+
         payout = Decimal("0")
 
         await bot.settle_loss(
@@ -5561,6 +5752,10 @@ async def coinflip(
             f"**Lost:** {money(bet)}"
         )
 
+    # ========================================================
+    # RESULT EMBED
+    # ========================================================
+
     embed = base_embed(
         title=result_title,
         description=result_text,
@@ -5570,9 +5765,12 @@ async def coinflip(
     embed.add_field(
         name="Provably Fair",
         value=(
-            f"**Server Hash:** `{game['server_hash']}`\n"
-            f"**Client Seed:** `{game['client_seed']}`\n"
-            f"**Nonce:** `{game['nonce']}`"
+            f"**Server Hash:** "
+            f"`{game['server_hash']}`\n"
+            f"**Client Seed:** "
+            f"`{game['client_seed']}`\n"
+            f"**Nonce:** "
+            f"`{game['nonce']}`"
         ),
         inline=False,
     )
@@ -5587,35 +5785,36 @@ async def coinflip(
         text="Verify this result with /provably-fair"
     )
 
+    # ========================================================
+    # EDIT ORIGINAL RESULT
+    # ========================================================
+
     await interaction.edit_original_response(
         embed=embed
     )
 
     # ========================================================
-    # SEND RESULT STICKER
+    # SEND STICKER
     # ========================================================
 
-    sticker_id = (
-        COINFLIP_RED_STICKER_ID
-        if result == "red"
-        else COINFLIP_BLUE_STICKER_ID
+    sticker_sent = await send_coinflip_sticker(
+        interaction,
+        result,
     )
 
-    try:
-        sticker = await bot.fetch_sticker(
-            sticker_id
-        )
+    # ========================================================
+    # DEBUG MESSAGE IF STICKER FAILED
+    # ========================================================
 
-        await interaction.followup.send(
-            stickers=[sticker]
-        )
-
-    except Exception as sticker_error:
+    if not sticker_sent:
         print(
-            f"[COINFLIP STICKER] "
-            f"Failed to send sticker {sticker_id}: "
-            f"{sticker_error}"
+            "[COINFLIP STICKER] "
+            "Sticker could not be delivered. "
+            "Check that the bot is allowed to use/send "
+            "the sticker in this server/channel."
         )
+
+
 # ============================================================
 # MINES
 # ============================================================
@@ -5687,9 +5886,6 @@ def mines_embed(
     )
 
     return embed
-
-
-
 
 # ============================================================
 # MINES CLICK
@@ -5777,7 +5973,7 @@ async def mines_click(
         )
 
         embed = base_embed(
-            title="## Mines — Bomb!",
+            title="Mines — Bomb!",
             description=(
                 f"You hit a bomb.\n\n"
                 f"**Bet:** {money(game.amount)}\n"
@@ -5921,7 +6117,7 @@ async def mines_cashout(
     )
 
     embed = base_embed(
-        title="## Mines — Cashed Out",
+        title=" Mines — Cashed Out",
         description=(
             f"**Bet:** {money(game.amount)}\n"
             f"**Multiplier:** {multiplier:.2f}x\n"
@@ -5954,7 +6150,7 @@ async def mines_cashout(
 
     if automatic:
 
-        embed.title = "## Mines — All Safe Tiles!"
+        embed.title = " Mines — All Safe Tiles!"
 
     await interaction.response.edit_message(
         embed=embed,
@@ -5999,44 +6195,44 @@ CasinoBot.mines_cashout = mines_cashout
 # ============================================================
 
 HELP_TEXT = """
-## Games
+ Games
 `/dice` `/roll`
 `/coinflip`
 `/mines`
 `/frog-run`
 `/bj` `/blackjack`
 
-## Wallet
+ Wallet
 `/balance`
 `/deposit`
 `/withdraw`
 `/tip`
 
-## Rewards
+ Rewards
 `/rakeback`
 `/ranks`
 `/rank-rewards`
 `/rewardinfo`
 
-## Rain & Affiliates
+ Rain & Affiliates
 `/rain`
 `/affiliate`
 `/affiliates`
 `/affiliate-claim`
 `/affiliateinfo`
 
-## Competition
+ Competition
 `/leaderboard`
 `/race`
 
-## Information
+ Information
 `/howtoplay`
 `/stats`
 `/history`
 `/fair`
 `/provably-fair`
 
-## Other
+ Other
 `/claim`
 `/private-channel`
 `/retrigger`
@@ -6241,7 +6437,7 @@ async def affiliate(
     await interaction.response.send_message(
         embed=base_embed(
             description=(
-                "## Affiliate\n\n"
+                " Affiliate\n\n"
                 f"**Referrals:** {referrals}\n"
                 f"**Commission:** {percent:.2f}%\n"
                 f"**Available:** {money(earnings)}"
@@ -6292,7 +6488,7 @@ async def send_race_message(
             )
 
         lines = [
-            "## 3 Day Race — On GOING",
+            " 3 Day Race — On GOING",
             "",
         ]
 
@@ -6320,7 +6516,7 @@ async def send_race_message(
             )
 
         lines = [
-            "## 3 Day Race — Winners!",
+            " 3 Day Race — Winners!",
             "",
         ]
 
