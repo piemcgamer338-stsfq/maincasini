@@ -1032,500 +1032,478 @@ class Database:
             amount,
         )
 
-   # =========================================================
-# DEPOSIT ADDRESSES
-# =========================================================
+    # =========================================================
+    # DEPOSIT ADDRESSES
+    # =========================================================
 
-async def get_deposit_address(
-    self,
-    user_id: int,
-    currency: str,
-) -> Optional[str]:
+    async def get_deposit_address(
+        self,
+        user_id: int,
+        currency: str,
+    ) -> Optional[str]:
 
-    currency = currency.upper()
+        currency = currency.upper()
 
-    row = await self.pool.fetchrow(
-        """
-        SELECT address
-        FROM deposit_addresses
-        WHERE user_id=$1
-          AND currency=$2
-        """,
-        user_id,
-        currency,
-    )
+        row = await self.pool.fetchrow(
+            """
+            SELECT address
+            FROM deposit_addresses
+            WHERE user_id=$1
+              AND currency=$2
+            """,
+            user_id,
+            currency,
+        )
 
-    return row["address"] if row else None
+        return row["address"] if row else None
 
+    async def save_deposit_address(
+        self,
+        user_id: int,
+        currency: str,
+        address: str,
+        derivation_index: Optional[int] = None,
+    ):
 
-async def save_deposit_address(
-    self,
-    user_id: int,
-    currency: str,
-    address: str,
-    derivation_index: Optional[int] = None,
-):
+        currency = currency.upper()
 
-    currency = currency.upper()
-
-    return await self.pool.fetchrow(
-        """
-        INSERT INTO deposit_addresses(
+        return await self.pool.fetchrow(
+            """
+            INSERT INTO deposit_addresses(
+                user_id,
+                currency,
+                address,
+                derivation_index
+            )
+            VALUES($1,$2,$3,$4)
+            ON CONFLICT(user_id,currency)
+            DO NOTHING
+            RETURNING *
+            """,
             user_id,
             currency,
             address,
-            derivation_index
-        )
-        VALUES($1,$2,$3,$4)
-        ON CONFLICT(user_id,currency)
-        DO NOTHING
-        RETURNING *
-        """,
-        user_id,
-        currency,
-        address,
-        derivation_index,
-    )
-
-
-# =========================================================
-# LTC ADDRESS GENERATION
-# =========================================================
-
-async def get_or_create_ltc_address(
-    self,
-    user_id: int,
-    xpub: str,
-    derivation_path: str = "m/0",
-) -> Optional[str]:
-
-    xpub = str(xpub or "").strip()
-
-    if not xpub:
-        raise ValueError(
-            "LTC_XPUB is missing."
+            derivation_index,
         )
 
-    # -----------------------------------------------------
-    # FIRST: CHECK IF USER ALREADY HAS AN LTC ADDRESS
-    # -----------------------------------------------------
+    # =========================================================
+    # LTC ADDRESS GENERATION
+    # =========================================================
 
-    existing = await self.pool.fetchrow(
-        """
-        SELECT address
-        FROM deposit_addresses
-        WHERE user_id=$1
-          AND currency='LTC'
-        """,
-        user_id,
-    )
+    async def get_or_create_ltc_address(
+        self,
+        user_id: int,
+        xpub: str,
+        derivation_path: str = "m/0",
+    ) -> Optional[str]:
 
-    if existing:
-        return existing["address"]
+        xpub = str(xpub or "").strip()
 
-    # -----------------------------------------------------
-    # LTC XPUB DERIVATION
-    # -----------------------------------------------------
+        if not xpub:
+            raise ValueError(
+                "LTC_XPUB is missing."
+            )
 
-    try:
+        # -----------------------------------------------------
+        # CHECK EXISTING ADDRESS
+        # -----------------------------------------------------
 
-        from bip_utils import (
-            Bip44,
-            Bip44Coins,
-            Bip44Changes,
+        existing = await self.pool.fetchrow(
+            """
+            SELECT address
+            FROM deposit_addresses
+            WHERE user_id=$1
+              AND currency='LTC'
+            """,
+            user_id,
         )
 
-    except ImportError as exc:
+        if existing:
+            return existing["address"]
 
-        raise RuntimeError(
-            "bip_utils is required for LTC xpub address generation."
-        ) from exc
+        # -----------------------------------------------------
+        # IMPORT BIP UTILS
+        # -----------------------------------------------------
 
-    # -----------------------------------------------------
-    # DATABASE LOCK
-    #
-    # Prevents two users from receiving the same
-    # derivation index if two addresses are requested
-    # at exactly the same time.
-    # -----------------------------------------------------
-
-    async with self.pool.acquire() as conn:
-
-        async with conn.transaction():
-
-            await conn.execute(
-                """
-                SELECT pg_advisory_xact_lock(
-                    846219731
-                )
-                """
+        try:
+            from bip_utils import (
+                Bip44,
+                Bip44Coins,
+                Bip44Changes,
             )
+        except ImportError as exc:
+            raise RuntimeError(
+                "bip_utils is required for LTC xpub address generation."
+            ) from exc
 
-            # -------------------------------------------------
-            # CHECK AGAIN AFTER LOCK
-            # -------------------------------------------------
+        # -----------------------------------------------------
+        # DATABASE LOCK
+        # -----------------------------------------------------
 
-            existing = await conn.fetchrow(
-                """
-                SELECT address
-                FROM deposit_addresses
-                WHERE user_id=$1
-                  AND currency='LTC'
-                """,
-                user_id,
-            )
+        async with self.pool.acquire() as conn:
 
-            if existing:
-                return existing["address"]
-
-            # -------------------------------------------------
-            # FIND NEXT DERIVATION INDEX
-            # -------------------------------------------------
-
-            next_index = await conn.fetchval(
-                """
-                SELECT COALESCE(
-                    MAX(derivation_index) + 1,
-                    0
-                )
-                FROM deposit_addresses
-                WHERE currency='LTC'
-                """
-            )
-
-            next_index = int(
-                next_index or 0
-            )
-
-            # -------------------------------------------------
-            # DERIVE LTC ADDRESS FROM XPUB
-            #
-            # The xpub is assumed to represent the external
-            # receiving chain.
-            #
-            # Address path:
-            #
-            # m/0/<index>
-            #
-            # The private key is never required.
-            # -------------------------------------------------
-
-            wallet = Bip44.FromExtendedKey(
-                xpub,
-                Bip44Coins.LITECOIN,
-            )
-
-            receiving_chain = wallet.Change(
-                Bip44Changes.CHAIN_EXT
-            )
-
-            address = (
-                receiving_chain
-                .AddressIndex(next_index)
-                .PublicKey()
-                .ToAddress()
-            )
-
-            # -------------------------------------------------
-            # SAVE ADDRESS
-            # -------------------------------------------------
-
-            saved = await conn.fetchrow(
-                """
-                INSERT INTO deposit_addresses(
-                    user_id,
-                    currency,
-                    address,
-                    derivation_index
-                )
-                VALUES(
-                    $1,
-                    'LTC',
-                    $2,
-                    $3
-                )
-                ON CONFLICT(user_id,currency)
-                DO NOTHING
-                RETURNING address
-                """,
-                user_id,
-                address,
-                next_index,
-            )
-
-            # -------------------------------------------------
-            # IF ANOTHER REQUEST CREATED IT FIRST
-            # -------------------------------------------------
-
-            if saved:
-                return saved["address"]
-
-            existing = await conn.fetchrow(
-                """
-                SELECT address
-                FROM deposit_addresses
-                WHERE user_id=$1
-                  AND currency='LTC'
-                """,
-                user_id,
-            )
-
-            if existing:
-                return existing["address"]
-
-            return None
-
-
-# =========================================================
-# DEPOSITS
-# =========================================================
-
-async def process_deposit(
-    self,
-    deposit: dict,
-) -> bool:
-
-    currency = str(
-        deposit.get(
-            "currency",
-            "",
-        )
-    ).upper()
-
-    txid = str(
-        deposit.get(
-            "txid",
-            "",
-        )
-    ).strip()
-
-    amount = Decimal(
-        str(
-            deposit.get(
-                "amount",
-                "0",
-            )
-        )
-    )
-
-    address = deposit.get(
-        "address"
-    )
-
-    confirmations = int(
-        deposit.get(
-            "confirmations",
-            0,
-        )
-    )
-
-    required = int(
-        deposit.get(
-            "required_confirmations",
-            2,
-        )
-    )
-
-    if not currency or not txid:
-        return False
-
-    if amount <= 0:
-        return False
-
-    async with self.pool.acquire() as conn:
-
-        async with conn.transaction():
-
-            # -------------------------------------------------
-            # CHECK EXISTING TRANSACTION
-            # -------------------------------------------------
-
-            existing = await conn.fetchrow(
-                """
-                SELECT *
-                FROM deposits
-                WHERE currency=$1
-                  AND txid=$2
-                FOR UPDATE
-                """,
-                currency,
-                txid,
-            )
-
-            # Already credited.
-            if (
-                existing
-                and existing["credited"]
-            ):
-                return False
-
-            # -------------------------------------------------
-            # FIND USER BY DEPOSIT ADDRESS
-            # -------------------------------------------------
-
-            user_id = None
-
-            if address:
-
-                row = await conn.fetchrow(
-                    """
-                    SELECT user_id
-                    FROM deposit_addresses
-                    WHERE currency=$1
-                      AND address=$2
-                    """,
-                    currency,
-                    address,
-                )
-
-                if row:
-                    user_id = row["user_id"]
-
-            if user_id is None:
-
-                return False
-
-            # -------------------------------------------------
-            # UPDATE EXISTING DEPOSIT
-            # -------------------------------------------------
-
-            if existing:
+            async with conn.transaction():
 
                 await conn.execute(
                     """
-                    UPDATE deposits
-                    SET
-                        confirmations=$3
+                    SELECT pg_advisory_xact_lock(
+                        846219731
+                    )
+                    """
+                )
+
+                # -------------------------------------------------
+                # CHECK AGAIN AFTER LOCK
+                # -------------------------------------------------
+
+                existing = await conn.fetchrow(
+                    """
+                    SELECT address
+                    FROM deposit_addresses
+                    WHERE user_id=$1
+                      AND currency='LTC'
+                    """,
+                    user_id,
+                )
+
+                if existing:
+                    return existing["address"]
+
+                # -------------------------------------------------
+                # FIND NEXT INDEX
+                # -------------------------------------------------
+
+                next_index = await conn.fetchval(
+                    """
+                    SELECT COALESCE(
+                        MAX(derivation_index) + 1,
+                        0
+                    )
+                    FROM deposit_addresses
+                    WHERE currency='LTC'
+                    """
+                )
+
+                next_index = int(
+                    next_index or 0
+                )
+
+                # -------------------------------------------------
+                # DERIVE LTC ADDRESS
+                # -------------------------------------------------
+
+                wallet = Bip44.FromExtendedKey(
+                    xpub,
+                    Bip44Coins.LITECOIN,
+                )
+
+                receiving_chain = wallet.Change(
+                    Bip44Changes.CHAIN_EXT
+                )
+
+                address = (
+                    receiving_chain
+                    .AddressIndex(next_index)
+                    .PublicKey()
+                    .ToAddress()
+                )
+
+                # -------------------------------------------------
+                # SAVE ADDRESS
+                # -------------------------------------------------
+
+                saved = await conn.fetchrow(
+                    """
+                    INSERT INTO deposit_addresses(
+                        user_id,
+                        currency,
+                        address,
+                        derivation_index
+                    )
+                    VALUES(
+                        $1,
+                        'LTC',
+                        $2,
+                        $3
+                    )
+                    ON CONFLICT(user_id,currency)
+                    DO NOTHING
+                    RETURNING address
+                    """,
+                    user_id,
+                    address,
+                    next_index,
+                )
+
+                if saved:
+                    return saved["address"]
+
+                # -------------------------------------------------
+                # ANOTHER REQUEST CREATED IT FIRST
+                # -------------------------------------------------
+
+                existing = await conn.fetchrow(
+                    """
+                    SELECT address
+                    FROM deposit_addresses
+                    WHERE user_id=$1
+                      AND currency='LTC'
+                    """,
+                    user_id,
+                )
+
+                if existing:
+                    return existing["address"]
+
+                return None
+
+    # =========================================================
+    # DEPOSITS
+    # =========================================================
+
+    async def process_deposit(
+        self,
+        deposit: dict,
+    ) -> bool:
+
+        currency = str(
+            deposit.get(
+                "currency",
+                "",
+            )
+        ).upper()
+
+        txid = str(
+            deposit.get(
+                "txid",
+                "",
+            )
+        ).strip()
+
+        amount = Decimal(
+            str(
+                deposit.get(
+                    "amount",
+                    "0",
+                )
+            )
+        )
+
+        address = deposit.get(
+            "address"
+        )
+
+        confirmations = int(
+            deposit.get(
+                "confirmations",
+                0,
+            )
+        )
+
+        required = int(
+            deposit.get(
+                "required_confirmations",
+                2,
+            )
+        )
+
+        if not currency or not txid:
+            return False
+
+        if amount <= 0:
+            return False
+
+        async with self.pool.acquire() as conn:
+
+            async with conn.transaction():
+
+                # -------------------------------------------------
+                # CHECK EXISTING TRANSACTION
+                # -------------------------------------------------
+
+                existing = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM deposits
                     WHERE currency=$1
                       AND txid=$2
+                    FOR UPDATE
                     """,
                     currency,
                     txid,
-                    confirmations,
                 )
 
-            # -------------------------------------------------
-            # CREATE NEW DEPOSIT
-            # -------------------------------------------------
+                if (
+                    existing
+                    and existing["credited"]
+                ):
+                    return False
 
-            else:
+                # -------------------------------------------------
+                # FIND USER BY DEPOSIT ADDRESS
+                # -------------------------------------------------
 
-                await conn.execute(
-                    """
-                    INSERT INTO deposits(
+                user_id = None
+
+                if address:
+
+                    row = await conn.fetchrow(
+                        """
+                        SELECT user_id
+                        FROM deposit_addresses
+                        WHERE currency=$1
+                          AND address=$2
+                        """,
+                        currency,
+                        address,
+                    )
+
+                    if row:
+                        user_id = row["user_id"]
+
+                if user_id is None:
+                    return False
+
+                # -------------------------------------------------
+                # UPDATE EXISTING DEPOSIT
+                # -------------------------------------------------
+
+                if existing:
+
+                    await conn.execute(
+                        """
+                        UPDATE deposits
+                        SET
+                            confirmations=$3
+                        WHERE currency=$1
+                          AND txid=$2
+                        """,
+                        currency,
+                        txid,
+                        confirmations,
+                    )
+
+                # -------------------------------------------------
+                # CREATE NEW DEPOSIT
+                # -------------------------------------------------
+
+                else:
+
+                    await conn.execute(
+                        """
+                        INSERT INTO deposits(
+                            user_id,
+                            currency,
+                            address,
+                            txid,
+                            amount,
+                            confirmations,
+                            required_confirmations
+                        )
+                        VALUES(
+                            $1,
+                            $2,
+                            $3,
+                            $4,
+                            $5,
+                            $6,
+                            $7
+                        )
+                        """,
                         user_id,
                         currency,
                         address,
                         txid,
                         amount,
                         confirmations,
-                        required_confirmations
+                        required,
+                    )
+
+                # -------------------------------------------------
+                # WAIT FOR CONFIRMATIONS
+                # -------------------------------------------------
+
+                if confirmations < required:
+                    return False
+
+                # -------------------------------------------------
+                # DOUBLE-CREDIT PROTECTION
+                # -------------------------------------------------
+
+                already = await conn.fetchval(
+                    """
+                    SELECT credited
+                    FROM deposits
+                    WHERE currency=$1
+                      AND txid=$2
+                    """,
+                    currency,
+                    txid,
+                )
+
+                if already:
+                    return False
+
+                # -------------------------------------------------
+                # MARK CREDITED
+                # -------------------------------------------------
+
+                await conn.execute(
+                    """
+                    UPDATE deposits
+                    SET
+                        credited=TRUE,
+                        confirmed_at=NOW()
+                    WHERE currency=$1
+                      AND txid=$2
+                    """,
+                    currency,
+                    txid,
+                )
+
+                # -------------------------------------------------
+                # CREDIT USER
+                # -------------------------------------------------
+
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET
+                        balance = balance + $2,
+                        lifetime_deposit =
+                            lifetime_deposit + $2,
+                        updated_at=NOW()
+                    WHERE user_id=$1
+                    """,
+                    user_id,
+                    amount,
+                )
+
+                # -------------------------------------------------
+                # TRANSACTION LOG
+                # -------------------------------------------------
+
+                await conn.execute(
+                    """
+                    INSERT INTO transactions(
+                        user_id,
+                        kind,
+                        amount,
+                        note
                     )
                     VALUES(
                         $1,
+                        'deposit',
                         $2,
-                        $3,
-                        $4,
-                        $5,
-                        $6,
-                        $7
+                        $3
                     )
                     """,
                     user_id,
-                    currency,
-                    address,
-                    txid,
                     amount,
-                    confirmations,
-                    required,
+                    f"{currency} deposit {txid}",
                 )
 
-            # -------------------------------------------------
-            # NOT ENOUGH CONFIRMATIONS YET
-            # -------------------------------------------------
-
-            if confirmations < required:
-
-                return False
-
-            # -------------------------------------------------
-            # DOUBLE-CREDIT PROTECTION
-            # -------------------------------------------------
-
-            already = await conn.fetchval(
-                """
-                SELECT credited
-                FROM deposits
-                WHERE currency=$1
-                  AND txid=$2
-                """,
-                currency,
-                txid,
-            )
-
-            if already:
-                return False
-
-            # -------------------------------------------------
-            # MARK AS CREDITED
-            # -------------------------------------------------
-
-            await conn.execute(
-                """
-                UPDATE deposits
-                SET
-                    credited=TRUE,
-                    confirmed_at=NOW()
-                WHERE currency=$1
-                  AND txid=$2
-                """,
-                currency,
-                txid,
-            )
-
-            # -------------------------------------------------
-            # CREDIT USER BALANCE
-            # -------------------------------------------------
-
-            await conn.execute(
-                """
-                UPDATE users
-                SET
-                    balance = balance + $2,
-                    lifetime_deposit =
-                        lifetime_deposit + $2,
-                    updated_at=NOW()
-                WHERE user_id=$1
-                """,
-                user_id,
-                amount,
-            )
-
-            # -------------------------------------------------
-            # TRANSACTION LOG
-            # -------------------------------------------------
-
-            await conn.execute(
-                """
-                INSERT INTO transactions(
-                    user_id,
-                    kind,
-                    amount,
-                    note
-                )
-                VALUES(
-                    $1,
-                    'deposit',
-                    $2,
-                    $3
-                )
-                """,
-                user_id,
-                amount,
-                f"{currency} deposit {txid}",
-            )
-
-            return True
+                return True
 
 
 # =========================================================
