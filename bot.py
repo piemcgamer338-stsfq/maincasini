@@ -3369,7 +3369,6 @@ async def withdraw_command(
         return
 
     user_id = interaction.user.id
-
     address = address.strip()
 
     # ========================================================
@@ -3391,12 +3390,10 @@ async def withdraw_command(
         return
 
     # ========================================================
-    # MINIMUM
+    # MINIMUM $0.50
     # ========================================================
 
-    minimum = Decimal("0.50")
-
-    if value < minimum:
+    if value < Decimal("0.50"):
 
         await interaction.response.send_message(
             embed=error_embed(
@@ -3409,24 +3406,35 @@ async def withdraw_command(
         return
 
     # ========================================================
-    # DETECT CURRENCY
+    # DETECT LTC
     # ========================================================
 
-    if address.lower().startswith("ltc1"):
-
-        currency = "LTC"
-
-    elif address.startswith(
-        (
-            "L",
-            "M",
-            "m",
+    is_ltc = (
+        address.lower().startswith("ltc1")
+        or (
+            address.startswith(("L", "M", "m"))
+            and 26 <= len(address) <= 35
         )
-    ) and len(address) >= 26:
+    )
+
+    # ========================================================
+    # DETECT SOL
+    # ========================================================
+
+    is_sol = (
+        32 <= len(address) <= 44
+        and not address.lower().startswith("ltc1")
+    )
+
+    # ========================================================
+    # DETERMINE CURRENCY
+    # ========================================================
+
+    if is_ltc:
 
         currency = "LTC"
 
-    elif 32 <= len(address) <= 50:
+    elif is_sol:
 
         currency = "SOL"
 
@@ -3436,7 +3444,7 @@ async def withdraw_command(
             embed=error_embed(
                 "Invalid Address",
                 (
-                    "Enter a valid **LTC** or **SOL** "
+                    "Please enter a valid **LTC** or **SOL** "
                     "withdrawal address."
                 ),
             ),
@@ -3446,26 +3454,7 @@ async def withdraw_command(
         return
 
     # ========================================================
-    # VALIDATE ADDRESS
-    # ========================================================
-
-    if not bot.valid_withdraw_address(
-        currency,
-        address,
-    ):
-
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Address",
-                f"The **{currency}** withdrawal address is invalid.",
-            ),
-            ephemeral=False,
-        )
-
-        return
-
-    # ========================================================
-    # LIFETIME DEPOSIT REQUIREMENT
+    # LIFETIME DEPOSIT
     # ========================================================
 
     lifetime_deposit = await bot.db.pool.fetchval(
@@ -3497,7 +3486,7 @@ async def withdraw_command(
         return
 
     # ========================================================
-    # BALANCE CHECK
+    # BALANCE
     # ========================================================
 
     balance = await bot.get_balance(
@@ -3522,8 +3511,7 @@ async def withdraw_command(
     # ========================================================
     # CREATE WITHDRAWAL
     #
-    # IMPORTANT:
-    # create_withdrawal() already deducts the balance.
+    # create_withdrawal() handles the balance deduction.
     # DO NOT call change_balance() here.
     # ========================================================
 
@@ -3540,7 +3528,7 @@ async def withdraw_command(
             embed=error_embed(
                 "Withdrawal Failed",
                 (
-                    "Your withdrawal could not be created. "
+                    "The withdrawal could not be created. "
                     "Your balance was not changed."
                 ),
             ),
@@ -3608,7 +3596,6 @@ async def withdraw_command(
         ),
         ephemeral=False,
     )
-
 # ============================================================
 # /STATS
 # ============================================================
