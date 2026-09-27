@@ -4942,59 +4942,6 @@ async def mines_command(
 # RAIN
 # ============================================================
 
-async def rain_daily_wager(
-    bot_instance: CasinoBot,
-    user_id: int,
-) -> Decimal:
-
-    if hasattr(
-        bot_instance.db,
-        "get_daily_wager",
-    ):
-
-        return D(
-            await bot_instance.db.get_daily_wager(
-                user_id
-            )
-        )
-
-    row = await bot_instance.get_db_user(
-        user_id
-    )
-
-    if not row:
-        return Decimal("0")
-
-    return D(
-        row["wagered"]
-    )
-
-
-async def has_rain_role(
-    interaction: discord.Interaction,
-) -> bool:
-
-    role_id = getattr(
-        config,
-        "RAIN_ROLE_ID",
-        0,
-    )
-
-    if not role_id:
-        return True
-
-    if not isinstance(
-        interaction.user,
-        discord.Member,
-    ):
-        return False
-
-    return any(
-        role.id == role_id
-        for role in interaction.user.roles
-    )
-
-
 async def join_rain(
     self: CasinoBot,
     interaction: discord.Interaction,
@@ -5009,44 +4956,40 @@ async def join_rain(
 
         await interaction.response.send_message(
             "This rain has already ended.",
-            ephemeral=False,
+            ephemeral=True,
         )
 
         return
 
-    if not await has_rain_role(
-        interaction
-    ):
+    # --------------------------------------------------------
+    # OWNER CANNOT JOIN OWN RAIN
+    # --------------------------------------------------------
+
+    if interaction.user.id == rain["user_id"]:
 
         await interaction.response.send_message(
-            "You need the verified role to join rain.",
-            ephemeral=False,
+            "You cannot join your own rain.",
+            ephemeral=True,
         )
 
         return
 
-    wagered = await rain_daily_wager(
-        self,
-        interaction.user.id,
-    )
-
-    if wagered < Decimal("1"):
-
-        await interaction.response.send_message(
-            "You need at least **$1** wagered today to join rain.",
-            ephemeral=False,
-        )
-
-        return
+    # --------------------------------------------------------
+    # ALREADY JOINED
+    # --------------------------------------------------------
 
     if interaction.user.id in rain["players"]:
 
         await interaction.response.send_message(
             "You already joined this rain.",
-            ephemeral=False,
+            ephemeral=True,
         )
 
         return
+
+    # --------------------------------------------------------
+    # JOIN
+    # --------------------------------------------------------
 
     rain["players"].add(
         interaction.user.id
@@ -5054,7 +4997,7 @@ async def join_rain(
 
     await interaction.response.send_message(
         "You joined the rain.",
-        ephemeral=False,
+        ephemeral=True,
     )
 
 
@@ -5065,6 +5008,10 @@ async def finish_rain(
     self: CasinoBot,
     rain_id: str,
 ):
+
+    # --------------------------------------------------------
+    # REMOVE FROM ACTIVE RAINS
+    # --------------------------------------------------------
 
     rain = self.active_rains.pop(
         rain_id,
@@ -5082,14 +5029,82 @@ async def finish_rain(
         rain["players"]
     )
 
+    # --------------------------------------------------------
+    # GET CHANNEL
+    # --------------------------------------------------------
+
     channel = self.get_channel(
         rain["channel_id"]
     )
 
     if not channel:
+
+        try:
+
+            await self.db.change_balance(
+                rain["user_id"],
+                amount,
+                kind="rain_refund",
+                note=rain_id,
+            )
+
+        except Exception as e:
+
+            print(
+                f"[RAIN] Refund error: {e}"
+            )
+
         return
 
+    # --------------------------------------------------------
+    # NOBODY JOINED
+    # --------------------------------------------------------
+
     if not players:
+
+        try:
+
+            await self.db.change_balance(
+                rain["user_id"],
+                amount,
+                kind="rain_refund",
+                note=rain_id,
+            )
+
+            await channel.send(
+                f"## Rain Ended — {money(amount)}\n"
+                "Nobody joined the rain, so the full "
+                "amount was refunded."
+            )
+
+        except Exception as e:
+
+            print(
+                f"[RAIN] Refund error: {e}"
+            )
+
+            await channel.send(
+                "## Rain Ended\n"
+                "Nobody joined the rain."
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # CALCULATE SHARE
+    # --------------------------------------------------------
+
+    player_count = len(players)
+
+    share = (
+        amount
+        / Decimal(player_count)
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    if share <= Decimal("0"):
 
         await self.db.change_balance(
             rain["user_id"],
@@ -5100,39 +5115,18 @@ async def finish_rain(
 
         await channel.send(
             f"## Rain Ended — {money(amount)}\n"
-            "Nobody joined the rain, so the full "
-            "amount was refunded."
+            "The amount was too small to distribute "
+            "between the players, so it was refunded."
         )
 
         return
 
-    share = (
-        amount
-        / Decimal(len(players))
-    ).quantize(
-        Decimal("0.01"),
-        rounding=ROUND_DOWN,
-    )
-
-    distributed = share * len(players)
-
-    remainder = (
-        amount - distributed
-    ).quantize(
-        Decimal("0.01")
-    )
-
-    if remainder > 0:
-
-        share += (
-            remainder
-            / Decimal(len(players))
-        ).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_DOWN,
-        )
+    # --------------------------------------------------------
+    # PAY PLAYERS
+    # --------------------------------------------------------
 
     successful = []
+    failed = []
 
     for user_id in players:
 
@@ -5146,23 +5140,47 @@ async def finish_rain(
             )
 
             if credited:
+
                 successful.append(
                     user_id
                 )
 
-        except Exception:
-            continue
+            else:
 
-    count = len(successful)
+                failed.append(
+                    user_id
+                )
 
-    if count <= 0:
+        except Exception as e:
 
-        await self.db.change_balance(
-            rain["user_id"],
-            amount,
-            kind="rain_refund",
-            note=rain_id,
-        )
+            print(
+                f"[RAIN] Failed to credit {user_id}: {e}"
+            )
+
+            failed.append(
+                user_id
+            )
+
+    # --------------------------------------------------------
+    # NOBODY COULD BE CREDITED
+    # --------------------------------------------------------
+
+    if not successful:
+
+        try:
+
+            await self.db.change_balance(
+                rain["user_id"],
+                amount,
+                kind="rain_refund",
+                note=rain_id,
+            )
+
+        except Exception as e:
+
+            print(
+                f"[RAIN] Refund error: {e}"
+            )
 
         await channel.send(
             f"## Rain Ended — {money(amount)}\n"
@@ -5172,15 +5190,72 @@ async def finish_rain(
 
         return
 
-    mention_text = " ".join(
-        f"<@{uid}>"
-        for uid in successful
+    # --------------------------------------------------------
+    # CALCULATE UNUSED AMOUNT
+    # --------------------------------------------------------
+
+    distributed = (
+        share
+        * Decimal(len(successful))
     )
+
+    remainder = (
+        amount
+        - distributed
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN,
+    )
+
+    # --------------------------------------------------------
+    # RETURN FAILED PLAYER SHARES + ROUNDING REMAINDER
+    # TO THE RAIN OWNER
+    # --------------------------------------------------------
+
+    if failed:
+
+        failed_amount = (
+            share
+            * Decimal(len(failed))
+        )
+
+        remainder += failed_amount
+
+    if remainder > Decimal("0"):
+
+        try:
+
+            await self.db.change_balance(
+                rain["user_id"],
+                remainder,
+                kind="rain_remainder_refund",
+                note=rain_id,
+            )
+
+        except Exception as e:
+
+            print(
+                f"[RAIN] Remainder refund error: {e}"
+            )
+
+    # --------------------------------------------------------
+    # PLAYER MENTIONS
+    # --------------------------------------------------------
+
+    mention_text = " ".join(
+        f"<@{user_id}>"
+        for user_id in successful
+    )
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
 
     await channel.send(
         f"## Rain Ended — {money(amount)}\n"
         f"## **{rain['owner_mention']}** rained on "
-        f"**{count}** players — **{money(share)}** each!\n\n"
+        f"**{len(successful)}** players!\n\n"
+        f"**{money(share)}** each\n\n"
         f"{mention_text}"
     )
 
@@ -5188,13 +5263,17 @@ async def finish_rain(
 CasinoBot.finish_rain = finish_rain
 
 
+# ============================================================
+# RAIN COMMAND
+# ============================================================
+
 @bot.tree.command(
     name="rain",
     description="Start a rain giveaway.",
 )
 @app_commands.describe(
     amount="Total amount to rain.",
-    duration="Rain duration in minutes: 1, 2, 5, or 10.",
+    duration="Rain duration.",
 )
 @app_commands.choices(
     duration=[
@@ -5222,6 +5301,10 @@ async def rain_command(
     duration: app_commands.Choice[int],
 ):
 
+    # --------------------------------------------------------
+    # PARSE AMOUNT
+    # --------------------------------------------------------
+
     bet = normalize_amount(
         amount
     )
@@ -5231,10 +5314,24 @@ async def rain_command(
         await bot.safe_send(
             interaction,
             content="Enter a valid rain amount.",
-            ephemeral=False,
+            ephemeral=True,
         )
 
         return
+
+    if bet <= Decimal("0"):
+
+        await bot.safe_send(
+            interaction,
+            content="Rain amount must be greater than 0.",
+            ephemeral=True,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CHECK BALANCE
+    # --------------------------------------------------------
 
     balance = await bot.get_balance(
         interaction.user.id
@@ -5248,10 +5345,14 @@ async def rain_command(
                 "You Dont Have Enough Crypto\n"
                 "-# use /deposit to top-up Funds"
             ),
-            ephemeral=False,
+            ephemeral=True,
         )
 
         return
+
+    # --------------------------------------------------------
+    # DEDUCT RAIN AMOUNT
+    # --------------------------------------------------------
 
     deducted = await bot.db.change_balance(
         interaction.user.id,
@@ -5264,11 +5365,18 @@ async def rain_command(
 
         await bot.safe_send(
             interaction,
-            content="Your balance changed. Please try again.",
-            ephemeral=False,
+            content=(
+                "Your balance changed. "
+                "Please try again."
+            ),
+            ephemeral=True,
         )
 
         return
+
+    # --------------------------------------------------------
+    # CREATE RAIN
+    # --------------------------------------------------------
 
     rain_id = secrets.token_hex(8)
 
@@ -5280,20 +5388,59 @@ async def rain_command(
         "players": set(),
     }
 
-    await interaction.response.send_message(
-        f"## Rain Started — **{money(bet)}**\n"
-        f"**{interaction.user.mention}** rained — "
-        f"**{money(bet)}**\n\n"
-        "Click on Button Below to Join",
-        view=RainView(
-            bot,
-            rain_id,
-        ),
-    )
+    # --------------------------------------------------------
+    # SEND RAIN MESSAGE
+    # --------------------------------------------------------
 
-    seconds = RAIN_DURATIONS[
-        duration.value
-    ]
+    try:
+
+        await interaction.response.send_message(
+            f"## Rain Started — **{money(bet)}**\n"
+            f"**{interaction.user.mention}** rained — "
+            f"**{money(bet)}**\n\n"
+            "Click the button below to join.",
+            view=RainView(
+                bot,
+                rain_id,
+            ),
+        )
+
+    except Exception as e:
+
+        print(
+            f"[RAIN] Failed to send rain message: {e}"
+        )
+
+        bot.active_rains.pop(
+            rain_id,
+            None,
+        )
+
+        try:
+
+            await bot.db.change_balance(
+                interaction.user.id,
+                bet,
+                kind="rain_refund",
+                note=rain_id,
+            )
+
+        except Exception as refund_error:
+
+            print(
+                f"[RAIN] Failed to refund rain: {refund_error}"
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # START TIMER
+    # --------------------------------------------------------
+
+    seconds = RAIN_DURATIONS.get(
+        duration.value,
+        60,
+    )
 
     asyncio.create_task(
         rain_timer(
@@ -5310,15 +5457,25 @@ async def rain_timer(
     seconds: int,
 ):
 
-    await asyncio.sleep(
-        seconds
-    )
+    try:
 
-    await bot_instance.finish_rain(
-        rain_id
-    )
+        await asyncio.sleep(
+            seconds
+        )
 
+        await bot_instance.finish_rain(
+            rain_id
+        )
 
+    except asyncio.CancelledError:
+
+        return
+
+    except Exception as e:
+
+        print(
+            f"[RAIN] Timer error for {rain_id}: {e}"
+        )
 # ============================================================
 # PART 4 END
 # ============================================================
@@ -7891,9 +8048,6 @@ async def addbal_command(
         ephemeral=False,
     )
 
-# ============================================================
-# /RAIN
-# ============================================================
 
 
 
