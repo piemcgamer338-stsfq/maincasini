@@ -7779,7 +7779,67 @@ async def frog_run(interaction: discord.Interaction, amount: str):
         view=view,
     )
 
+# ============================================================
+# /DICE COMMAND
+# ============================================================
 
+@bot.tree.command(
+    name="dice",
+    description="Play Dice against the bot.",
+)
+@app_commands.describe(
+    amount="Your bet amount.",
+    mode="Choose Normal or Crazy mode.",
+    dice_count="Choose how many dice to roll.",
+)
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Normal", value="normal"),
+        app_commands.Choice(name="Crazy", value="crazy"),
+    ],
+    dice_count=[
+        app_commands.Choice(name="1 Dice", value=1),
+        app_commands.Choice(name="2 Dice", value=2),
+        app_commands.Choice(name="3 Dice", value=3),
+    ],
+)
+async def dice(
+    interaction: discord.Interaction,
+    amount: str,
+    mode: app_commands.Choice[str],
+    dice_count: app_commands.Choice[int],
+):
+
+    if not await require_database(interaction):
+        return
+
+    value = normalize_amount(amount)
+
+    if value is None or value <= Decimal("0"):
+        await interaction.response.send_message(
+            "Please enter a valid bet amount.",
+            ephemeral=False,
+        )
+        return
+
+    balance = await bot.get_balance(interaction.user.id)
+
+    if balance < value:
+        await interaction.response.send_message(
+            "You Dont Have Enough Crypto",
+            ephemeral=False,
+        )
+        return
+
+    await interaction.response.defer()
+
+    await bot.start_dice_game(
+        interaction,
+        interaction.user.id,
+        value,
+        mode.value,
+        dice_count.value,
+    )
 # ============================================================
 # DICE GAME
 # ============================================================
