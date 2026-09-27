@@ -1015,6 +1015,112 @@ class RainView(ButtonView):
         )
 
 
+
+    async def handle_withdrawal(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        currency: str,
+        address: str,
+        amount_text: str,
+    ):
+
+        currency = currency.strip().upper()
+        address = address.strip()
+
+        amount = normalize_amount(amount_text)
+
+        if currency not in {
+            "LTC",
+            "SOL",
+            "USDT",
+        }:
+            await interaction.response.send_message(
+                "Supported currencies: LTC, SOL, USDT.",
+                ephemeral=False,
+            )
+            return
+
+        if amount is None or amount <= 0:
+            await interaction.response.send_message(
+                "Enter a valid withdrawal amount.",
+                ephemeral=False,
+            )
+            return
+
+        minimum = Decimal("0.50")
+
+        if amount < minimum:
+            await interaction.response.send_message(
+                "Minimum $0.50 withdrawal.",
+                ephemeral=False,
+            )
+            return
+
+        if not self.valid_withdraw_address(
+            currency,
+            address,
+        ):
+            await interaction.response.send_message(
+                "That withdrawal address is invalid.",
+                ephemeral=False,
+            )
+            return
+
+        balance = await self.get_balance(
+            user_id
+        )
+
+        if amount > balance:
+            await interaction.response.send_message(
+                "You Dont Have Enough Crypto\n"
+                "-# use /deposit to top-up Funds",
+                ephemeral=False,
+            )
+            return
+
+        deducted = await self.db.change_balance(
+            user_id,
+            -amount,
+            kind="withdraw",
+            note=f"{currency}:{address}",
+        )
+
+        if not deducted:
+            await interaction.response.send_message(
+                "Your withdrawal could not be processed.",
+                ephemeral=False,
+            )
+            return
+
+        channel = None
+
+        if getattr(
+            self,
+            "withdraw_log_channel_id",
+            None,
+        ):
+            channel = self.get_channel(
+                self.withdraw_log_channel_id
+            )
+
+        if channel:
+            await channel.send(
+                "**CryptoBet Withdrawal!**\n"
+                f"``{interaction.user}`` has successfully "
+                f"withdrawn **{amount:.6f} {currency}** "
+                f"(~${amount:.2f})!   "
+                f"**ID:** `Private TX`"
+            )
+
+        await interaction.response.send_message(
+            f"## Withdrawal Requested\n\n"
+            f"**Amount:** {money(amount)}\n"
+            f"**Currency:** {currency}\n\n"
+            "Your withdrawal is pending processing.",
+            ephemeral=False,
+        )
+        
 # ============================================================
 # BOT
 # ============================================================
