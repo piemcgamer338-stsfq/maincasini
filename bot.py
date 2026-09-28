@@ -10797,10 +10797,10 @@ bot.tree.add_command(
 # /HOUSEBAL
 # ============================================================
 
-HOUSE_BALANCE = "$68.93"
-HOUSE_LTC = "$20.43"
-HOUSE_SOL = "$38.29"
-HOUSE_USDT = "$10.21"
+HOUSE_BALANCE = "$00.00"
+HOUSE_LTC = "$00.00"
+HOUSE_SOL = "$00.00"
+HOUSE_USDT = "$00.00"
 
 
 class HouseBalanceView(discord.ui.View):
