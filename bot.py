@@ -5994,7 +5994,9 @@ def generate_coinflip_result_image(
     font_bet = load_font(56, True)
     font_result = load_font(82, True)
     font_landed = load_font(40, True)
-    font_coin = load_font(150, True)
+
+    # Large coin text
+    font_coin = load_font(105, True)
 
     # ========================================================
     # BACKGROUND
@@ -6014,7 +6016,7 @@ def generate_coinflip_result_image(
         )
 
     # ========================================================
-    # DIAGONAL BACKGROUND LINES
+    # DIAGONAL LINES
     # ========================================================
 
     line_layer = Image.new(
@@ -6053,12 +6055,12 @@ def generate_coinflip_result_image(
     # ========================================================
 
     center_x = WIDTH // 2
+    center_y = 600
 
     # ========================================================
     # HEXAGON
     # ========================================================
 
-    center_y = 600
     hex_radius = 520
 
     def hex_points(radius):
@@ -6167,8 +6169,6 @@ def generate_coinflip_result_image(
         joint="curve",
     )
 
-    # Second inner border
-
     inner_hex = hex_points(
         hex_radius - 14
     )
@@ -6186,7 +6186,7 @@ def generate_coinflip_result_image(
     )
 
     # ========================================================
-    # TEXT HELPER
+    # CENTERED TEXT
     # ========================================================
 
     def centered_text(
@@ -6266,8 +6266,82 @@ def generate_coinflip_result_image(
     coin_x = center_x
     coin_y = 565
 
-    # BIGGER COIN
+    # BIG COIN
     coin_radius = 285
+
+    # ========================================================
+    # DETERMINE COIN SIDE
+    # ========================================================
+
+    result_lower = str(
+        result
+    ).strip().lower()
+
+    if result_lower in (
+        "heads",
+        "head",
+        "h",
+    ):
+
+        coin_color = (
+            92,
+            88,
+            165,
+            255,
+        )
+
+        coin_dark = (
+            70,
+            67,
+            135,
+            255,
+        )
+
+        coin_border = (
+            180,
+            175,
+            230,
+            255,
+        )
+
+        coin_text = "HEADS"
+
+        glow_color = (
+            125,
+            120,
+            255,
+        )
+
+    else:
+
+        coin_color = (
+            240,
+            65,
+            145,
+            255,
+        )
+
+        coin_dark = (
+            205,
+            45,
+            115,
+            255,
+        )
+
+        coin_border = (
+            255,
+            150,
+            205,
+            255,
+        )
+
+        coin_text = "TAILS"
+
+        glow_color = (
+            255,
+            75,
+            165,
+        )
 
     # ========================================================
     # COIN GLOW
@@ -6291,7 +6365,7 @@ def generate_coinflip_result_image(
 
         alpha = max(
             5,
-            int(105 - extra),
+            int(110 - extra),
         )
 
         coin_glow_draw.ellipse(
@@ -6313,16 +6387,16 @@ def generate_coinflip_result_image(
                 + extra,
             ),
             outline=(
-                255,
-                255,
-                255,
+                glow_color[0],
+                glow_color[1],
+                glow_color[2],
                 alpha,
             ),
-            width=10,
+            width=12,
         )
 
     coin_glow = coin_glow.filter(
-        ImageFilter.GaussianBlur(18)
+        ImageFilter.GaussianBlur(20)
     )
 
     image.alpha_composite(
@@ -6381,26 +6455,21 @@ def generate_coinflip_result_image(
             coin_x + coin_radius,
             coin_y + coin_radius,
         ),
-        fill=(
-            235,
-            235,
-            245,
-            255,
-        ),
+        fill=coin_border,
         outline=(
             255,
             255,
             255,
             255,
         ),
-        width=10,
+        width=8,
     )
 
     # ========================================================
-    # COIN EDGE
+    # COIN MAIN BODY
     # ========================================================
 
-    edge = coin_radius - 18
+    edge = coin_radius - 12
 
     draw.ellipse(
         (
@@ -6409,26 +6478,21 @@ def generate_coinflip_result_image(
             coin_x + edge,
             coin_y + edge,
         ),
-        fill=(
-            45,
-            47,
-            60,
-            255,
-        ),
+        fill=coin_dark,
         outline=(
-            165,
-            165,
-            180,
             255,
+            255,
+            255,
+            90,
         ),
-        width=9,
+        width=4,
     )
 
     # ========================================================
     # COIN FACE
     # ========================================================
 
-    face = coin_radius - 45
+    face = coin_radius - 25
 
     draw.ellipse(
         (
@@ -6437,26 +6501,21 @@ def generate_coinflip_result_image(
             coin_x + face,
             coin_y + face,
         ),
-        fill=(
-            12,
-            14,
-            24,
-            255,
-        ),
+        fill=coin_color,
         outline=(
             255,
             255,
             255,
-            240,
+            130,
         ),
-        width=7,
+        width=5,
     )
 
     # ========================================================
-    # INNER COIN RING
+    # INNER COIN BORDER
     # ========================================================
 
-    inner = coin_radius - 70
+    inner = coin_radius - 42
 
     draw.ellipse(
         (
@@ -6469,49 +6528,69 @@ def generate_coinflip_result_image(
             255,
             255,
             255,
-            150,
+            100,
         ),
-        width=5,
+        width=4,
     )
 
     # ========================================================
-    # RESULT LETTER
+    # COIN TEXT
     # ========================================================
-
-    if str(result).lower() in (
-        "heads",
-        "head",
-    ):
-
-        letter = "H"
-
-    else:
-
-        letter = "T"
 
     bbox = draw.textbbox(
         (0, 0),
-        letter,
+        coin_text,
         font=font_coin,
     )
 
-    letter_width = (
+    text_width = (
         bbox[2] - bbox[0]
     )
 
-    letter_height = (
+    text_height = (
         bbox[3] - bbox[1]
     )
 
+    text_x = (
+        coin_x
+        - text_width / 2
+    )
+
+    text_y = (
+        coin_y
+        - text_height / 2
+        - 10
+    )
+
+    # --------------------------------------------------------
+    # TEXT SHADOW
+    # --------------------------------------------------------
+
     draw.text(
         (
-            coin_x
-            - letter_width / 2,
-            coin_y
-            - letter_height / 2
-            - 15,
+            text_x + 7,
+            text_y + 9,
         ),
-        letter,
+        coin_text,
+        font=font_coin,
+        fill=(
+            40,
+            20,
+            40,
+            180,
+        ),
+    )
+
+    # --------------------------------------------------------
+    # WHITE TEXT
+    # --------------------------------------------------------
+
+    draw.text(
+        (
+            text_x,
+            text_y,
+        ),
+        coin_text,
         font=font_coin,
         fill=(
             255,
@@ -6522,29 +6601,29 @@ def generate_coinflip_result_image(
     )
 
     # ========================================================
-    # COIN HIGHLIGHT
+    # COIN TOP HIGHLIGHT
     # ========================================================
 
     draw.arc(
         (
-            coin_x - face + 25,
-            coin_y - face + 25,
-            coin_x + face - 25,
-            coin_y + face - 25,
+            coin_x - face + 15,
+            coin_y - face + 15,
+            coin_x + face - 15,
+            coin_y + face - 15,
         ),
-        205,
-        315,
+        200,
+        320,
         fill=(
             255,
             255,
             255,
             170,
         ),
-        width=9,
+        width=8,
     )
 
     # ========================================================
-    # RESULT TEXT
+    # YOU WON / YOU LOST
     # ========================================================
 
     if won:
@@ -6581,7 +6660,7 @@ def generate_coinflip_result_image(
     # ========================================================
 
     centered_text(
-        f"LANDED ON {str(result).upper()}",
+        f"LANDED ON {coin_text}",
         955,
         font_landed,
         (
