@@ -5935,172 +5935,247 @@ def generate_coinflip_result_image(
     won: bool,
 ):
     """
-    Generates the Coinflip result image dynamically.
+    Dynamically generates the Coinflip result image.
 
     Layout:
 
-        @username betted
-        $1.00 on HEADS
+        @username betted $1.00 on HEADS
 
-              COIN
+                    COIN
 
-            YOU WON
+                  YOU WON
 
     or
 
-            YOU LOST
+                  YOU LOST
 
-    The image contains:
-    - Dark background
-    - Hexagonal panel
-    - White glowing border
-    - Generated coin
-    - User/bet information
-    - WIN/LOSS result
+    Image is generated entirely with Pillow.
+    No external image file is required.
     """
+
+    import io
+    import math
+
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
     WIDTH = 900
     HEIGHT = 900
 
+    # ========================================================
+    # BASE IMAGE
+    # ========================================================
+
     image = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
-        (5, 5, 8, 255),
+        (3, 4, 8, 255),
     )
 
     draw = ImageDraw.Draw(image)
 
-    # --------------------------------------------------------
-    # FONTS
-    # --------------------------------------------------------
+    # ========================================================
+    # FONT LOADER
+    # ========================================================
 
-    def load_font(size, bold=False):
-        paths = []
-
+    def load_font(size: int, bold: bool = False):
         if bold:
             paths = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/segoeuib.ttf",
             ]
         else:
             paths = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/segoeui.ttf",
             ]
 
         for path in paths:
             try:
                 return ImageFont.truetype(path, size)
             except Exception:
-                continue
+                pass
 
         return ImageFont.load_default()
 
-    font_small = load_font(34)
-    font_amount = load_font(42, bold=True)
-    font_result = load_font(68, bold=True)
-    font_coin = load_font(64, bold=True)
+    font_user = load_font(38, True)
+    font_bet = load_font(44, True)
+    font_coin = load_font(74, True)
+    font_result = load_font(72, True)
+    font_small = load_font(30, True)
 
-    # --------------------------------------------------------
-    # COLORS
-    # --------------------------------------------------------
-
-    WHITE = (255, 255, 255, 255)
-    DARK = (5, 5, 10, 255)
-
-    if won:
-        result_color = (85, 255, 150, 255)
-    else:
-        result_color = (255, 80, 100, 255)
-
-    # --------------------------------------------------------
+    # ========================================================
     # BACKGROUND
-    # --------------------------------------------------------
+    # ========================================================
 
-    # Subtle background gradient
     for y in range(HEIGHT):
         ratio = y / HEIGHT
 
-        r = int(5 + ratio * 8)
-        g = int(5 + ratio * 4)
-        b = int(10 + ratio * 15)
+        r = int(3 + ratio * 5)
+        g = int(4 + ratio * 5)
+        b = int(8 + ratio * 12)
 
         draw.line(
             [(0, y), (WIDTH, y)],
             fill=(r, g, b, 255),
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # HEXAGON
-    # --------------------------------------------------------
+    # ========================================================
 
-    cx = WIDTH // 2
-    cy = HEIGHT // 2
+    center_x = WIDTH // 2
+    center_y = HEIGHT // 2
 
-    hex_radius = 375
+    hex_radius = 390
 
-    hex_points = []
-
-    for i in range(6):
-        angle = math.radians(60 * i - 30)
-
-        x = cx + hex_radius * math.cos(angle)
-        y = cy + hex_radius * math.sin(angle)
-
-        hex_points.append((x, y))
-
-    # Glow layers
-    for glow in range(35, 0, -2):
-        alpha = max(5, 90 - glow * 2)
-
-        glow_points = []
-
-        radius = hex_radius + glow
+    def make_hexagon(radius):
+        points = []
 
         for i in range(6):
-            angle = math.radians(60 * i - 30)
+            angle = math.radians(
+                (60 * i) - 30
+            )
 
-            x = cx + radius * math.cos(angle)
-            y = cy + radius * math.sin(angle)
+            x = center_x + radius * math.cos(angle)
+            y = center_y + radius * math.sin(angle)
 
-            glow_points.append((x, y))
+            points.append((x, y))
 
-        draw.line(
-            glow_points + [glow_points[0]],
-            fill=(255, 255, 255, alpha),
-            width=4,
-        )
+        return points
 
-    # Hexagon fill
-    draw.polygon(
-        hex_points,
-        fill=(10, 12, 22, 255),
+    hex_points = make_hexagon(hex_radius)
+
+    # ========================================================
+    # HEXAGON GLOW
+    # ========================================================
+
+    glow_layer = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
     )
 
-    # Main white outline
+    glow_draw = ImageDraw.Draw(
+        glow_layer
+    )
+
+    for radius_offset in range(35, 0, -2):
+
+        points = make_hexagon(
+            hex_radius + radius_offset
+        )
+
+        alpha = int(
+            5 + (35 - radius_offset) * 1.8
+        )
+
+        glow_draw.line(
+            points + [points[0]],
+            fill=(255, 255, 255, alpha),
+            width=8,
+            joint="curve",
+        )
+
+    glow_layer = glow_layer.filter(
+        ImageFilter.GaussianBlur(10)
+    )
+
+    image.alpha_composite(
+        glow_layer
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # ========================================================
+    # HEXAGON BACKGROUND
+    # ========================================================
+
+    draw.polygon(
+        hex_points,
+        fill=(9, 11, 20, 255),
+    )
+
+    # Inner subtle hexagon
+    inner_points = make_hexagon(
+        hex_radius - 12
+    )
+
+    draw.line(
+        inner_points + [inner_points[0]],
+        fill=(70, 70, 80, 120),
+        width=2,
+        joint="curve",
+    )
+
+    # ========================================================
+    # WHITE GLOWING BORDER
+    # ========================================================
+
+    border_glow = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
+    )
+
+    border_draw = ImageDraw.Draw(
+        border_glow
+    )
+
+    border_draw.line(
+        hex_points + [hex_points[0]],
+        fill=(255, 255, 255, 220),
+        width=12,
+        joint="curve",
+    )
+
+    border_glow = border_glow.filter(
+        ImageFilter.GaussianBlur(8)
+    )
+
+    image.alpha_composite(
+        border_glow
+    )
+
+    draw = ImageDraw.Draw(image)
+
     draw.line(
         hex_points + [hex_points[0]],
-        fill=WHITE,
+        fill=(255, 255, 255, 255),
         width=5,
         joint="curve",
     )
 
-    # --------------------------------------------------------
-    # TEXT HELPERS
-    # --------------------------------------------------------
+    # ========================================================
+    # TEXT HELPER
+    # ========================================================
 
-    def centered_text(text, y, font, fill):
+    def centered_text(
+        text,
+        y,
+        font,
+        fill=(255, 255, 255, 255),
+    ):
         bbox = draw.textbbox(
             (0, 0),
             text,
             font=font,
         )
 
-        text_width = bbox[2] - bbox[0]
+        text_width = (
+            bbox[2] - bbox[0]
+        )
+
+        text_height = (
+            bbox[3] - bbox[1]
+        )
 
         draw.text(
             (
-                cx - text_width / 2,
+                center_x - text_width / 2,
                 y,
             ),
             text,
@@ -6108,54 +6183,86 @@ def generate_coinflip_result_image(
             fill=fill,
         )
 
-    # --------------------------------------------------------
+        return text_height
+
+    # ========================================================
     # USER / BET TEXT
-    # --------------------------------------------------------
+    # ========================================================
 
-    username_text = f"@{username}"
+    safe_username = str(
+        username
+    ).strip()
 
-    choice_text = str(choice).upper()
+    if len(safe_username) > 24:
+        safe_username = (
+            safe_username[:21] + "..."
+        )
 
-    bet_text = (
+    choice_text = str(
+        choice
+    ).upper()
+
+    user_line = (
+        f"@{safe_username} betted"
+    )
+
+    bet_line = (
         f"{money(bet)} on {choice_text}"
     )
 
     centered_text(
-        username_text,
-        145,
-        font_small,
-        WHITE,
+        user_line,
+        125,
+        font_user,
+        (255, 255, 255, 255),
     )
 
     centered_text(
-        bet_text,
-        190,
-        font_amount,
-        WHITE,
+        bet_line,
+        175,
+        font_bet,
+        (255, 255, 255, 255),
     )
 
-    # --------------------------------------------------------
-    # COIN
-    # --------------------------------------------------------
+    # ========================================================
+    # COIN POSITION
+    # ========================================================
 
-    coin_cx = cx
-    coin_cy = 430
+    coin_x = center_x
+    coin_y = 430
 
     coin_radius = 135
 
-    # Coin glow
-    for glow in range(35, 0, -3):
+    # ========================================================
+    # COIN GLOW
+    # ========================================================
+
+    coin_glow = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
+    )
+
+    coin_glow_draw = ImageDraw.Draw(
+        coin_glow
+    )
+
+    for extra in range(
+        45,
+        0,
+        -3,
+    ):
         alpha = max(
             5,
-            80 - glow * 2,
+            80 - extra,
         )
 
-        draw.ellipse(
+        coin_glow_draw.ellipse(
             (
-                coin_cx - coin_radius - glow,
-                coin_cy - coin_radius - glow,
-                coin_cx + coin_radius + glow,
-                coin_cy + coin_radius + glow,
+                coin_x - coin_radius - extra,
+                coin_y - coin_radius - extra,
+                coin_x + coin_radius + extra,
+                coin_y + coin_radius + extra,
             ),
             outline=(
                 255,
@@ -6166,56 +6273,79 @@ def generate_coinflip_result_image(
             width=5,
         )
 
-    # Coin outer edge
+    coin_glow = coin_glow.filter(
+        ImageFilter.GaussianBlur(7)
+    )
+
+    image.alpha_composite(
+        coin_glow
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # ========================================================
+    # COIN OUTER RING
+    # ========================================================
+
     draw.ellipse(
         (
-            coin_cx - coin_radius,
-            coin_cy - coin_radius,
-            coin_cx + coin_radius,
-            coin_cy + coin_radius,
+            coin_x - coin_radius,
+            coin_y - coin_radius,
+            coin_x + coin_radius,
+            coin_y + coin_radius,
         ),
-        fill=(210, 210, 220, 255),
-        outline=WHITE,
+        fill=(215, 215, 225, 255),
+        outline=(255, 255, 255, 255),
         width=6,
     )
 
-    # Coin body
+    # ========================================================
+    # COIN EDGE
+    # ========================================================
+
+    edge_radius = coin_radius - 10
+
     draw.ellipse(
         (
-            coin_cx - coin_radius + 12,
-            coin_cy - coin_radius + 12,
-            coin_cx + coin_radius - 12,
-            coin_cy + coin_radius - 12,
+            coin_x - edge_radius,
+            coin_y - edge_radius,
+            coin_x + edge_radius,
+            coin_y + edge_radius,
         ),
-        fill=(35, 35, 45, 255),
-        outline=(180, 180, 190, 255),
+        fill=(32, 34, 45, 255),
+        outline=(130, 130, 145, 255),
+        width=5,
+    )
+
+    # ========================================================
+    # COIN FACE
+    # ========================================================
+
+    face_radius = coin_radius - 28
+
+    draw.ellipse(
+        (
+            coin_x - face_radius,
+            coin_y - face_radius,
+            coin_x + face_radius,
+            coin_y + face_radius,
+        ),
+        fill=(12, 14, 22, 255),
+        outline=(255, 255, 255, 220),
         width=4,
     )
 
-    # Coin inner circle
-    inner_radius = coin_radius - 30
+    # ========================================================
+    # COIN RESULT
+    # ========================================================
 
-    draw.ellipse(
-        (
-            coin_cx - inner_radius,
-            coin_cy - inner_radius,
-            coin_cx + inner_radius,
-            coin_cy + inner_radius,
-        ),
-        fill=(15, 17, 25, 255),
-        outline=(255, 255, 255, 180),
-        width=3,
-    )
-
-    # --------------------------------------------------------
-    # COIN LETTER
-    # --------------------------------------------------------
-
-    coin_letter = (
-        "H"
-        if result.lower() in ("heads", "head")
-        else "T"
-    )
+    if result.lower() in (
+        "heads",
+        "head",
+    ):
+        coin_letter = "H"
+    else:
+        coin_letter = "T"
 
     bbox = draw.textbbox(
         (0, 0),
@@ -6223,28 +6353,61 @@ def generate_coinflip_result_image(
         font=font_coin,
     )
 
-    letter_width = bbox[2] - bbox[0]
-    letter_height = bbox[3] - bbox[1]
+    letter_width = (
+        bbox[2] - bbox[0]
+    )
+
+    letter_height = (
+        bbox[3] - bbox[1]
+    )
 
     draw.text(
         (
-            coin_cx - letter_width / 2,
-            coin_cy - letter_height / 2 - 5,
+            coin_x - letter_width / 2,
+            coin_y - letter_height / 2 - 8,
         ),
         coin_letter,
         font=font_coin,
-        fill=WHITE,
+        fill=(255, 255, 255, 255),
     )
 
-    # --------------------------------------------------------
-    # RESULT
-    # --------------------------------------------------------
+    # ========================================================
+    # COIN HIGHLIGHT
+    # ========================================================
 
-    result_text = (
-        "YOU WON"
-        if won
-        else "YOU LOST"
+    draw.arc(
+        (
+            coin_x - face_radius + 15,
+            coin_y - face_radius + 15,
+            coin_x + face_radius - 15,
+            coin_y + face_radius - 15,
+        ),
+        200,
+        320,
+        fill=(255, 255, 255, 120),
+        width=5,
     )
+
+    # ========================================================
+    # RESULT TEXT
+    # ========================================================
+
+    if won:
+        result_text = "YOU WON"
+        result_color = (
+            100,
+            255,
+            160,
+            255,
+        )
+    else:
+        result_text = "YOU LOST"
+        result_color = (
+            255,
+            90,
+            105,
+            255,
+        )
 
     centered_text(
         result_text,
@@ -6253,30 +6416,27 @@ def generate_coinflip_result_image(
         result_color,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # ACTUAL RESULT
-    # --------------------------------------------------------
-
-    actual_result = (
-        str(result).upper()
-    )
+    # ========================================================
 
     centered_text(
-        actual_result,
+        str(result).upper(),
         710,
         font_small,
-        WHITE,
+        (255, 255, 255, 220),
     )
 
-    # --------------------------------------------------------
-    # SAVE TO MEMORY
-    # --------------------------------------------------------
+    # ========================================================
+    # EXPORT
+    # ========================================================
 
     buffer = io.BytesIO()
 
     image.save(
         buffer,
         format="PNG",
+        optimize=True,
     )
 
     buffer.seek(0)
@@ -6293,12 +6453,62 @@ def generate_coinflip_result_image(
     aliases=["cf"],
 )
 async def coinflip(
-    interaction: discord.Interaction,
+    ctx,
     amount: str,
-    color: app_commands.Choice[str],
+    choice: str = "heads",
 ):
 
-    user_id = interaction.user.id
+    # ========================================================
+    # USER
+    # ========================================================
+
+    user = ctx.author
+    user_id = user.id
+
+    # ========================================================
+    # NORMALIZE CHOICE
+    # ========================================================
+
+    choice = (
+        str(choice)
+        .strip()
+        .lower()
+    )
+
+    choice_aliases = {
+        "h": "heads",
+        "head": "heads",
+        "heads": "heads",
+
+        "t": "tails",
+        "tail": "tails",
+        "tails": "tails",
+    }
+
+    choice = choice_aliases.get(
+        choice
+    )
+
+    if choice is None:
+        await ctx.send(
+            embed=error_embed(
+                "Invalid Choice",
+                (
+                    "Choose either **heads** "
+                    "or **tails**.\n\n"
+                    "Example:\n"
+                    "`.cf 1 heads`\n"
+                    "`.cf 1 tails`"
+                ),
+            )
+        )
+        return
+
+    selected_name = (
+        "Heads"
+        if choice == "heads"
+        else "Tails"
+    )
 
     # ========================================================
     # COOLDOWN
@@ -6310,13 +6520,14 @@ async def coinflip(
     )
 
     if cooldown:
-        await bot.safe_send(
-            interaction,
-            content=(
-                f"Please wait **{cooldown:.1f}s** "
-                "before playing again."
-            ),
-            ephemeral=False,
+        await ctx.send(
+            embed=error_embed(
+                "Cooldown",
+                (
+                    f"Please wait **{cooldown:.1f}s** "
+                    "before playing again."
+                ),
+            )
         )
         return
 
@@ -6334,61 +6545,53 @@ async def coinflip(
     )
 
     if bet is None:
-        await bot.safe_send(
-            interaction,
+        await ctx.send(
             embed=error_embed(
                 "Invalid Amount",
                 (
-                    "Enter a valid amount such as "
-                    "`$1`, `1`, or `0.10`."
+                    "Enter a valid amount.\n\n"
+                    "Examples:\n"
+                    "`.cf 1 heads`\n"
+                    "`.cf 0.50 tails`\n"
+                    "`.cf all heads`"
                 ),
-            ),
-            ephemeral=False,
+            )
         )
         return
 
+    bet = Decimal(str(bet))
+
+    # ========================================================
+    # MINIMUM BET
+    # ========================================================
+
     if bet < MIN_BET:
-        await bot.safe_send(
-            interaction,
+        await ctx.send(
             embed=error_embed(
                 "Minimum Bet",
                 (
                     f"The minimum bet is "
                     f"**{money(MIN_BET)}**."
                 ),
-            ),
-            ephemeral=False,
+            )
         )
         return
+
+    # ========================================================
+    # BALANCE CHECK
+    # ========================================================
 
     if bet > balance:
-        await bot.safe_send(
-            interaction,
-            content=(
-                "You Dont Have Enough Crypto\n"
-                "-# use /deposit to top-up Funds"
-            ),
-            ephemeral=False,
+        await ctx.send(
+            embed=error_embed(
+                "Insufficient Balance",
+                (
+                    "You don't have enough balance "
+                    "for this bet."
+                ),
+            )
         )
         return
-
-    # ========================================================
-    # SELECTED COLOR
-    # ========================================================
-
-    selected = color.value
-
-    selected_name = (
-        "Heads"
-        if selected == "heads"
-        else "Tails"
-    )
-
-    opponent_name = (
-        "Tails"
-        if selected == "heads"
-        else "Heads"
-    )
 
     # ========================================================
     # GAME DATA
@@ -6425,25 +6628,27 @@ async def coinflip(
     )
 
     if not deducted:
-        await bot.safe_send(
-            interaction,
-            content=(
-                "Your balance changed. "
-                "Please try again."
-            ),
-            ephemeral=False,
+        await ctx.send(
+            embed=error_embed(
+                "Bet Failed",
+                (
+                    "Your balance changed "
+                    "before the bet could be placed. "
+                    "Please try again."
+                ),
+            )
         )
         return
 
     # ========================================================
-    # SAVE ACTIVE GAME
+    # ACTIVE GAME
     # ========================================================
 
     bot.active_games[user_id] = {
         "type": "coinflip",
         "game_id": game_id,
         "bet": bet,
-        "selected": selected,
+        "selected": choice,
         "server_seed": server_seed,
         "server_hash": server_hash,
         "client_seed": client_seed,
@@ -6454,16 +6659,18 @@ async def coinflip(
     # FLIPPING MESSAGE
     # ========================================================
 
-    await interaction.response.send_message(
-        embed=neutral_embed(
-            "## Flipping…",
-            (
-                f"**{interaction.user.display_name}** "
-                f"betted **{money(bet)}** on "
-                f"**{selected_name}**\n\n"
-                f"**Game #{game_id}**"
-            ),
-        )
+    flipping_embed = neutral_embed(
+        "## Flipping...",
+        (
+            f"**{user.display_name}** "
+            f"betted **{money(bet)}** on "
+            f"**{selected_name}**\n\n"
+            f"**Game #{game_id}**"
+        ),
+    )
+
+    flipping_message = await ctx.send(
+        embed=flipping_embed
     )
 
     # ========================================================
@@ -6473,7 +6680,7 @@ async def coinflip(
     await asyncio.sleep(2)
 
     # ========================================================
-    # GET GAME
+    # GET ACTIVE GAME
     # ========================================================
 
     game = bot.active_games.pop(
@@ -6482,21 +6689,69 @@ async def coinflip(
     )
 
     if not game:
+        # Refund because the game state disappeared.
+        try:
+            await bot.settle_win(
+                user_id,
+                bet,
+                bet,
+                "coinflip_recovery",
+            )
+        except Exception:
+            pass
+
+        await flipping_message.edit(
+            embed=error_embed(
+                "Game Error",
+                (
+                    "The game state could not be found. "
+                    "Your bet was protected from being lost."
+                ),
+            )
+        )
+
         return
 
     # ========================================================
-    # FAIR ROLL
+    # PROVABLY FAIR ROLL
     # ========================================================
 
-    roll = bot.fair_roll(
-        game["server_seed"],
-        game["client_seed"],
-        game["nonce"],
-        "coinflip",
-    )
+    try:
+
+        roll = bot.fair_roll(
+            game["server_seed"],
+            game["client_seed"],
+            game["nonce"],
+            "coinflip",
+        )
+
+    except Exception:
+
+        # Refund the bet if the fair roll fails.
+        try:
+            await bot.settle_win(
+                user_id,
+                bet,
+                bet,
+                "coinflip_recovery",
+            )
+        except Exception:
+            pass
+
+        await flipping_message.edit(
+            embed=error_embed(
+                "Game Error",
+                (
+                    "The fair result could not be generated. "
+                    "Your bet was refunded."
+                ),
+            )
+        )
+
+        return
 
     # ========================================================
-    # HEADS / TAILS
+    # DETERMINE RESULT
     # ========================================================
 
     result = (
@@ -6506,56 +6761,91 @@ async def coinflip(
     )
 
     won = (
-        result == selected
+        result == choice
     )
 
     # ========================================================
-    # WIN
+    # SETTLE GAME
     # ========================================================
 
-    if won:
+    try:
 
-        payout = (
-            bet * COINFLIP_MULTIPLIER
-        ).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_DOWN,
+        if won:
+
+            payout = (
+                bet * COINFLIP_MULTIPLIER
+            ).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_DOWN,
+            )
+
+            await bot.settle_win(
+                user_id,
+                bet,
+                payout,
+                "coinflip",
+            )
+
+        else:
+
+            payout = Decimal("0")
+
+            await bot.settle_loss(
+                user_id,
+                bet,
+                "coinflip",
+            )
+
+    except Exception:
+
+        # If settlement itself fails, don't silently
+        # leave the user thinking the result was completed.
+        await flipping_message.edit(
+            embed=error_embed(
+                "Game Error",
+                (
+                    "The result was generated, "
+                    "but the balance settlement failed. "
+                    "Please contact an administrator."
+                ),
+            )
         )
 
-        await bot.settle_win(
-            user_id,
-            bet,
-            payout,
-            "coinflip",
-        )
-
-    # ========================================================
-    # LOSS
-    # ========================================================
-
-    else:
-
-        payout = Decimal("0")
-
-        await bot.settle_loss(
-            user_id,
-            bet,
-            "coinflip",
-        )
+        return
 
     # ========================================================
     # GENERATE RESULT IMAGE
     # ========================================================
 
-    image_buffer = (
-        generate_coinflip_result_image(
-            username=interaction.user.display_name,
-            bet=bet,
-            choice=selected_name,
-            result=result,
-            won=won,
+    try:
+
+        image_buffer = (
+            generate_coinflip_result_image(
+                username=user.display_name,
+                bet=bet,
+                choice=selected_name,
+                result=result,
+                won=won,
+            )
         )
-    )
+
+    except Exception:
+
+        await flipping_message.edit(
+            embed=error_embed(
+                "Image Error",
+                (
+                    "The game finished successfully, "
+                    "but the result image could not be generated."
+                ),
+            )
+        )
+
+        return
+
+    # ========================================================
+    # DISCORD FILE
+    # ========================================================
 
     image_file = discord.File(
         image_buffer,
@@ -6566,7 +6856,7 @@ async def coinflip(
     # RESULT EMBED
     # ========================================================
 
-    embed = base_embed(
+    result_embed = base_embed(
         title="",
         description="",
         color=(
@@ -6576,11 +6866,15 @@ async def coinflip(
         ),
     )
 
-    embed.set_image(
+    result_embed.set_image(
         url="attachment://coinflip_result.png"
     )
 
-    embed.add_field(
+    # ========================================================
+    # PROVABLY FAIR
+    # ========================================================
+
+    result_embed.add_field(
         name="Provably Fair",
         value=(
             f"**Server Hash:** "
@@ -6593,38 +6887,53 @@ async def coinflip(
         inline=False,
     )
 
-    embed.add_field(
+    # ========================================================
+    # GAME ID
+    # ========================================================
+
+    result_embed.add_field(
         name="Game",
         value=f"`#{game_id}`",
         inline=True,
     )
 
+    # ========================================================
+    # PAYOUT
+    # ========================================================
+
     if won:
-        embed.add_field(
+
+        result_embed.add_field(
             name="Payout",
             value=(
                 f"`{money(payout)}` "
-                f"**(1.92x)**"
+                f"**1.92x**"
             ),
             inline=True,
         )
+
     else:
-        embed.add_field(
+
+        result_embed.add_field(
             name="Lost",
             value=money(bet),
             inline=True,
         )
 
-    embed.set_footer(
+    # ========================================================
+    # FOOTER
+    # ========================================================
+
+    result_embed.set_footer(
         text="Verify this result with .verify"
     )
 
     # ========================================================
-    # SEND RESULT IMAGE
+    # EDIT ORIGINAL MESSAGE
     # ========================================================
 
-    await interaction.edit_original_response(
-        embed=embed,
+    await flipping_message.edit(
+        embed=result_embed,
         attachments=[image_file],
     )
 
