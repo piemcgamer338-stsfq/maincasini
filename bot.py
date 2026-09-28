@@ -5934,50 +5934,37 @@ def generate_coinflip_result_image(
     result: str,
     won: bool,
 ):
-    """
-    Dynamically generates the Coinflip result image.
-
-    Layout:
-
-        @username betted $1.00 on HEADS
-
-                    COIN
-
-                  YOU WON
-
-    or
-
-                  YOU LOST
-
-    Image is generated entirely with Pillow.
-    No external image file is required.
-    """
-
     import io
     import math
 
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
-
-    WIDTH = 900
-    HEIGHT = 900
+    from PIL import (
+        Image,
+        ImageDraw,
+        ImageFont,
+        ImageFilter,
+    )
 
     # ========================================================
-    # BASE IMAGE
+    # IMAGE SIZE
     # ========================================================
+
+    WIDTH = 1200
+    HEIGHT = 1200
 
     image = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
-        (3, 4, 8, 255),
+        (5, 6, 14, 255),
     )
 
     draw = ImageDraw.Draw(image)
 
     # ========================================================
-    # FONT LOADER
+    # FONTS
     # ========================================================
 
-    def load_font(size: int, bold: bool = False):
+    def load_font(size, bold=False):
+
         if bold:
             paths = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -5997,31 +5984,65 @@ def generate_coinflip_result_image(
             try:
                 return ImageFont.truetype(path, size)
             except Exception:
-                pass
+                continue
 
         return ImageFont.load_default()
 
-    font_user = load_font(38, True)
-    font_bet = load_font(44, True)
-    font_coin = load_font(74, True)
-    font_result = load_font(72, True)
-    font_small = load_font(30, True)
+    font_user = load_font(46, True)
+    font_bet = load_font(52, True)
+    font_result = load_font(82, True)
+    font_landed = load_font(38, True)
+    font_coin = load_font(115, True)
 
     # ========================================================
-    # BACKGROUND
+    # DARK BACKGROUND
     # ========================================================
 
     for y in range(HEIGHT):
         ratio = y / HEIGHT
 
-        r = int(3 + ratio * 5)
-        g = int(4 + ratio * 5)
-        b = int(8 + ratio * 12)
+        r = int(5 + ratio * 4)
+        g = int(6 + ratio * 5)
+        b = int(14 + ratio * 10)
 
         draw.line(
             [(0, y), (WIDTH, y)],
             fill=(r, g, b, 255),
         )
+
+    # ========================================================
+    # SUBTLE DIAGONAL LINES
+    # ========================================================
+
+    line_layer = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
+    )
+
+    line_draw = ImageDraw.Draw(
+        line_layer
+    )
+
+    for offset in range(
+        -HEIGHT,
+        WIDTH,
+        55,
+    ):
+        line_draw.line(
+            [
+                (offset, 0),
+                (offset + HEIGHT, HEIGHT),
+            ],
+            fill=(70, 75, 110, 35),
+            width=2,
+        )
+
+    image.alpha_composite(
+        line_layer
+    )
+
+    draw = ImageDraw.Draw(image)
 
     # ========================================================
     # HEXAGON
@@ -6030,121 +6051,114 @@ def generate_coinflip_result_image(
     center_x = WIDTH // 2
     center_y = HEIGHT // 2
 
-    hex_radius = 390
+    hex_radius = 535
 
-    def make_hexagon(radius):
+    def hex_points(radius):
+
         points = []
 
         for i in range(6):
+
             angle = math.radians(
                 (60 * i) - 30
             )
 
-            x = center_x + radius * math.cos(angle)
-            y = center_y + radius * math.sin(angle)
+            x = (
+                center_x
+                + radius * math.cos(angle)
+            )
 
-            points.append((x, y))
+            y = (
+                center_y
+                + radius * math.sin(angle)
+            )
+
+            points.append(
+                (x, y)
+            )
 
         return points
 
-    hex_points = make_hexagon(hex_radius)
+    outer_hex = hex_points(
+        hex_radius
+    )
 
     # ========================================================
     # HEXAGON GLOW
     # ========================================================
 
-    glow_layer = Image.new(
+    glow = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
         (0, 0, 0, 0),
     )
 
     glow_draw = ImageDraw.Draw(
-        glow_layer
+        glow
     )
 
-    for radius_offset in range(35, 0, -2):
+    for size in range(
+        50,
+        0,
+        -2,
+    ):
 
-        points = make_hexagon(
-            hex_radius + radius_offset
+        points = hex_points(
+            hex_radius + size
         )
 
-        alpha = int(
-            5 + (35 - radius_offset) * 1.8
+        alpha = max(
+            4,
+            int(90 - size * 1.5),
         )
 
         glow_draw.line(
             points + [points[0]],
-            fill=(255, 255, 255, alpha),
+            fill=(
+                255,
+                255,
+                255,
+                alpha,
+            ),
             width=8,
             joint="curve",
         )
 
-    glow_layer = glow_layer.filter(
-        ImageFilter.GaussianBlur(10)
+    glow = glow.filter(
+        ImageFilter.GaussianBlur(12)
     )
 
     image.alpha_composite(
-        glow_layer
+        glow
     )
 
     draw = ImageDraw.Draw(image)
 
     # ========================================================
-    # HEXAGON BACKGROUND
+    # HEXAGON FILL
     # ========================================================
 
     draw.polygon(
-        hex_points,
-        fill=(9, 11, 20, 255),
+        outer_hex,
+        fill=(10, 12, 24, 245),
     )
 
-    # Inner subtle hexagon
-    inner_points = make_hexagon(
+    # ========================================================
+    # HEXAGON INNER GLOW
+    # ========================================================
+
+    inner_hex = hex_points(
         hex_radius - 12
     )
 
     draw.line(
-        inner_points + [inner_points[0]],
-        fill=(70, 70, 80, 120),
-        width=2,
-        joint="curve",
-    )
-
-    # ========================================================
-    # WHITE GLOWING BORDER
-    # ========================================================
-
-    border_glow = Image.new(
-        "RGBA",
-        (WIDTH, HEIGHT),
-        (0, 0, 0, 0),
-    )
-
-    border_draw = ImageDraw.Draw(
-        border_glow
-    )
-
-    border_draw.line(
-        hex_points + [hex_points[0]],
-        fill=(255, 255, 255, 220),
-        width=12,
-        joint="curve",
-    )
-
-    border_glow = border_glow.filter(
-        ImageFilter.GaussianBlur(8)
-    )
-
-    image.alpha_composite(
-        border_glow
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw.line(
-        hex_points + [hex_points[0]],
-        fill=(255, 255, 255, 255),
+        inner_hex + [inner_hex[0]],
+        fill=(
+            255,
+            255,
+            255,
+            180,
+        ),
         width=5,
         joint="curve",
     )
@@ -6157,25 +6171,22 @@ def generate_coinflip_result_image(
         text,
         y,
         font,
-        fill=(255, 255, 255, 255),
+        fill,
     ):
+
         bbox = draw.textbbox(
             (0, 0),
             text,
             font=font,
         )
 
-        text_width = (
+        width = (
             bbox[2] - bbox[0]
-        )
-
-        text_height = (
-            bbox[3] - bbox[1]
         )
 
         draw.text(
             (
-                center_x - text_width / 2,
+                center_x - width / 2,
                 y,
             ),
             text,
@@ -6183,55 +6194,46 @@ def generate_coinflip_result_image(
             fill=fill,
         )
 
-        return text_height
-
     # ========================================================
-    # USER / BET TEXT
+    # USER TEXT
     # ========================================================
 
     safe_username = str(
         username
     ).strip()
 
-    if len(safe_username) > 24:
+    if len(safe_username) > 26:
         safe_username = (
-            safe_username[:21] + "..."
+            safe_username[:23]
+            + "..."
         )
 
     choice_text = str(
         choice
     ).upper()
 
-    user_line = (
-        f"@{safe_username} betted"
-    )
-
-    bet_line = (
-        f"{money(bet)} on {choice_text}"
-    )
-
     centered_text(
-        user_line,
-        125,
+        f"@{safe_username} BETTED",
+        100,
         font_user,
         (255, 255, 255, 255),
     )
 
     centered_text(
-        bet_line,
-        175,
+        f"{money(bet)} ON {choice_text}",
+        155,
         font_bet,
         (255, 255, 255, 255),
     )
 
     # ========================================================
-    # COIN POSITION
+    # COIN
     # ========================================================
 
     coin_x = center_x
-    coin_y = 430
+    coin_y = 515
 
-    coin_radius = 135
+    coin_radius = 235
 
     # ========================================================
     # COIN GLOW
@@ -6248,21 +6250,30 @@ def generate_coinflip_result_image(
     )
 
     for extra in range(
-        45,
+        65,
         0,
         -3,
     ):
+
         alpha = max(
             5,
-            80 - extra,
+            int(85 - extra),
         )
 
         coin_glow_draw.ellipse(
             (
-                coin_x - coin_radius - extra,
-                coin_y - coin_radius - extra,
-                coin_x + coin_radius + extra,
-                coin_y + coin_radius + extra,
+                coin_x
+                - coin_radius
+                - extra,
+                coin_y
+                - coin_radius
+                - extra,
+                coin_x
+                + coin_radius
+                + extra,
+                coin_y
+                + coin_radius
+                + extra,
             ),
             outline=(
                 255,
@@ -6270,15 +6281,49 @@ def generate_coinflip_result_image(
                 255,
                 alpha,
             ),
-            width=5,
+            width=8,
         )
 
     coin_glow = coin_glow.filter(
-        ImageFilter.GaussianBlur(7)
+        ImageFilter.GaussianBlur(12)
     )
 
     image.alpha_composite(
         coin_glow
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # ========================================================
+    # COIN SHADOW
+    # ========================================================
+
+    shadow = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
+    )
+
+    shadow_draw = ImageDraw.Draw(
+        shadow
+    )
+
+    shadow_draw.ellipse(
+        (
+            coin_x - coin_radius + 25,
+            coin_y - coin_radius + 35,
+            coin_x + coin_radius + 35,
+            coin_y + coin_radius + 55,
+        ),
+        fill=(0, 0, 0, 210),
+    )
+
+    shadow = shadow.filter(
+        ImageFilter.GaussianBlur(20)
+    )
+
+    image.alpha_composite(
+        shadow
     )
 
     draw = ImageDraw.Draw(image)
@@ -6294,62 +6339,114 @@ def generate_coinflip_result_image(
             coin_x + coin_radius,
             coin_y + coin_radius,
         ),
-        fill=(215, 215, 225, 255),
-        outline=(255, 255, 255, 255),
-        width=6,
+        fill=(
+            225,
+            225,
+            235,
+            255,
+        ),
+        outline=(
+            255,
+            255,
+            255,
+            255,
+        ),
+        width=8,
     )
 
     # ========================================================
     # COIN EDGE
     # ========================================================
 
-    edge_radius = coin_radius - 10
+    edge = coin_radius - 15
 
     draw.ellipse(
         (
-            coin_x - edge_radius,
-            coin_y - edge_radius,
-            coin_x + edge_radius,
-            coin_y + edge_radius,
+            coin_x - edge,
+            coin_y - edge,
+            coin_x + edge,
+            coin_y + edge,
         ),
-        fill=(32, 34, 45, 255),
-        outline=(130, 130, 145, 255),
-        width=5,
+        fill=(
+            40,
+            42,
+            54,
+            255,
+        ),
+        outline=(
+            150,
+            150,
+            165,
+            255,
+        ),
+        width=8,
     )
 
     # ========================================================
     # COIN FACE
     # ========================================================
 
-    face_radius = coin_radius - 28
+    face = coin_radius - 40
 
     draw.ellipse(
         (
-            coin_x - face_radius,
-            coin_y - face_radius,
-            coin_x + face_radius,
-            coin_y + face_radius,
+            coin_x - face,
+            coin_y - face,
+            coin_x + face,
+            coin_y + face,
         ),
-        fill=(12, 14, 22, 255),
-        outline=(255, 255, 255, 220),
+        fill=(
+            12,
+            14,
+            24,
+            255,
+        ),
+        outline=(
+            255,
+            255,
+            255,
+            230,
+        ),
+        width=6,
+    )
+
+    # ========================================================
+    # COIN INNER RING
+    # ========================================================
+
+    inner = coin_radius - 62
+
+    draw.ellipse(
+        (
+            coin_x - inner,
+            coin_y - inner,
+            coin_x + inner,
+            coin_y + inner,
+        ),
+        outline=(
+            255,
+            255,
+            255,
+            130,
+        ),
         width=4,
     )
 
     # ========================================================
-    # COIN RESULT
+    # COIN LETTER
     # ========================================================
 
-    if result.lower() in (
+    if str(result).lower() in (
         "heads",
         "head",
     ):
-        coin_letter = "H"
+        letter = "H"
     else:
-        coin_letter = "T"
+        letter = "T"
 
     bbox = draw.textbbox(
         (0, 0),
-        coin_letter,
+        letter,
         font=font_coin,
     )
 
@@ -6363,12 +6460,20 @@ def generate_coinflip_result_image(
 
     draw.text(
         (
-            coin_x - letter_width / 2,
-            coin_y - letter_height / 2 - 8,
+            coin_x
+            - letter_width / 2,
+            coin_y
+            - letter_height / 2
+            - 12,
         ),
-        coin_letter,
+        letter,
         font=font_coin,
-        fill=(255, 255, 255, 255),
+        fill=(
+            255,
+            255,
+            255,
+            255,
+        ),
     )
 
     # ========================================================
@@ -6377,54 +6482,115 @@ def generate_coinflip_result_image(
 
     draw.arc(
         (
-            coin_x - face_radius + 15,
-            coin_y - face_radius + 15,
-            coin_x + face_radius - 15,
-            coin_y + face_radius - 15,
+            coin_x - face + 20,
+            coin_y - face + 20,
+            coin_x + face - 20,
+            coin_y + face - 20,
         ),
-        200,
-        320,
-        fill=(255, 255, 255, 120),
-        width=5,
+        205,
+        315,
+        fill=(
+            255,
+            255,
+            255,
+            150,
+        ),
+        width=7,
     )
 
     # ========================================================
-    # RESULT TEXT
+    # RESULT
     # ========================================================
 
     if won:
+
         result_text = "YOU WON"
+
         result_color = (
-            100,
+            95,
             255,
-            160,
+            155,
             255,
         )
+
     else:
+
         result_text = "YOU LOST"
+
         result_color = (
             255,
-            90,
-            105,
+            80,
+            100,
             255,
         )
 
     centered_text(
         result_text,
-        625,
+        790,
         font_result,
         result_color,
     )
 
     # ========================================================
-    # ACTUAL RESULT
+    # LANDED ON
     # ========================================================
 
     centered_text(
-        str(result).upper(),
-        710,
-        font_small,
-        (255, 255, 255, 220),
+        f"LANDED ON {str(result).upper()}",
+        890,
+        font_landed,
+        (255, 255, 255, 230),
+    )
+
+    # ========================================================
+    # BOTTOM BET RESULT
+    # ========================================================
+
+    if won:
+
+        bottom_text = (
+            f"You won {money(bet * COINFLIP_MULTIPLIER)}"
+        )
+
+    else:
+
+        bottom_text = (
+            f"You lost {money(bet)}"
+        )
+
+    centered_text(
+        bottom_text,
+        945,
+        font_landed,
+        (
+            100,
+            255,
+            160,
+            255,
+        )
+        if won
+        else (
+            255,
+            100,
+            120,
+            255,
+        ),
+    )
+
+    # ========================================================
+    # FINAL WHITE BORDER
+    # ========================================================
+
+    draw.line(
+        outer_hex + [outer_hex[0]],
+        fill=(
+            255,
+            255,
+            255,
+            255,
+        ),
+        width=6,
+        joint="curve",
     )
 
     # ========================================================
