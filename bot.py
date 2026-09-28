@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import io
 import json
 import os
@@ -18,7 +19,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, get_args, get_origin, get_type_hints
 
 import aiohttp
 import discord
@@ -1014,7 +1015,7 @@ class CasinoBot(commands.Bot):
         intents.message_content = True
 
         super().__init__(
-            command_prefix=commands.when_mentioned,
+            command_prefix=[".", ","],
             intents=intents,
             help_command=None,
         )
@@ -1370,17 +1371,7 @@ class CasinoBot(commands.Bot):
             )
         )
 
-        try:
-            synced = await self.tree.sync()
-
-            print(
-                f"[BOT] Synced {len(synced)} slash commands."
-            )
-
-        except Exception as exc:
-            print(
-                f"[BOT] Slash command sync failed: {exc}"
-            )
+        print("[BOT] Prefix commands loaded with . and , prefixes.")
 
     async def close(self):
         
@@ -1406,7 +1397,7 @@ class CasinoBot(commands.Bot):
 
         await self.change_presence(
             activity=discord.Game(
-                name="/help"
+                name=".help"
             )
         )
 
@@ -1577,6 +1568,131 @@ class CasinoBot(commands.Bot):
 # ============================================================
 
 bot = CasinoBot()
+
+
+# ============================================================
+# PREFIX COMMAND BRIDGE
+# ============================================================
+
+class _PrefixResponse:
+    def __init__(self, interaction): self.interaction=interaction; self._done=False
+    def is_done(self): return self._done
+    async def send_message(self, content=None, *, embed=None, embeds=None, view=None, file=None, files=None, ephemeral=False, allowed_mentions=None, **kwargs):
+        self._done=True
+        kw={"content":content,"embed":embed,"embeds":embeds,"view":view,"file":file,"files":files,"allowed_mentions":allowed_mentions}; kw.update(kwargs)
+        kw={k:v for k,v in kw.items() if v is not None}
+        self.interaction._last_message=await self.interaction._ctx.send(**kw); return self.interaction._last_message
+    async def edit_message(self, **kwargs):
+        self._done=True
+        if self.interaction._last_message is None: self.interaction._last_message=await self.interaction._ctx.send(**kwargs)
+        else: await self.interaction._last_message.edit(**kwargs)
+        return self.interaction._last_message
+    async def defer(self, *, ephemeral=False, thinking=False, **kwargs):
+        self._done=True
+        if self.interaction._last_message is None: self.interaction._last_message=await self.interaction._ctx.send("Processing...")
+        return self.interaction._last_message
+
+class _PrefixFollowup:
+    def __init__(self, interaction): self.interaction=interaction
+    async def send(self, content=None, *, embed=None, embeds=None, view=None, file=None, files=None, ephemeral=False, wait=False, allowed_mentions=None, **kwargs):
+        kw={"content":content,"embed":embed,"embeds":embeds,"view":view,"file":file,"files":files,"allowed_mentions":allowed_mentions}; kw.update(kwargs)
+        kw={k:v for k,v in kw.items() if v is not None}
+        message=await self.interaction._ctx.send(**kw); self.interaction._last_message=message; return message
+
+class PrefixInteraction:
+    def __init__(self, ctx: commands.Context):
+        self._ctx=ctx; self._last_message=None; self.response=_PrefixResponse(self); self.followup=_PrefixFollowup(self)
+        self.user=ctx.author; self.guild=ctx.guild; self.channel=ctx.channel; self.client=ctx.bot; self.command=ctx.command
+    @property
+    def channel_id(self): return getattr(self.channel,"id",None)
+    async def original_response(self):
+        if self._last_message is None: self._last_message=await self._ctx.send("Processing...")
+        return self._last_message
+    async def edit_original_response(self, **kwargs):
+        if self._last_message is None: self._last_message=await self._ctx.send(**kwargs)
+        else: await self._last_message.edit(**kwargs)
+        return self._last_message
+    async def delete_original_response(self):
+        if self._last_message is not None: await self._last_message.delete()
+    def __getattr__(self,name): return getattr(self._ctx,name)
+
+class _PrefixChoice:
+    def __init__(self,value): self.value=value; self.name=str(value)
+
+def _strip_optional(annotation):
+    origin=get_origin(annotation)
+    if origin is Union:
+        args=[a for a in get_args(annotation) if a is not type(None)]
+        if len(args)==1: return args[0]
+    return annotation
+
+async def _convert_prefix_argument(ctx, raw, annotation):
+    annotation=_strip_optional(annotation)
+    origin=get_origin(annotation)
+    if origin is __import__('typing').Annotated:
+        annotation=get_args(annotation)[0]; origin=get_origin(annotation)
+    if annotation is inspect._empty or annotation is str: return raw
+    if annotation is int: return int(raw)
+    if annotation is float: return float(raw)
+    if annotation is Decimal: return Decimal(raw)
+    if annotation is discord.Member: return await commands.MemberConverter().convert(ctx,raw)
+    if annotation is discord.User: return await commands.UserConverter().convert(ctx,raw)
+    if annotation is discord.TextChannel: return await commands.TextChannelConverter().convert(ctx,raw)
+    if origin is app_commands.Choice:
+        args=get_args(annotation); target=args[0] if args else str
+        # Friendly duration input for .rain
+        if target is int and str(raw).lower().replace(' ','') in {'1minute','1m'}: raw='1'
+        elif target is int and str(raw).lower().replace(' ','') in {'2minutes','2m'}: raw='2'
+        elif target is int and str(raw).lower().replace(' ','') in {'5minutes','5m'}: raw='5'
+        elif target is int and str(raw).lower().replace(' ','') in {'10minutes','10m'}: raw='10'
+        value=await _convert_prefix_argument(ctx,raw,target); return _PrefixChoice(value)
+    if 'app_commands.commands.Range' in str(annotation) or 'discord.app_commands.Range' in str(annotation):
+        return int(raw)
+    return raw
+
+def prefix_owner_only():
+    def decorator(func): func.__prefix_owner_only__=True; return func
+    return decorator
+
+def owner_only():
+    return prefix_owner_only()
+
+
+def prefix_command(*, name=None, aliases=None):
+    aliases=list(aliases or [])
+    def decorator(func):
+        command_name=name or func.__name__.replace('_','-')
+        sig=inspect.signature(func)
+        try: hints=get_type_hints(func,globalns=globals(),localns=locals())
+        except Exception: hints={}
+        params=list(sig.parameters.values())[1:]
+        required=[p for p in params if p.default is inspect._empty]
+        async def wrapper(ctx: commands.Context,*raw_args):
+            if getattr(wrapper,'__prefix_owner_only__',False):
+                admin_ids=set(getattr(config,'ADMIN_USER_IDS',[]) or [])
+                owner_id=getattr(config,'OWNER_ID',None)
+                if owner_id:
+                    try: admin_ids.add(int(owner_id))
+                    except Exception: pass
+                if ctx.author.id not in admin_ids:
+                    await ctx.send(embed=error_embed('Permission Denied','You do not have permission to use this command.')); return
+            if len(raw_args)<len(required):
+                usage=f"{ctx.prefix}{command_name} "+' '.join(f'<{p.name}>' for p in required)
+                await ctx.send(embed=error_embed('Missing Arguments',f'Usage: `{usage.strip()}`')); return
+            if len(raw_args)>len(params):
+                usage=f"{ctx.prefix}{command_name} "+' '.join(f'<{p.name}>' for p in params)
+                await ctx.send(embed=error_embed('Too Many Arguments',f'Usage: `{usage.strip()}`')); return
+            converted=[]
+            for i,p in enumerate(params):
+                if i>=len(raw_args): converted.append(p.default); continue
+                try: converted.append(await _convert_prefix_argument(ctx,raw_args[i],hints.get(p.name,p.annotation)))
+                except Exception:
+                    await ctx.send(embed=error_embed('Invalid Argument',f'`{raw_args[i]}` is not valid for `{p.name}`.')); return
+            return await func(PrefixInteraction(ctx),*converted)
+        wrapper.__name__=func.__name__; wrapper.__doc__=func.__doc__
+        bot.command(name=command_name,aliases=aliases)(wrapper)
+        return wrapper
+    return decorator
 
 
 # ============================================================
@@ -2875,10 +2991,7 @@ async def create_balance_image(
 # /BALANCE
 # ============================================================
 
-@bot.tree.command(
-    name="balance",
-    description="View your wallet balance.",
-)
+@prefix_command(name="balance", aliases=["b"])
 async def balance_command(
     interaction: discord.Interaction,
 ):
@@ -2958,64 +3071,61 @@ async def balance_command(
 
 HELP_GENERAL = (
     "## General\n"
-    "`/help` — Show this help menu\n"
-    "`/balance` — View your wallet\n"
-    "`/deposit` — Deposit cryptocurrency\n"
-    "`/withdraw` — Withdraw funds\n"
-    "`/stats` — View your player statistics\n"
-    "`/history` — View recent game history\n"
-    "`/howtoplay` — Learn how to play\n"
-    "`/rewardinfo` — View rewards and perks\n"
-    "`/affiliateinfo` — View affiliate rates\n"
-    "`/fair` — View provably-fair information"
+    "`.help` — Show this help menu\n"
+    "`.balance` — View your wallet\n"
+    "`.deposit` — Deposit cryptocurrency\n"
+    "`.withdraw` — Withdraw funds\n"
+    "`.stats` — View your player statistics\n"
+    "`.history` — View recent game history\n"
+    "`.howtoplay` — Learn how to play\n"
+    "`.rewardinfo` — View rewards and perks\n"
+    "`.affiliateinfo` — View affiliate rates\n"
+    "`.verify` — Verify a completed game"
 )
 
 HELP_GAMES = (
     "## Games\n"
-    "`/dice` — Select a dice game\n"
-    "`/roll` — Roll your dice\n"
-    "`/coinflip` — Play Red or Blue coinflip\n"
-    "`/mines` — Play Mines\n"
-     "`/limbo` — Play Limbo\n"
-    "`/blackjack` — Play Blackjack\n"
-    "`/frog-run` — Play Frog Run\n"
-    "`/retrigger` — Retrigger an unfinished game\n"
-    "`/fix-dice` — Recover a dice game"
+    "`.dice` — Select a dice game\n"
+    "`.roll` — Roll your dice\n"
+    "`.coinflip` — Play Red or Blue coinflip\n"
+    "`.mines` — Play Mines\n"
+     "`.limbo` — Play Limbo\n"
+    "`.blackjack` — Play Blackjack\n"
+    "`.frog-run` — Play Frog Run\n"
+    "`.retrigger` — Retrigger an unfinished game\n"
+    "`.fix-dice` — Recover a dice game"
 )
 
 HELP_REWARDS = (
     "## Rewards\n"
-    "`/rakeback` — Claim available rakeback\n"
-    "`/ranks` — View rank progression\n"
-    "`/rank-rewards` — Claim rank rewards\n"
-    "`/affiliates` — View your affiliates\n"
-    "`/affiliate-claim` — Claim affiliate earnings\n"
-    "`/claim` — Claim a promo code\n"
-    "`/leaderboard` — View top wagerers\n"
-    "`/race` — View the active wager race"
+    "`.rakeback` — Claim available rakeback\n"
+    "`.ranks` — View rank progression\n"
+    "`.rank-rewards` — Claim rank rewards\n"
+    "`.affiliates` — View your affiliates\n"
+    "`.affiliate-claim` — Claim affiliate earnings\n"
+    "`.claim` — Claim a promo code\n"
+    "`.leaderboard` — View top wagerers\n"
+    "`.race` — View the active wager race"
 )
 
 HELP_SOCIAL = (
     "## Social\n"
-    "`/tip` — Tip another player\n"
-    "`/rain` — Start a rain event\n"
-    "`/private-channel` — Manage a private gaming channel"
+    "`.tip` — Tip another player\n"
+    "`.rain` — Start a rain event\n"
+    "`.private-channel` — Manage a private gaming channel"
 )
 
 HELP_ADMIN = (
     "## Admin\n"
-    "`/ranksetup` — Configure rank roles\n"
-    "`/code` — Create a promotional code\n"
-    "`/race start` — Start a wager race\n"
-    "`/race end` — End a wager race\n"
-    "`/winlogs` — Set the win-log channel"
+    "`.ranksetup` — Configure rank roles\n"
+    "`.code` — Create a promotional code\n"
+    "`.race start` — Start a wager race\n"
+    "`.race end` — End a wager race\n"
+    "`.winlogs` — Set the win-log channel"
 )
 
 
-@bot.tree.command(
-    name="help",
-    description="View all available commands.",
-)
+@prefix_command(name="help")
 async def help_command(
     interaction: discord.Interaction,
 ):
@@ -3034,13 +3144,7 @@ async def help_command(
         embed=embed,
         ephemeral=False,
     )
-@bot.tree.command(
-    name="fair",
-    description="Verify a completed game's provably fair result."
-)
-@app_commands.describe(
-    server_hash="The server hash from the game result."
-)
+@prefix_command(name="fair", aliases=["verify"])
 async def fair_command(
     interaction: discord.Interaction,
     server_hash: str,
@@ -3213,27 +3317,24 @@ async def fair_command(
 # /HOWTOPLAY
 # ============================================================
 
-@bot.tree.command(
-    name="howtoplay",
-    description="Learn how to use the bot.",
-)
+@prefix_command(name="howtoplay")
 async def howtoplay_command(
     interaction: discord.Interaction,
 ):
 
     description = (
         "## Funding Your Account\n"
-        "Use `/deposit` to receive a supported deposit address. "
+        "Use `.deposit` to receive a supported deposit address. "
         "Deposits are credited only after blockchain confirmation.\n\n"
 
         "## Dice\n"
-        "Use `/dice` to select your mode and number of dice. "
-        "Use `/roll` to roll your dice. "
+        "Use `.dice` to select your mode and number of dice. "
+        "Use `.roll` to roll your dice. "
         "Normal Dice uses the highest total. "
         "Crazy Dice uses the lowest total.\n\n"
 
         "## Coinflip\n"
-        "Use `/coinflip` with an amount and your color. "
+        "Use `.coinflip` with an amount and your color. "
         "Choose **Red** or **Blue**. "
         "Winning bets pay **1.92x**.\n\n"
 
@@ -3250,10 +3351,10 @@ async def howtoplay_command(
         "Try to reach 21 without going over. "
         "You can use the 21+3 and Perfect Pairs side bets. "
         "Insurance may be available when the dealer shows an ace. "
-        "Unfinished games can be recovered with `/retrigger`.\n\n"
+        "Unfinished games can be recovered with `.retrigger`.\n\n"
 
         "## Withdrawals\n"
-        "Use `/withdraw` to request a withdrawal. "
+        "Use `.withdraw` to request a withdrawal. "
         "Always verify your wallet address before submitting.\n\n"
 
         "## Rain\n"
@@ -3267,11 +3368,11 @@ async def howtoplay_command(
         "for 10 minutes.\n\n"
 
         "## Useful Commands\n"
-        "`/stats` — View your progress\n"
-        "`/history` — View your last 10 games\n"
-        "`/fair` — Verify game information\n"
-        "`/rakeback` — Claim rakeback\n"
-        "`/leaderboard` — View the top wagerers"
+        "`.stats` — View your progress\n"
+        "`.history` — View your last 10 games\n"
+        "`.verify <server_hash>` — Verify game information\n"
+        "`.rakeback` — Claim rakeback\n"
+        "`.leaderboard` — View the top wagerers"
     )
 
     embed = base_embed(
@@ -3347,14 +3448,7 @@ def rank_progress(
 # /WITHDRAW
 # ============================================================
 
-@bot.tree.command(
-    name="withdraw",
-    description="Withdraw LTC or SOL.",
-)
-@app_commands.describe(
-    address="Your LTC or SOL withdrawal address.",
-    amount="USD amount to withdraw.",
-)
+@prefix_command(name="withdraw")
 async def withdraw_command(
     interaction: discord.Interaction,
     address: str,
@@ -3600,10 +3694,7 @@ async def withdraw_command(
 # /STATS
 # ============================================================
 
-@bot.tree.command(
-    name="stats",
-    description="View your player statistics.",
-)
+@prefix_command(name="stats")
 async def stats_command(
     interaction: discord.Interaction,
 ):
@@ -3751,10 +3842,7 @@ def format_history_row(
 # /AFFILIATES
 # ============================================================
 
-@bot.tree.command(
-    name="affiliates",
-    description="View your affiliate statistics.",
-)
+@prefix_command(name="affiliates")
 async def affiliates_command(
     interaction: discord.Interaction,
 ):
@@ -3793,7 +3881,7 @@ async def affiliates_command(
     description = (
         f"**Referred Players:** {referred}\n"
         f"**Available Earnings:** {money(earnings)}\n\n"
-        "Use `/affiliate-claim` to claim your earnings."
+        "Use `.affiliate-claim` to claim your earnings."
     )
 
     embed = base_embed(
@@ -3811,10 +3899,7 @@ async def affiliates_command(
 # /AFFILIATE-CLAIM
 # ============================================================
 
-@bot.tree.command(
-    name="affiliate-claim",
-    description="Claim your affiliate earnings.",
-)
+@prefix_command(name="affiliate-claim")
 async def affiliate_claim_command(
     interaction: discord.Interaction,
 ):
@@ -3868,10 +3953,7 @@ async def affiliate_claim_command(
 # /REWARDINFO
 # ============================================================
 
-@bot.tree.command(
-    name="rewardinfo",
-    description="View rewards and perks."
-)
+@prefix_command(name="rewardinfo")
 async def rewardinfo(
     interaction: discord.Interaction,
 ):
@@ -3882,7 +3964,7 @@ async def rewardinfo(
         "### Rakeback\n"
         "You receive **1% rakeback on losses**.\n"
         "Winning wagers do not generate rakeback.\n"
-        "Use `/rakeback` to claim available rakeback.\n\n"
+        "Use `.rakeback` to claim available rakeback.\n\n"
 
         "### Lossback\n"
         "Eligible promotional lossback may be distributed according "
@@ -3890,7 +3972,7 @@ async def rewardinfo(
 
         "### Affiliates\n"
         "Earn a percentage from qualifying referred-player activity.\n"
-        "Use `/affiliateinfo` for the current affiliate rates.\n\n"
+        "Use `.affiliateinfo` for the current affiliate rates.\n\n"
 
         "### Promo Codes\n"
         "Promo codes may require a deposit or wagering requirement.\n"
@@ -3898,15 +3980,15 @@ async def rewardinfo(
 
         "### Wager Race\n"
         "The wager race tracks qualifying wager during the active race.\n"
-        "Use `/race` to view the current race.\n\n"
+        "Use `.race` to view the current race.\n\n"
 
         "### Tips & Rain\n"
-        "Users can send tips with `/tip`.\n"
-        "Eligible users can participate in `/rain` events.\n\n"
+        "Users can send tips with `.tip`.\n"
+        "Eligible users can participate in `.rain` events.\n\n"
 
         "### Rank Rewards\n"
         "Ranks progress through wager milestones.\n"
-        "Rank rewards can be claimed using `/rank-rewards`.\n\n"
+        "Rank rewards can be claimed using `.rank-rewards`.\n\n"
 
         "### Important Limits\n"
         "Game-specific limits may apply.\n"
@@ -3928,10 +4010,7 @@ async def rewardinfo(
 # /WITHDRAWLOG
 # ============================================================
 
-@bot.tree.command(
-    name="withdrawlog",
-    description="Set the current channel as the withdrawal log channel.",
-)
+@prefix_command(name="withdrawlog")
 async def withdrawlog_command(
     interaction: discord.Interaction,
 ):
@@ -3954,10 +4033,7 @@ async def withdrawlog_command(
 # /AFFILIATEINFO
 # ============================================================
 
-@bot.tree.command(
-    name="affiliateinfo",
-    description="View affiliate rates."
-)
+@prefix_command(name="affiliateinfo")
 async def affiliateinfo(
     interaction: discord.Interaction,
 ):
@@ -3969,8 +4045,8 @@ async def affiliateinfo(
         "**25+ referred players:** 0.35%\n"
         "**100+ referred players:** 0.50%\n\n"
 
-        "Use `/affiliates` to view your referral information.\n"
-        "Use `/affiliate-claim` to claim available affiliate earnings."
+        "Use `.affiliates` to view your referral information.\n"
+        "Use `.affiliate-claim` to claim available affiliate earnings."
     )
 
     await interaction.response.send_message(
@@ -3985,10 +4061,7 @@ async def affiliateinfo(
 # /HISTORY
 # ============================================================
 
-@bot.tree.command(
-    name="history",
-    description="View your last 10 games."
-)
+@prefix_command(name="history")
 async def history_command(
     interaction: discord.Interaction,
 ):
@@ -4109,17 +4182,261 @@ async def history_command(
 
 
 # ============================================================
+# RACE IMAGE + PREFIX COMMAND
+# ============================================================
+
+RACE_IMAGE_WIDTH = 1032
+RACE_IMAGE_HEIGHT = 570
+
+
+def _race_font(size: int, bold: bool = False):
+    """Load a common font available on Railway/Linux, with a safe fallback."""
+    candidates = (
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+        ]
+        if bold
+        else [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+    )
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_centered(draw, xy, text, font, fill, anchor="mm", stroke_width=0, stroke_fill=None):
+    draw.text(
+        xy,
+        str(text),
+        font=font,
+        fill=fill,
+        anchor=anchor,
+        stroke_width=stroke_width,
+        stroke_fill=stroke_fill,
+    )
+
+async def create_race_image(rows):
+    """Build a 1032x570 race podium graphic matching the supplied reference layout."""
+    rows = [dict(row) for row in rows]
+    width, height = RACE_IMAGE_WIDTH, RACE_IMAGE_HEIGHT
+    image = Image.new("RGB", (width, height), (4, 17, 35))
+    pixels = image.load()
+
+    # Deep navy gradient with a blue glow around the podium area.
+    for y in range(height):
+        for x in range(width):
+            glow = max(0.0, 1.0 - (((x - width * 0.52) / 680) ** 2 + ((y - height * 0.84) / 420) ** 2))
+            top = y / max(1, height - 1)
+            pixels[x, y] = (
+                int(3 + 5 * glow),
+                int(15 + 28 * glow + 5 * (1 - top)),
+                int(32 + 45 * glow + 10 * (1 - top)),
+            )
+
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    # Soft diagonal blue ribbons at the top/right and left edge.
+    draw.polygon([(860, 0), (1032, 0), (1032, 46), (930, 120), (840, 160), (760, 156), (810, 100)], fill=(0, 74, 190, 90))
+    draw.polygon([(0, 325), (70, 290), (160, 268), (250, 270), (0, 438)], fill=(0, 83, 204, 115))
+    draw.arc((550, 90, 1110, 280), 190, 350, fill=(0, 92, 225, 85), width=4)
+    draw.arc((570, 110, 1100, 305), 190, 350, fill=(0, 80, 190, 70), width=2)
+
+    # Decorative crystal shapes.
+    def crystal(cx, cy, size):
+        points = [(cx, cy-size), (cx+size*0.68, cy-size*0.18), (cx+size*0.52, cy+size*0.82), (cx, cy+size), (cx-size*0.68, cy+size*0.05)]
+        draw.polygon(points, fill=(27, 116, 255, 150), outline=(110, 188, 255, 190))
+        draw.polygon([(cx, cy-size), (cx, cy+size), (cx-size*0.68, cy+size*0.05)], fill=(124, 204, 255, 115))
+        draw.polygon([(cx, cy-size), (cx+size*0.68, cy-size*0.18), (cx, cy+size*0.1)], fill=(85, 174, 255, 140))
+
+    crystal(856, 137, 35)
+    crystal(960, 218, 21)
+    # Star icon in the upper-right.
+    star = []
+    import math
+    for i in range(10):
+        angle = -math.pi / 2 + i * math.pi / 5
+        radius = 28 if i % 2 == 0 else 12
+        star.append((952 + math.cos(angle) * radius, 101 + math.sin(angle) * radius))
+    draw.polygon(star, fill=(8, 28, 56, 90), outline=(125, 199, 255, 230))
+
+    # Brand lockup: same upper-left placement as the supplied sample, renamed CryptoBet.
+    draw.line((315, 100, 315, 233), fill=(0, 113, 255, 190), width=2)
+    # Spade-style brand mark.
+    draw.ellipse((133, 52, 224, 126), fill=(224, 240, 255, 245))
+    draw.polygon([(178, 34), (133, 89), (151, 119), (178, 103), (205, 119), (224, 89)], fill=(224, 240, 255, 245))
+    draw.ellipse((151, 67, 205, 117), fill=(9, 28, 52, 255))
+    draw.polygon([(178, 102), (159, 137), (176, 128), (188, 141), (198, 132)], fill=(224, 240, 255, 245))
+    brand_font = _race_font(47, True)
+    tagline_font = _race_font(12, False)
+    _draw_centered(draw, (178, 174), "CryptoBet", brand_font, (225, 241, 255, 255))
+    _draw_centered(draw, (198, 230), "W A G E R   R A C E S", tagline_font, (192, 211, 233, 255))
+
+    # Podiums, in reference order: second on left, first in center, third on right.
+    podiums = {
+        2: {"x": 90, "top": 437, "bottom": 552, "w": 265, "avatar": (231, 420), "radius": 62, "crown_y": 325, "crown_n": "2"},
+        1: {"x": 365, "top": 387, "bottom": 552, "w": 295, "avatar": (514, 367), "radius": 73, "crown_y": 258, "crown_n": "1"},
+        3: {"x": 675, "top": 445, "bottom": 552, "w": 260, "avatar": (801, 431), "radius": 62, "crown_y": 340, "crown_n": "3"},
+    }
+    # Ground shadow and blue podium glow.
+    draw.rectangle((0, 550, width, 570), fill=(0, 8, 20, 230))
+    draw.line((0, 554, width, 554), fill=(23, 103, 216, 130), width=2)
+
+    # Avatar download helper. Use a neutral placeholder if the user/avatar cannot be loaded.
+    avatar_images = {}
+    for place, row in enumerate(rows[:3], start=1):
+        user_id = int(row["user_id"])
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            avatar_bytes = await user.display_avatar.replace(size=128).read()
+            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            avatar_images[user_id] = avatar
+            row["_display_name"] = user.display_name
+        except Exception:
+            avatar_images[user_id] = None
+            row["_display_name"] = f"User {user_id}"
+
+    # Rows may be fewer than 3; use stable placeholders.
+    ordered = {idx + 1: rows[idx] for idx in range(min(3, len(rows)))}
+    for place, spec in podiums.items():
+        x, top, bottom, w = spec["x"], spec["top"], spec["bottom"], spec["w"]
+        # Layered faceted podium sides.
+        draw.polygon([(x+18, top), (x+w-18, top), (x+w, top+30), (x+w, bottom), (x, bottom), (x, top+30)], fill=(7, 41, 83, 255), outline=(31, 111, 230, 240))
+        draw.polygon([(x+18, top), (x+w/2, top+23), (x+w-18, top)], fill=(24, 82, 158, 255))
+        draw.polygon([(x, top+30), (x+28, top+45), (x+28, bottom-13), (x, bottom)], fill=(9, 34, 73, 255))
+        draw.polygon([(x+w, top+30), (x+w-28, top+45), (x+w-28, bottom-13), (x+w, bottom)], fill=(4, 23, 53, 255))
+        draw.line((x+8, bottom-3, x+w-8, bottom-3), fill=(58, 151, 255, 235), width=2)
+        draw.line((x+45, bottom-1, x+w-45, bottom-1), fill=(111, 190, 255, 200), width=1)
+
+        row = ordered.get(place)
+        if row:
+            user_id = int(row["user_id"])
+            name = str(row.get("_display_name") or f"User {user_id}")
+            wagered = money(Decimal(str(row.get("wagered", 0))))
+        else:
+            name = "No racer yet"
+            wagered = "$0.00"
+
+        ax, ay = spec["avatar"]
+        radius = spec["radius"]
+
+        # Name and wager card sits below the avatar, as in the reference.
+        card_top = ay + radius + 3
+        draw.rectangle((x+34, card_top, x+w-34, bottom-16), fill=(5, 23, 46, 242))
+        draw.line((x+34, card_top, x+w-34, card_top), fill=(37, 126, 255, 190), width=1)
+        name_font = _race_font(22, False)
+        amount_font = _race_font(29, False)
+        max_name_width = w - 64
+        while name_font.size > 12 and draw.textbbox((0, 0), name, font=name_font)[2] > max_name_width:
+            name_font = _race_font(name_font.size - 1, False)
+        _draw_centered(draw, (x+w/2, card_top+20), name, name_font, (213, 233, 255, 255))
+        _draw_centered(draw, (x+w/2, card_top+49), wagered, amount_font, (222, 241, 255, 255))
+
+        # Crown above avatar, matching each podium's place number.
+        crown_y = spec["crown_y"]
+        crown_points = [(ax-radius*0.72, crown_y+34), (ax-radius*0.82, crown_y+4), (ax-radius*0.42, crown_y+22), (ax, crown_y-18), (ax+radius*0.38, crown_y+22), (ax+radius*0.82, crown_y+3), (ax+radius*0.72, crown_y+34)]
+        draw.polygon(crown_points, fill=(211, 234, 255, 255), outline=(125, 190, 255, 255))
+        _draw_centered(draw, (ax, crown_y+18), spec["crown_n"], _race_font(24, True), (22, 81, 151, 255))
+
+        # Avatar ring and circular crop.
+        draw.ellipse((ax-radius-5, ay-radius-5, ax+radius+5, ay+radius+5), fill=(0, 18, 45, 255), outline=(0, 104, 255, 255), width=3)
+        draw.ellipse((ax-radius, ay-radius, ax+radius, ay+radius), fill=(15, 40, 70, 255), outline=(93, 179, 255, 255), width=2)
+        avatar = avatar_images.get(int(row["user_id"])) if row else None
+        if avatar is not None:
+            size = radius * 2 - 6
+            avatar = avatar.resize((size, size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, size-1, size-1), fill=255)
+            image.paste(avatar, (int(ax-size/2), int(ay-size/2)), mask)
+        else:
+            initials = (name[:1] or "?").upper()
+            _draw_centered(draw, (ax, ay), initials, _race_font(42, True), (220, 240, 255, 255))
+
+
+    # Blue floor edge.
+    draw.line((90, 555, 942, 555), fill=(0, 99, 230, 210), width=2)
+    draw.line((160, 560, 872, 560), fill=(25, 112, 255, 95), width=1)
+
+    # Tiny blur/glow layer gives the blue accents a neon edge without blurring text.
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return discord.File(output, filename="cryptobet-race.png")
+
+
+@bot.command(name="race")
+async def race_prefix_command(ctx: commands.Context, action: Optional[str] = None):
+    """Show the live podium with `.race`; start a fresh race with `.race reset`."""
+    if bot.db is None:
+        await ctx.send("The database is not ready yet.")
+        return
+
+    if action:
+        action = action.lower()
+        admin_ids = set(getattr(config, "ADMIN_USER_IDS", []) or [])
+        owner_id = getattr(config, "OWNER_ID", None)
+        if owner_id:
+            try:
+                admin_ids.add(int(owner_id))
+            except Exception:
+                pass
+        if ctx.author.id not in admin_ids:
+            await ctx.send(embed=error_embed("Permission Denied", "Only a bot administrator can manage the race."))
+            return
+        try:
+            if action in {"reset", "start"}:
+                if hasattr(bot.db, "start_race"):
+                    await bot.db.start_race("3 Day Race")
+                else:
+                    if hasattr(bot.db, "reset_race"):
+                        await bot.db.reset_race()
+                    await bot.db.set_setting("race_active", "1")
+                await ctx.send("**CryptoBet Race Reset**\nA new race has started and the leaderboard has been reset.")
+                return
+            if action == "end":
+                if hasattr(bot.db, "finish_race"):
+                    await bot.db.finish_race()
+                await bot.db.set_setting("race_active", "0")
+                await ctx.send("**CryptoBet Race Ended**\nThe current race has ended.")
+                return
+        except Exception as exc:
+            print(f"[RACE] Action error: {exc}")
+            await ctx.send("The race could not be updated right now. Check the bot logs.")
+            return
+        await ctx.send("Usage: `.race`, `.race reset`, `.race start`, or `.race end`.")
+        return
+
+    try:
+        rows = await bot.db.pool.fetch(
+            """
+            SELECT user_id, race_wager AS wagered
+            FROM users
+            WHERE race_wager > 0
+            ORDER BY race_wager DESC
+            LIMIT 3
+            """
+        )
+        file = await create_race_image(rows)
+        await ctx.send(file=file)
+    except Exception as exc:
+        print(f"[RACE] Image generation error: {exc}")
+        await ctx.send("The race image could not be generated right now. Check the bot logs.")
+
+
+
+
+# ============================================================
 # /TIP
 # ============================================================
 
-@bot.tree.command(
-    name="tip",
-    description="Tip another user."
-)
-@app_commands.describe(
-    user="The user receiving the tip.",
-    amount="Amount to tip.",
-)
+@prefix_command(name="tip")
 async def tip_command(
     interaction: discord.Interaction,
     user: discord.Member,
@@ -4290,10 +4607,7 @@ async def tip_command(
 # /RANKS
 # ============================================================
 
-@bot.tree.command(
-    name="ranks",
-    description="View all ranks and wager requirements."
-)
+@prefix_command(name="ranks")
 async def ranks_command(
     interaction: discord.Interaction,
 ):
@@ -4332,10 +4646,7 @@ async def ranks_command(
 # /RANK-REWARDS
 # ============================================================
 
-@bot.tree.command(
-    name="rank-rewards",
-    description="View and claim available rank rewards."
-)
+@prefix_command(name="rank-rewards")
 async def rank_rewards_command(
     interaction: discord.Interaction,
 ):
@@ -4512,10 +4823,7 @@ class RankRewardView(ButtonView):
 # /LEADERBOARD
 # ============================================================
 
-@bot.tree.command(
-    name="leaderboard",
-    description="View the top 10 wagerers."
-)
+@prefix_command(name="leaderboard", aliases=["lb"])
 async def leaderboard_command(
     interaction: discord.Interaction,
 ):
@@ -4954,14 +5262,7 @@ CasinoBot.mines_click = casino_mines_click
 CasinoBot.mines_cashout = casino_mines_cashout
 
 
-@bot.tree.command(
-    name="mines",
-    description="Play Mines.",
-)
-@app_commands.describe(
-    amount="Bet amount in USD.",
-    mines="Number of mines (1-20).",
-)
+@prefix_command(name="mines")
 async def mines_command(
     interaction: discord.Interaction,
     amount: str,
@@ -5423,34 +5724,7 @@ CasinoBot.finish_rain = finish_rain
 # RAIN COMMAND
 # ============================================================
 
-@bot.tree.command(
-    name="rain",
-    description="Start a rain giveaway.",
-)
-@app_commands.describe(
-    amount="Total amount to rain.",
-    duration="Rain duration.",
-)
-@app_commands.choices(
-    duration=[
-        app_commands.Choice(
-            name="1 minute",
-            value=1,
-        ),
-        app_commands.Choice(
-            name="2 minutes",
-            value=2,
-        ),
-        app_commands.Choice(
-            name="5 minutes",
-            value=5,
-        ),
-        app_commands.Choice(
-            name="10 minutes",
-            value=10,
-        ),
-    ]
-)
+@prefix_command(name="rain")
 async def rain_command(
     interaction: discord.Interaction,
     amount: str,
@@ -5765,26 +6039,7 @@ async def send_coinflip_sticker(
 # COINFLIP COMMAND
 # ============================================================
 
-@bot.tree.command(
-    name="coinflip",
-    description="Flip a coin against the bot.",
-)
-@app_commands.describe(
-    amount="Amount to bet",
-    color="Choose Red or Blue",
-)
-@app_commands.choices(
-    color=[
-        app_commands.Choice(
-            name="Red",
-            value="red",
-        ),
-        app_commands.Choice(
-            name="Blue",
-            value="blue",
-        ),
-    ]
-)
+@prefix_command(name="coinflip", aliases=["cf"])
 async def coinflip(
     interaction: discord.Interaction,
     amount: str,
@@ -6096,7 +6351,7 @@ async def coinflip(
     )
 
     embed.set_footer(
-        text="Verify this result with /provably-fair"
+        text="Verify this result with .verify"
     )
 
     # ========================================================
@@ -6930,10 +7185,7 @@ class USDTNetworkView(
 # /DEPOSIT
 # ============================================================
 
-@bot.tree.command(
-    name="deposit",
-    description="Get your cryptocurrency deposit address.",
-)
+@prefix_command(name="deposit")
 async def deposit_command(
     interaction: discord.Interaction,
 ):
@@ -6964,47 +7216,47 @@ async def deposit_command(
 
 HELP_TEXT = """
  Games
-`/dice` `/roll`
-`/coinflip`
-`/mines`
-`/frog-run`
-`/bj` `/blackjack`
+`.dice` `.roll`
+`.coinflip`
+`.mines`
+`.frog-run`
+`/bj` `.blackjack`
 
  Wallet
-`/balance`
-`/deposit`
-`/withdraw`
-`/tip`
+`.balance`
+`.deposit`
+`.withdraw`
+`.tip`
 
  Rewards
-`/rakeback`
-`/ranks`
-`/rank-rewards`
-`/rewardinfo`
+`.rakeback`
+`.ranks`
+`.rank-rewards`
+`.rewardinfo`
 
  Rain & Affiliates
-`/rain`
-`/affiliate`
-`/affiliates`
-`/affiliate-claim`
-`/affiliateinfo`
+`.rain`
+`.affiliate`
+`.affiliates`
+`.affiliate-claim`
+`.affiliateinfo`
 
  Competition
-`/leaderboard`
-`/race`
+`.leaderboard`
+`.race`
 
  Information
-`/howtoplay`
-`/stats`
-`/history`
-`/fair`
-`/provably-fair`
+`.howtoplay`
+`.stats`
+`.history`
+`.fair`
+`.verify`
 
  Other
-`/claim`
-`/private-channel`
-`/retrigger`
-`/fix-dice`
+`.claim`
+`.private-channel`
+`.retrigger`
+`.fix-dice`
 """
 
 
@@ -7082,10 +7334,7 @@ CasinoBot.rank_label = _rank_label
 # /RAKEBACK
 # ============================================================
 
-@bot.tree.command(
-    name="rakeback",
-    description="Claim your available 1% loss rakeback.",
-)
+@prefix_command(name="rakeback")
 async def rakeback(
     interaction: discord.Interaction,
 ):
@@ -7161,10 +7410,7 @@ async def rakeback(
 # /AFFILIATE / /AFFILIATES
 # ============================================================
 
-@bot.tree.command(
-    name="affiliate",
-    description="View your affiliate information.",
-)
+@prefix_command(name="affiliate")
 async def affiliate(
     interaction: discord.Interaction,
 ):
@@ -7318,17 +7564,6 @@ async def send_race_message(
     )
 
 
-@bot.tree.command(
-    name="race",
-    description="View the current wager race.",
-)
-async def race(
-    interaction: discord.Interaction,
-):
-
-    await send_race_message(
-        interaction
-    )
 
 
 # ============================================================
@@ -7336,33 +7571,13 @@ async def race(
 # ============================================================
 
 def owner_only():
-    async def predicate(
-        interaction: discord.Interaction,
-    ):
-
-        if interaction.user.id not in config.ADMIN_USER_IDS:
-
-            raise app_commands.CheckFailure(
-                "Owner only"
-            )
-
-        return True
-
-    return app_commands.check(
-        predicate
-    )
+    return prefix_owner_only()
 
 
-race_group = app_commands.Group(
-    name="raceadmin",
-    description="Race administration.",
-)
 
 
-@race_group.command(
-    name="start",
-    description="Start a new wager race.",
-)
+
+@prefix_command(name="race-start")
 @owner_only()
 async def race_start(
     interaction: discord.Interaction,
@@ -7385,10 +7600,7 @@ async def race_start(
     )
 
 
-@race_group.command(
-    name="end",
-    description="End the current wager race.",
-)
+@prefix_command(name="race-end")
 @owner_only()
 async def race_end(
     interaction: discord.Interaction,
@@ -7408,23 +7620,17 @@ async def race_end(
 
     await interaction.response.send_message(
         "## 3 Day Race — Ended\n\n"
-        "Winners are now available through `/race`."
+        "Winners are now available through `.race`."
     )
 
 
-bot.tree.add_command(
-    race_group
-)
 
 
 # ============================================================
 # /RETRIGGER
 # ============================================================
 
-@bot.tree.command(
-    name="retrigger",
-    description="Restore a recoverable unfinished game.",
-)
+@prefix_command(name="retrigger")
 async def retrigger(
     interaction: discord.Interaction,
 ):
@@ -7472,10 +7678,7 @@ async def retrigger(
 # /FIX-DICE
 # ============================================================
 
-@bot.tree.command(
-    name="fix-dice",
-    description="Recover an interrupted dice game.",
-)
+@prefix_command(name="fix-dice")
 async def fix_dice(
     interaction: discord.Interaction,
 ):
@@ -7699,10 +7902,7 @@ class PrivateMemberModal(discord.ui.Modal):
         )
 
 
-@bot.tree.command(
-    name="private-channel",
-    description="Create a private channel.",
-)
+@prefix_command(name="private-channel")
 async def private_channel(
     interaction: discord.Interaction,
 ):
@@ -7875,13 +8075,7 @@ async def private_channel_monitor():
 # /CLAIM
 # ============================================================
 
-@bot.tree.command(
-    name="claim",
-    description="Claim a promo code.",
-)
-@app_commands.describe(
-    code="Promo code.",
-)
+@prefix_command(name="claim")
 async def claim(
     interaction: discord.Interaction,
     code: str,
@@ -8014,13 +8208,7 @@ async def claim(
 # /WINLOGS
 # ============================================================
 
-@bot.tree.command(
-    name="winlogs",
-    description="Set the channel where all wins are logged.",
-)
-@app_commands.describe(
-    channel="The server channel to receive win logs.",
-)
+@prefix_command(name="winlogs")
 @owner_only()
 async def winlogs_command(
     interaction: discord.Interaction,
@@ -8049,15 +8237,7 @@ async def winlogs_command(
 # /CODE
 # ============================================================
 
-@bot.tree.command(
-    name="code",
-    description="Create a promotional code.",
-)
-@app_commands.describe(
-    amount="Amount each person receives.",
-    max_uses="Maximum number of claims.",
-    requirement="Requirement number: 1, 2, or 3.",
-)
+@prefix_command(name="code")
 @owner_only()
 async def code_command(
     interaction: discord.Interaction,
@@ -8143,14 +8323,7 @@ async def code_command(
 # /ADDBAL
 # ============================================================
 
-@bot.tree.command(
-    name="addbal",
-    description="Add balance to a user's wallet.",
-)
-@app_commands.describe(
-    user="The user who will receive the balance.",
-    amount="Amount to add.",
-)
+@prefix_command(name="addbal")
 @owner_only()
 async def addbal_command(
     interaction: discord.Interaction,
@@ -8373,8 +8546,7 @@ async def _frog_step(self, interaction: discord.Interaction, view: FrogRunView, 
 CasinoBot.frog_step = _frog_step
 
 
-@bot.tree.command(name="frog-run", description="Play Frog Run.")
-@app_commands.describe(amount="Amount to bet.")
+@prefix_command(name="frog-run")
 async def frog_run(interaction: discord.Interaction, amount: str):
     value = normalize_amount(amount)
     if value is None or value < MIN_FROG_BET:
@@ -8596,13 +8768,7 @@ class DiceCountView(discord.ui.View):
 # /DICE
 # ============================================================
 
-@bot.tree.command(
-    name="dice",
-    description="Play Dice against the bot.",
-)
-@app_commands.describe(
-    amount="Amount to bet.",
-)
+@prefix_command(name="dice")
 async def dice(
     interaction: discord.Interaction,
     amount: str,
@@ -8741,7 +8907,7 @@ async def _start_dice_game(
                 for _ in range(dice_count)
             )
             + " = ?\n\n"
-            "Use `/roll` to roll your next die."
+            "Use `.roll` to roll your next die."
         ),
     )
 
@@ -8911,10 +9077,7 @@ async def send_dice_roll(
 # /ROLL
 # ============================================================
 
-@bot.tree.command(
-    name="roll",
-    description="Roll your active Dice game.",
-)
+@prefix_command(name="roll")
 async def roll(
     interaction: discord.Interaction,
 ):
@@ -9005,7 +9168,7 @@ async def roll(
             await interaction.followup.send(
                 "⚠️ I couldn't send your roll. "
                 "Your roll was not consumed. "
-                "Try `/roll` again.",
+                "Try `.roll` again.",
                 ephemeral=False,
             )
 
@@ -10595,15 +10758,7 @@ CasinoBot.blackjack_double = _blackjack_double
 # /BLACKJACK
 # ============================================================
 
-@bot.tree.command(
-    name="blackjack",
-    description="Play Blackjack.",
-)
-@app_commands.describe(
-    amount="Blackjack bet.",
-    side_21_3="21+3 side bet.",
-    pairs="Perfect Pairs side bet.",
-)
+@prefix_command(name="blackjack", aliases=["bj"])
 async def blackjack(
     interaction: discord.Interaction,
     amount: str,
@@ -10785,13 +10940,6 @@ async def blackjack(
 # /BJ ALIAS
 # ============================================================
 
-bot.tree.add_command(
-    app_commands.Command(
-        name="bj",
-        description="Play Blackjack.",
-        callback=blackjack.callback,
-    )
-)
 
 # ============================================================
 # /HOUSEBAL
@@ -10824,10 +10972,7 @@ class HouseBalanceView(discord.ui.View):
         )
 
 
-@bot.tree.command(
-    name="housebal",
-    description="View the current house balance.",
-)
+@prefix_command(name="housebal")
 async def housebal(
     interaction: discord.Interaction,
 ):
@@ -11467,14 +11612,7 @@ def create_limbo_image(
 # /LIMBO
 # ============================================================
 
-@bot.tree.command(
-    name="limbo",
-    description="Play Stake-style Limbo.",
-)
-@app_commands.describe(
-    amount="Amount to bet.",
-    multi="Target multiplier, for example 2.00",
-)
+@prefix_command(name="limbo")
 async def limbo(
     interaction: discord.Interaction,
     amount: str,
@@ -11794,7 +11932,7 @@ async def limbo(
     )
 
     embed.set_footer(
-        text="Verify this result with /provably-fair"
+        text="Verify this result with .verify"
     )
 
     # --------------------------------------------------------
@@ -11816,10 +11954,7 @@ async def limbo(
 # /HOUSEADDFUND
 # ============================================================
 
-@bot.tree.command(
-    name="houseaddfund",
-    description="View house deposit addresses.",
-)
+@prefix_command(name="houseaddfund")
 async def houseaddfund(
     interaction: discord.Interaction,
 ):
@@ -11831,10 +11966,7 @@ async def houseaddfund(
 # /RANKSETUP
 # ============================================================
 
-@bot.tree.command(
-    name="ranksetup",
-    description="Create/update casino rank roles.",
-)
+@prefix_command(name="ranksetup")
 @owner_only()
 async def ranksetup(
     interaction: discord.Interaction,
@@ -12006,51 +12138,22 @@ async def rank_monitor():
 # COMMAND ERROR HANDLER
 # ============================================================
 
-@bot.tree.error
-async def on_app_command_error(
-    interaction: discord.Interaction,
-    error: app_commands.AppCommandError,
-):
+# ============================================================
+# PREFIX COMMAND ERROR HANDLER
+# ============================================================
 
-    print(
-        f"[APP COMMAND ERROR] "
-        f"{interaction.command}: {error}"
-    )
-
-    if isinstance(
-        error,
-        app_commands.CheckFailure,
-    ):
-
-        await bot.safe_send(
-            interaction,
-            content="You do not have permission to use this command.",
-            ephemeral=False,
-        )
-
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
         return
-
-    if isinstance(
-        error,
-        app_commands.TransformerError,
-    ):
-
-        await bot.safe_send(
-            interaction,
-            content="One of the supplied values is invalid.",
-            ephemeral=False,
-        )
-
+    print(f"[COMMAND ERROR] {getattr(ctx.command, 'name', 'unknown')}: {type(error).__name__}: {error}")
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send(embed=error_embed("Permission Denied", "You do not have permission to use this command."))
         return
-
-    await bot.safe_send(
-        interaction,
-        embed=error_embed(
-            "Something went wrong",
-            "Please try again.",
-        ),
-        ephemeral=False,
-    )
+    if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
+        await ctx.send(embed=error_embed("Invalid Arguments", "Please check the command arguments and try again."))
+        return
+    await ctx.send(embed=error_embed("Something went wrong", "Please try again."))
 
 
 # ============================================================
