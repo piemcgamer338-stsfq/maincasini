@@ -5920,131 +5920,384 @@ async def rain_timer(
 # COINFLIP
 # ============================================================
 
-COINFLIP_RED_STICKER_ID = 1553360108682084382
-COINFLIP_BLUE_STICKER_ID = 1553360311933734913
+COINFLIP_MULTIPLIER = Decimal("1.92")
 
 
 # ============================================================
-# COINFLIP STICKER SENDER
+# COINFLIP RESULT IMAGE
 # ============================================================
 
-async def send_coinflip_sticker(
-    interaction: discord.Interaction,
+def generate_coinflip_result_image(
+    username: str,
+    bet: Decimal,
+    choice: str,
     result: str,
+    won: bool,
 ):
     """
-    Send the appropriate Coinflip sticker.
+    Generates the Coinflip result image dynamically.
 
-    Tries the interaction webhook first.
-    If that fails, tries the actual Discord channel.
+    Layout:
 
-    Returns True if the sticker was sent successfully.
+        @username betted
+        $1.00 on HEADS
+
+              COIN
+
+            YOU WON
+
+    or
+
+            YOU LOST
+
+    The image contains:
+    - Dark background
+    - Hexagonal panel
+    - White glowing border
+    - Generated coin
+    - User/bet information
+    - WIN/LOSS result
     """
 
-    if result == "red":
-        sticker_id = COINFLIP_RED_STICKER_ID
-    else:
-        sticker_id = COINFLIP_BLUE_STICKER_ID
+    WIDTH = 900
+    HEIGHT = 900
 
-    # --------------------------------------------------------
-    # FETCH STICKER
-    # --------------------------------------------------------
-
-    try:
-        sticker = await bot.fetch_sticker(
-            sticker_id
-        )
-
-        print(
-            f"[COINFLIP STICKER] "
-            f"Fetched sticker: "
-            f"{sticker.id} | "
-            f"{getattr(sticker, 'name', 'Unknown')} | "
-            f"{getattr(sticker, 'type', 'Unknown')}"
-        )
-
-    except Exception as exc:
-        print(
-            f"[COINFLIP STICKER] "
-            f"Could not fetch sticker "
-            f"{sticker_id}: {exc}"
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # METHOD 1 — INTERACTION FOLLOWUP
-    # --------------------------------------------------------
-
-    try:
-        await interaction.followup.send(
-            stickers=[sticker],
-            wait=True,
-        )
-
-        print(
-            f"[COINFLIP STICKER] "
-            f"Sent {result} sticker "
-            f"through interaction followup."
-        )
-
-        return True
-
-    except Exception as exc:
-        print(
-            f"[COINFLIP STICKER] "
-            f"Followup sticker send failed: {exc}"
-        )
-
-    # --------------------------------------------------------
-    # METHOD 2 — CHANNEL SEND
-    # --------------------------------------------------------
-
-    try:
-        channel = interaction.channel
-
-        if channel is not None:
-            await channel.send(
-                stickers=[sticker]
-            )
-
-            print(
-                f"[COINFLIP STICKER] "
-                f"Sent {result} sticker "
-                f"through channel."
-            )
-
-            return True
-
-    except Exception as exc:
-        print(
-            f"[COINFLIP STICKER] "
-            f"Channel sticker send failed: {exc}"
-        )
-
-    # --------------------------------------------------------
-    # FAILED
-    # --------------------------------------------------------
-
-    print(
-        f"[COINFLIP STICKER] "
-        f"FAILED TO SEND {result.upper()} "
-        f"STICKER {sticker_id}"
+    image = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (5, 5, 8, 255),
     )
 
-    return False
+    draw = ImageDraw.Draw(image)
+
+    # --------------------------------------------------------
+    # FONTS
+    # --------------------------------------------------------
+
+    def load_font(size, bold=False):
+        paths = []
+
+        if bold:
+            paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ]
+        else:
+            paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ]
+
+        for path in paths:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+
+        return ImageFont.load_default()
+
+    font_small = load_font(34)
+    font_amount = load_font(42, bold=True)
+    font_result = load_font(68, bold=True)
+    font_coin = load_font(64, bold=True)
+
+    # --------------------------------------------------------
+    # COLORS
+    # --------------------------------------------------------
+
+    WHITE = (255, 255, 255, 255)
+    DARK = (5, 5, 10, 255)
+
+    if won:
+        result_color = (85, 255, 150, 255)
+    else:
+        result_color = (255, 80, 100, 255)
+
+    # --------------------------------------------------------
+    # BACKGROUND
+    # --------------------------------------------------------
+
+    # Subtle background gradient
+    for y in range(HEIGHT):
+        ratio = y / HEIGHT
+
+        r = int(5 + ratio * 8)
+        g = int(5 + ratio * 4)
+        b = int(10 + ratio * 15)
+
+        draw.line(
+            [(0, y), (WIDTH, y)],
+            fill=(r, g, b, 255),
+        )
+
+    # --------------------------------------------------------
+    # HEXAGON
+    # --------------------------------------------------------
+
+    cx = WIDTH // 2
+    cy = HEIGHT // 2
+
+    hex_radius = 375
+
+    hex_points = []
+
+    for i in range(6):
+        angle = math.radians(60 * i - 30)
+
+        x = cx + hex_radius * math.cos(angle)
+        y = cy + hex_radius * math.sin(angle)
+
+        hex_points.append((x, y))
+
+    # Glow layers
+    for glow in range(35, 0, -2):
+        alpha = max(5, 90 - glow * 2)
+
+        glow_points = []
+
+        radius = hex_radius + glow
+
+        for i in range(6):
+            angle = math.radians(60 * i - 30)
+
+            x = cx + radius * math.cos(angle)
+            y = cy + radius * math.sin(angle)
+
+            glow_points.append((x, y))
+
+        draw.line(
+            glow_points + [glow_points[0]],
+            fill=(255, 255, 255, alpha),
+            width=4,
+        )
+
+    # Hexagon fill
+    draw.polygon(
+        hex_points,
+        fill=(10, 12, 22, 255),
+    )
+
+    # Main white outline
+    draw.line(
+        hex_points + [hex_points[0]],
+        fill=WHITE,
+        width=5,
+        joint="curve",
+    )
+
+    # --------------------------------------------------------
+    # TEXT HELPERS
+    # --------------------------------------------------------
+
+    def centered_text(text, y, font, fill):
+        bbox = draw.textbbox(
+            (0, 0),
+            text,
+            font=font,
+        )
+
+        text_width = bbox[2] - bbox[0]
+
+        draw.text(
+            (
+                cx - text_width / 2,
+                y,
+            ),
+            text,
+            font=font,
+            fill=fill,
+        )
+
+    # --------------------------------------------------------
+    # USER / BET TEXT
+    # --------------------------------------------------------
+
+    username_text = f"@{username}"
+
+    choice_text = str(choice).upper()
+
+    bet_text = (
+        f"{money(bet)} on {choice_text}"
+    )
+
+    centered_text(
+        username_text,
+        145,
+        font_small,
+        WHITE,
+    )
+
+    centered_text(
+        bet_text,
+        190,
+        font_amount,
+        WHITE,
+    )
+
+    # --------------------------------------------------------
+    # COIN
+    # --------------------------------------------------------
+
+    coin_cx = cx
+    coin_cy = 430
+
+    coin_radius = 135
+
+    # Coin glow
+    for glow in range(35, 0, -3):
+        alpha = max(
+            5,
+            80 - glow * 2,
+        )
+
+        draw.ellipse(
+            (
+                coin_cx - coin_radius - glow,
+                coin_cy - coin_radius - glow,
+                coin_cx + coin_radius + glow,
+                coin_cy + coin_radius + glow,
+            ),
+            outline=(
+                255,
+                255,
+                255,
+                alpha,
+            ),
+            width=5,
+        )
+
+    # Coin outer edge
+    draw.ellipse(
+        (
+            coin_cx - coin_radius,
+            coin_cy - coin_radius,
+            coin_cx + coin_radius,
+            coin_cy + coin_radius,
+        ),
+        fill=(210, 210, 220, 255),
+        outline=WHITE,
+        width=6,
+    )
+
+    # Coin body
+    draw.ellipse(
+        (
+            coin_cx - coin_radius + 12,
+            coin_cy - coin_radius + 12,
+            coin_cx + coin_radius - 12,
+            coin_cy + coin_radius - 12,
+        ),
+        fill=(35, 35, 45, 255),
+        outline=(180, 180, 190, 255),
+        width=4,
+    )
+
+    # Coin inner circle
+    inner_radius = coin_radius - 30
+
+    draw.ellipse(
+        (
+            coin_cx - inner_radius,
+            coin_cy - inner_radius,
+            coin_cx + inner_radius,
+            coin_cy + inner_radius,
+        ),
+        fill=(15, 17, 25, 255),
+        outline=(255, 255, 255, 180),
+        width=3,
+    )
+
+    # --------------------------------------------------------
+    # COIN LETTER
+    # --------------------------------------------------------
+
+    coin_letter = (
+        "H"
+        if result.lower() in ("heads", "head")
+        else "T"
+    )
+
+    bbox = draw.textbbox(
+        (0, 0),
+        coin_letter,
+        font=font_coin,
+    )
+
+    letter_width = bbox[2] - bbox[0]
+    letter_height = bbox[3] - bbox[1]
+
+    draw.text(
+        (
+            coin_cx - letter_width / 2,
+            coin_cy - letter_height / 2 - 5,
+        ),
+        coin_letter,
+        font=font_coin,
+        fill=WHITE,
+    )
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
+
+    result_text = (
+        "YOU WON"
+        if won
+        else "YOU LOST"
+    )
+
+    centered_text(
+        result_text,
+        625,
+        font_result,
+        result_color,
+    )
+
+    # --------------------------------------------------------
+    # ACTUAL RESULT
+    # --------------------------------------------------------
+
+    actual_result = (
+        str(result).upper()
+    )
+
+    centered_text(
+        actual_result,
+        710,
+        font_small,
+        WHITE,
+    )
+
+    # --------------------------------------------------------
+    # SAVE TO MEMORY
+    # --------------------------------------------------------
+
+    buffer = io.BytesIO()
+
+    image.save(
+        buffer,
+        format="PNG",
+    )
+
+    buffer.seek(0)
+
+    return buffer
 
 
 # ============================================================
 # COINFLIP COMMAND
 # ============================================================
 
-@prefix_command(name="coinflip", aliases=["cf"])
+@prefix_command(
+    name="coinflip",
+    aliases=["cf"],
+)
 async def coinflip(
     interaction: discord.Interaction,
     amount: str,
     color: app_commands.Choice[str],
 ):
+
     user_id = interaction.user.id
 
     # ========================================================
@@ -6126,15 +6379,15 @@ async def coinflip(
     selected = color.value
 
     selected_name = (
-        "Red"
-        if selected == "red"
-        else "Blue"
+        "Heads"
+        if selected == "heads"
+        else "Tails"
     )
 
     opponent_name = (
-        "Blue"
-        if selected == "red"
-        else "Red"
+        "Tails"
+        if selected == "heads"
+        else "Heads"
     )
 
     # ========================================================
@@ -6206,9 +6459,8 @@ async def coinflip(
             "## Flipping…",
             (
                 f"**{interaction.user.display_name}** "
-                f"({selected_name}) vs Bot "
-                f"({opponent_name})\n\n"
-                f"**Bet:** {money(bet)} · "
+                f"betted **{money(bet)}** on "
+                f"**{selected_name}**\n\n"
                 f"**Game #{game_id}**"
             ),
         )
@@ -6243,15 +6495,14 @@ async def coinflip(
         "coinflip",
     )
 
-    # --------------------------------------------------------
-    # RED: 0 - 49.99
-    # BLUE: 50 - 99.99
-    # --------------------------------------------------------
+    # ========================================================
+    # HEADS / TAILS
+    # ========================================================
 
     result = (
-        "red"
+        "heads"
         if roll < Decimal("50")
-        else "blue"
+        else "tails"
     )
 
     won = (
@@ -6278,21 +6529,6 @@ async def coinflip(
             "coinflip",
         )
 
-        result_title = (
-            f"## Coinflip — "
-            f"{result.title()} wins!"
-        )
-
-        result_color = 0x57F287
-
-        result_text = (
-            f"**Result:** {result.title()}\n"
-            f"**Roll:** {roll}\n"
-            f"**Bet:** {money(bet)}\n"
-            f"**Payout:** {money(payout)} "
-            f"**(1.92x)**"
-        )
-
     # ========================================================
     # LOSS
     # ========================================================
@@ -6307,28 +6543,41 @@ async def coinflip(
             "coinflip",
         )
 
-        result_title = (
-            f"## Coinflip — "
-            f"{result.title()} wins!"
-        )
+    # ========================================================
+    # GENERATE RESULT IMAGE
+    # ========================================================
 
-        result_color = 0xED4245
-
-        result_text = (
-            f"**Result:** {result.title()}\n"
-            f"**Roll:** {roll}\n"
-            f"**Bet:** {money(bet)}\n"
-            f"**Lost:** {money(bet)}"
+    image_buffer = (
+        generate_coinflip_result_image(
+            username=interaction.user.display_name,
+            bet=bet,
+            choice=selected_name,
+            result=result,
+            won=won,
         )
+    )
+
+    image_file = discord.File(
+        image_buffer,
+        filename="coinflip_result.png",
+    )
 
     # ========================================================
     # RESULT EMBED
     # ========================================================
 
     embed = base_embed(
-        title=result_title,
-        description=result_text,
-        color=result_color,
+        title="",
+        description="",
+        color=(
+            0x57F287
+            if won
+            else 0xED4245
+        ),
+    )
+
+    embed.set_image(
+        url="attachment://coinflip_result.png"
     )
 
     embed.add_field(
@@ -6350,38 +6599,34 @@ async def coinflip(
         inline=True,
     )
 
+    if won:
+        embed.add_field(
+            name="Payout",
+            value=(
+                f"`{money(payout)}` "
+                f"**(1.92x)**"
+            ),
+            inline=True,
+        )
+    else:
+        embed.add_field(
+            name="Lost",
+            value=money(bet),
+            inline=True,
+        )
+
     embed.set_footer(
         text="Verify this result with .verify"
     )
 
     # ========================================================
-    # EDIT ORIGINAL RESULT
+    # SEND RESULT IMAGE
     # ========================================================
 
     await interaction.edit_original_response(
-        embed=embed
+        embed=embed,
+        attachments=[image_file],
     )
-
-    # ========================================================
-    # SEND STICKER
-    # ========================================================
-
-    sticker_sent = await send_coinflip_sticker(
-        interaction,
-        result,
-    )
-
-    # ========================================================
-    # DEBUG MESSAGE IF STICKER FAILED
-    # ========================================================
-
-    if not sticker_sent:
-        print(
-            "[COINFLIP STICKER] "
-            "Sticker could not be delivered. "
-            "Check that the bot is allowed to use/send "
-            "the sticker in this server/channel."
-        )
 
 
 # ============================================================
