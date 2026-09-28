@@ -5948,7 +5948,7 @@ def generate_coinflip_result_image(
     # IMAGE SIZE
     # ========================================================
 
-    WIDTH = 1200
+    WIDTH = 1600
     HEIGHT = 1200
 
     image = Image.new(
@@ -5969,6 +5969,7 @@ def generate_coinflip_result_image(
             paths = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
                 "C:/Windows/Fonts/arialbd.ttf",
                 "C:/Windows/Fonts/segoeuib.ttf",
             ]
@@ -5976,6 +5977,7 @@ def generate_coinflip_result_image(
             paths = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                 "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
                 "C:/Windows/Fonts/arial.ttf",
                 "C:/Windows/Fonts/segoeui.ttf",
             ]
@@ -5988,17 +5990,18 @@ def generate_coinflip_result_image(
 
         return ImageFont.load_default()
 
-    font_user = load_font(46, True)
-    font_bet = load_font(52, True)
+    font_user = load_font(48, True)
+    font_bet = load_font(56, True)
     font_result = load_font(82, True)
-    font_landed = load_font(38, True)
-    font_coin = load_font(115, True)
+    font_landed = load_font(40, True)
+    font_coin = load_font(150, True)
 
     # ========================================================
-    # DARK BACKGROUND
+    # BACKGROUND
     # ========================================================
 
     for y in range(HEIGHT):
+
         ratio = y / HEIGHT
 
         r = int(5 + ratio * 4)
@@ -6011,7 +6014,7 @@ def generate_coinflip_result_image(
         )
 
     # ========================================================
-    # SUBTLE DIAGONAL LINES
+    # DIAGONAL BACKGROUND LINES
     # ========================================================
 
     line_layer = Image.new(
@@ -6027,14 +6030,15 @@ def generate_coinflip_result_image(
     for offset in range(
         -HEIGHT,
         WIDTH,
-        55,
+        60,
     ):
+
         line_draw.line(
             [
                 (offset, 0),
                 (offset + HEIGHT, HEIGHT),
             ],
-            fill=(70, 75, 110, 35),
+            fill=(70, 75, 110, 40),
             width=2,
         )
 
@@ -6045,13 +6049,17 @@ def generate_coinflip_result_image(
     draw = ImageDraw.Draw(image)
 
     # ========================================================
-    # HEXAGON
+    # CENTER
     # ========================================================
 
     center_x = WIDTH // 2
-    center_y = HEIGHT // 2
 
-    hex_radius = 535
+    # ========================================================
+    # HEXAGON
+    # ========================================================
+
+    center_y = 600
+    hex_radius = 520
 
     def hex_points(radius):
 
@@ -6098,7 +6106,7 @@ def generate_coinflip_result_image(
     )
 
     for size in range(
-        50,
+        70,
         0,
         -2,
     ):
@@ -6108,8 +6116,8 @@ def generate_coinflip_result_image(
         )
 
         alpha = max(
-            4,
-            int(90 - size * 1.5),
+            5,
+            int(100 - size * 1.3),
         )
 
         glow_draw.line(
@@ -6120,12 +6128,12 @@ def generate_coinflip_result_image(
                 255,
                 alpha,
             ),
-            width=8,
+            width=10,
             joint="curve",
         )
 
     glow = glow.filter(
-        ImageFilter.GaussianBlur(12)
+        ImageFilter.GaussianBlur(15)
     )
 
     image.alpha_composite(
@@ -6140,15 +6148,29 @@ def generate_coinflip_result_image(
 
     draw.polygon(
         outer_hex,
-        fill=(10, 12, 24, 245),
+        fill=(10, 12, 24, 250),
     )
 
     # ========================================================
-    # HEXAGON INNER GLOW
+    # HEXAGON BORDER
     # ========================================================
 
+    draw.line(
+        outer_hex + [outer_hex[0]],
+        fill=(
+            255,
+            255,
+            255,
+            255,
+        ),
+        width=7,
+        joint="curve",
+    )
+
+    # Second inner border
+
     inner_hex = hex_points(
-        hex_radius - 12
+        hex_radius - 14
     )
 
     draw.line(
@@ -6157,9 +6179,9 @@ def generate_coinflip_result_image(
             255,
             255,
             255,
-            180,
+            210,
         ),
-        width=5,
+        width=4,
         joint="curve",
     )
 
@@ -6180,13 +6202,13 @@ def generate_coinflip_result_image(
             font=font,
         )
 
-        width = (
+        text_width = (
             bbox[2] - bbox[0]
         )
 
         draw.text(
             (
-                center_x - width / 2,
+                center_x - text_width / 2,
                 y,
             ),
             text,
@@ -6195,7 +6217,7 @@ def generate_coinflip_result_image(
         )
 
     # ========================================================
-    # USER TEXT
+    # USERNAME
     # ========================================================
 
     safe_username = str(
@@ -6203,6 +6225,7 @@ def generate_coinflip_result_image(
     ).strip()
 
     if len(safe_username) > 26:
+
         safe_username = (
             safe_username[:23]
             + "..."
@@ -6214,26 +6237,37 @@ def generate_coinflip_result_image(
 
     centered_text(
         f"@{safe_username} BETTED",
-        100,
+        105,
         font_user,
-        (255, 255, 255, 255),
+        (
+            255,
+            255,
+            255,
+            255,
+        ),
     )
 
     centered_text(
         f"{money(bet)} ON {choice_text}",
-        155,
+        165,
         font_bet,
-        (255, 255, 255, 255),
+        (
+            255,
+            255,
+            255,
+            255,
+        ),
     )
 
     # ========================================================
-    # COIN
+    # COIN POSITION
     # ========================================================
 
     coin_x = center_x
-    coin_y = 515
+    coin_y = 565
 
-    coin_radius = 235
+    # BIGGER COIN
+    coin_radius = 285
 
     # ========================================================
     # COIN GLOW
@@ -6250,14 +6284,14 @@ def generate_coinflip_result_image(
     )
 
     for extra in range(
-        65,
+        100,
         0,
-        -3,
+        -4,
     ):
 
         alpha = max(
             5,
-            int(85 - extra),
+            int(105 - extra),
         )
 
         coin_glow_draw.ellipse(
@@ -6265,12 +6299,15 @@ def generate_coinflip_result_image(
                 coin_x
                 - coin_radius
                 - extra,
+
                 coin_y
                 - coin_radius
                 - extra,
+
                 coin_x
                 + coin_radius
                 + extra,
+
                 coin_y
                 + coin_radius
                 + extra,
@@ -6281,11 +6318,11 @@ def generate_coinflip_result_image(
                 255,
                 alpha,
             ),
-            width=8,
+            width=10,
         )
 
     coin_glow = coin_glow.filter(
-        ImageFilter.GaussianBlur(12)
+        ImageFilter.GaussianBlur(18)
     )
 
     image.alpha_composite(
@@ -6310,16 +6347,21 @@ def generate_coinflip_result_image(
 
     shadow_draw.ellipse(
         (
-            coin_x - coin_radius + 25,
-            coin_y - coin_radius + 35,
-            coin_x + coin_radius + 35,
-            coin_y + coin_radius + 55,
+            coin_x - coin_radius + 35,
+            coin_y - coin_radius + 45,
+            coin_x + coin_radius + 45,
+            coin_y + coin_radius + 65,
         ),
-        fill=(0, 0, 0, 210),
+        fill=(
+            0,
+            0,
+            0,
+            230,
+        ),
     )
 
     shadow = shadow.filter(
-        ImageFilter.GaussianBlur(20)
+        ImageFilter.GaussianBlur(25)
     )
 
     image.alpha_composite(
@@ -6329,7 +6371,7 @@ def generate_coinflip_result_image(
     draw = ImageDraw.Draw(image)
 
     # ========================================================
-    # COIN OUTER RING
+    # OUTER COIN
     # ========================================================
 
     draw.ellipse(
@@ -6340,9 +6382,9 @@ def generate_coinflip_result_image(
             coin_y + coin_radius,
         ),
         fill=(
-            225,
-            225,
             235,
+            235,
+            245,
             255,
         ),
         outline=(
@@ -6351,14 +6393,14 @@ def generate_coinflip_result_image(
             255,
             255,
         ),
-        width=8,
+        width=10,
     )
 
     # ========================================================
     # COIN EDGE
     # ========================================================
 
-    edge = coin_radius - 15
+    edge = coin_radius - 18
 
     draw.ellipse(
         (
@@ -6368,25 +6410,25 @@ def generate_coinflip_result_image(
             coin_y + edge,
         ),
         fill=(
-            40,
-            42,
-            54,
+            45,
+            47,
+            60,
             255,
         ),
         outline=(
-            150,
-            150,
             165,
+            165,
+            180,
             255,
         ),
-        width=8,
+        width=9,
     )
 
     # ========================================================
     # COIN FACE
     # ========================================================
 
-    face = coin_radius - 40
+    face = coin_radius - 45
 
     draw.ellipse(
         (
@@ -6405,16 +6447,16 @@ def generate_coinflip_result_image(
             255,
             255,
             255,
-            230,
+            240,
         ),
-        width=6,
+        width=7,
     )
 
     # ========================================================
-    # COIN INNER RING
+    # INNER COIN RING
     # ========================================================
 
-    inner = coin_radius - 62
+    inner = coin_radius - 70
 
     draw.ellipse(
         (
@@ -6427,21 +6469,24 @@ def generate_coinflip_result_image(
             255,
             255,
             255,
-            130,
+            150,
         ),
-        width=4,
+        width=5,
     )
 
     # ========================================================
-    # COIN LETTER
+    # RESULT LETTER
     # ========================================================
 
     if str(result).lower() in (
         "heads",
         "head",
     ):
+
         letter = "H"
+
     else:
+
         letter = "T"
 
     bbox = draw.textbbox(
@@ -6464,7 +6509,7 @@ def generate_coinflip_result_image(
             - letter_width / 2,
             coin_y
             - letter_height / 2
-            - 12,
+            - 15,
         ),
         letter,
         font=font_coin,
@@ -6482,10 +6527,10 @@ def generate_coinflip_result_image(
 
     draw.arc(
         (
-            coin_x - face + 20,
-            coin_y - face + 20,
-            coin_x + face - 20,
-            coin_y + face - 20,
+            coin_x - face + 25,
+            coin_y - face + 25,
+            coin_x + face - 25,
+            coin_y + face - 25,
         ),
         205,
         315,
@@ -6493,13 +6538,13 @@ def generate_coinflip_result_image(
             255,
             255,
             255,
-            150,
+            170,
         ),
-        width=7,
+        width=9,
     )
 
     # ========================================================
-    # RESULT
+    # RESULT TEXT
     # ========================================================
 
     if won:
@@ -6507,9 +6552,9 @@ def generate_coinflip_result_image(
         result_text = "YOU WON"
 
         result_color = (
-            95,
+            80,
             255,
-            155,
+            150,
             255,
         )
 
@@ -6519,14 +6564,14 @@ def generate_coinflip_result_image(
 
         result_color = (
             255,
-            80,
-            100,
+            75,
+            95,
             255,
         )
 
     centered_text(
         result_text,
-        790,
+        850,
         font_result,
         result_color,
     )
@@ -6537,60 +6582,53 @@ def generate_coinflip_result_image(
 
     centered_text(
         f"LANDED ON {str(result).upper()}",
-        890,
+        955,
         font_landed,
-        (255, 255, 255, 230),
+        (
+            255,
+            255,
+            255,
+            235,
+        ),
     )
 
     # ========================================================
-    # BOTTOM BET RESULT
+    # WIN / LOSS AMOUNT
     # ========================================================
 
     if won:
 
         bottom_text = (
-            f"You won {money(bet * COINFLIP_MULTIPLIER)}"
+            f"You won "
+            f"{money(bet * COINFLIP_MULTIPLIER)}"
+        )
+
+        bottom_color = (
+            90,
+            255,
+            155,
+            255,
         )
 
     else:
 
         bottom_text = (
-            f"You lost {money(bet)}"
+            f"You lost "
+            f"{money(bet)}"
+        )
+
+        bottom_color = (
+            255,
+            90,
+            110,
+            255,
         )
 
     centered_text(
         bottom_text,
-        945,
+        1015,
         font_landed,
-        (
-            100,
-            255,
-            160,
-            255,
-        )
-        if won
-        else (
-            255,
-            100,
-            120,
-            255,
-        ),
-    )
-
-    # ========================================================
-    # FINAL WHITE BORDER
-    # ========================================================
-
-    draw.line(
-        outer_hex + [outer_hex[0]],
-        fill=(
-            255,
-            255,
-            255,
-            255,
-        ),
-        width=6,
-        joint="curve",
+        bottom_color,
     )
 
     # ========================================================
@@ -6656,18 +6694,20 @@ async def coinflip(
     )
 
     if choice is None:
+
         await ctx.send(
             embed=error_embed(
                 "Invalid Choice",
                 (
                     "Choose either **heads** "
                     "or **tails**.\n\n"
-                    "Example:\n"
+                    "Examples:\n"
                     "`.cf 1 heads`\n"
                     "`.cf 1 tails`"
                 ),
             )
         )
+
         return
 
     selected_name = (
@@ -6686,6 +6726,7 @@ async def coinflip(
     )
 
     if cooldown:
+
         await ctx.send(
             embed=error_embed(
                 "Cooldown",
@@ -6695,6 +6736,7 @@ async def coinflip(
                 ),
             )
         )
+
         return
 
     # ========================================================
@@ -6711,6 +6753,7 @@ async def coinflip(
     )
 
     if bet is None:
+
         await ctx.send(
             embed=error_embed(
                 "Invalid Amount",
@@ -6723,6 +6766,7 @@ async def coinflip(
                 ),
             )
         )
+
         return
 
     bet = Decimal(str(bet))
@@ -6732,6 +6776,7 @@ async def coinflip(
     # ========================================================
 
     if bet < MIN_BET:
+
         await ctx.send(
             embed=error_embed(
                 "Minimum Bet",
@@ -6741,6 +6786,7 @@ async def coinflip(
                 ),
             )
         )
+
         return
 
     # ========================================================
@@ -6748,6 +6794,7 @@ async def coinflip(
     # ========================================================
 
     if bet > balance:
+
         await ctx.send(
             embed=error_embed(
                 "Insufficient Balance",
@@ -6757,6 +6804,7 @@ async def coinflip(
                 ),
             )
         )
+
         return
 
     # ========================================================
@@ -6794,6 +6842,7 @@ async def coinflip(
     )
 
     if not deducted:
+
         await ctx.send(
             embed=error_embed(
                 "Bet Failed",
@@ -6804,6 +6853,7 @@ async def coinflip(
                 ),
             )
         )
+
         return
 
     # ========================================================
@@ -6855,14 +6905,16 @@ async def coinflip(
     )
 
     if not game:
-        # Refund because the game state disappeared.
+
         try:
+
             await bot.settle_win(
                 user_id,
                 bet,
                 bet,
                 "coinflip_recovery",
             )
+
         except Exception:
             pass
 
@@ -6893,14 +6945,15 @@ async def coinflip(
 
     except Exception:
 
-        # Refund the bet if the fair roll fails.
         try:
+
             await bot.settle_win(
                 user_id,
                 bet,
                 bet,
                 "coinflip_recovery",
             )
+
         except Exception:
             pass
 
@@ -6917,7 +6970,7 @@ async def coinflip(
         return
 
     # ========================================================
-    # DETERMINE RESULT
+    # RESULT
     # ========================================================
 
     result = (
@@ -6931,7 +6984,7 @@ async def coinflip(
     )
 
     # ========================================================
-    # SETTLE GAME
+    # SETTLEMENT
     # ========================================================
 
     try:
@@ -6964,8 +7017,6 @@ async def coinflip(
 
     except Exception:
 
-        # If settlement itself fails, don't silently
-        # leave the user thinking the result was completed.
         await flipping_message.edit(
             embed=error_embed(
                 "Game Error",
@@ -6980,7 +7031,7 @@ async def coinflip(
         return
 
     # ========================================================
-    # GENERATE RESULT IMAGE
+    # GENERATE IMAGE
     # ========================================================
 
     try:
@@ -7002,7 +7053,8 @@ async def coinflip(
                 "Image Error",
                 (
                     "The game finished successfully, "
-                    "but the result image could not be generated."
+                    "but the result image could not "
+                    "be generated."
                 ),
             )
         )
@@ -7095,14 +7147,13 @@ async def coinflip(
     )
 
     # ========================================================
-    # EDIT ORIGINAL MESSAGE
+    # SEND RESULT
     # ========================================================
 
     await flipping_message.edit(
         embed=result_embed,
         attachments=[image_file],
     )
-
 
 # ============================================================
 # MINES
