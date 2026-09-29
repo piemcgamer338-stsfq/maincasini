@@ -1028,6 +1028,7 @@ class CasinoBot(commands.Bot):
 
         self.active_games: dict[int, dict] = {}
         self.active_mines: dict[int, MinesGame] = {}
+        self.active_towers: dict[int, TowerGame] = {}
         self.active_rains: dict[str, dict] = {}
         self.active_dice: dict[int, dict] = {}
 
@@ -3093,7 +3094,8 @@ HELP_GAMES = (
     "`.roll` — Roll your dice\n"
     "`.coinflip` — Play Red or Blue coinflip\n"
     "`.mines` — Play Mines\n"
-     "`.limbo` — Play Limbo\n"
+    "`.tower` — Play Tower\n"
+    "`.limbo` — Play Limbo\n"
     "`.blackjack` — Play Blackjack\n"
     "`.frog-run` — Play Frog Run\n"
     "`.retrigger` — Retrigger an unfinished game\n"
@@ -5408,6 +5410,701 @@ async def mines_command(
 
     game.message_id = message.id
     game.channel_id = interaction.channel_id
+
+
+# ============================================================
+# TOWER
+# ============================================================
+
+TOWER_LEVELS = 10
+TOWER_HOUSE_EDGE = Decimal("0.99")
+TOWER_CONFIG = {
+    "easy": {
+        "tiles": 4,
+        "label": "Easy",
+    },
+    "mid": {
+        "tiles": 3,
+        "label": "Mid",
+    },
+    "hard": {
+        "tiles": 2,
+        "label": "Hard",
+    },
+}
+
+
+def tower_font(size: int, bold: bool = False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+    ]
+
+    for path in candidates:
+        try:
+            if Path(path).exists():
+                return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def create_tower_image(game):
+    """Create a dark tower board inspired by the supplied reference image."""
+
+    WIDTH = 900
+    HEIGHT = 1100
+
+    BG = (11, 17, 24)
+    PANEL = (24, 34, 45)
+    PANEL_2 = (29, 41, 53)
+    BORDER = (58, 75, 91)
+    TILE = (54, 67, 80)
+    TILE_BORDER = (79, 96, 112)
+    TILE_OPEN = (43, 91, 75)
+    TILE_BOMB = (119, 38, 45)
+    WHITE = (238, 243, 247)
+    MUTED = (151, 164, 176)
+    BLUE = (88, 173, 255)
+    GREEN = (61, 220, 143)
+    RED = (245, 79, 88)
+    GOLD = (238, 192, 84)
+
+    image = Image.new("RGB", (WIDTH, HEIGHT), BG)
+    draw = ImageDraw.Draw(image)
+
+    # Outer tower body.
+    draw.rounded_rectangle(
+        (35, 35, WIDTH - 35, HEIGHT - 30),
+        radius=28,
+        fill=PANEL,
+        outline=BORDER,
+        width=4,
+    )
+
+    # Header.
+    draw.text(
+        (70, 62),
+        "TOWER",
+        font=tower_font(42, True),
+        fill=BLUE,
+    )
+    draw.text(
+        (70, 112),
+        f"{game.difficulty.title()} • {game.tiles} tiles • 1 bomb",
+        font=tower_font(23),
+        fill=MUTED,
+    )
+
+    multiplier = game.multiplier
+    cashout = game.payout
+
+    right_text = f"{multiplier:.2f}x"
+    rb = draw.textbbox((0, 0), right_text, font=tower_font(40, True))
+    draw.text(
+        (WIDTH - 70 - (rb[2] - rb[0]), 66),
+        right_text,
+        font=tower_font(40, True),
+        fill=GREEN if game.opened else WHITE,
+    )
+    draw.text(
+        (WIDTH - 70 - 190, 116),
+        f"Cashout {money(cashout)}",
+        font=tower_font(23),
+        fill=GOLD,
+    )
+
+    # Simple dark tower/monster silhouette to echo the supplied artwork.
+    cx = WIDTH // 2
+    draw.polygon(
+        [(cx - 170, 180), (cx - 115, 135), (cx - 65, 155),
+         (cx, 125), (cx + 65, 155), (cx + 115, 135),
+         (cx + 170, 180), (cx + 115, 205), (cx + 75, 190),
+         (cx + 50, 230), (cx - 50, 230), (cx - 75, 190),
+         (cx - 115, 205)],
+        fill=(28, 42, 55),
+    )
+    draw.ellipse((cx - 36, 145, cx + 36, 217), fill=(65, 81, 94))
+    draw.ellipse((cx - 18, 170, cx - 7, 181), fill=BLUE)
+    draw.ellipse((cx + 7, 170, cx + 18, 181), fill=BLUE)
+    draw.polygon([(cx - 20, 190), (cx, 220), (cx + 20, 190)], fill=(31, 53, 65))
+
+    # Tower levels. Bottom = first level; current level is highlighted.
+    rows_visible = TOWER_LEVELS
+    top_y = 250
+    bottom_y = HEIGHT - 80
+    row_gap = 9
+    row_h = (bottom_y - top_y - row_gap * (rows_visible - 1)) // rows_visible
+
+    tile_gap = 16
+    total_tile_width = min(650, WIDTH - 160)
+    tile_w = (total_tile_width - tile_gap * (game.tiles - 1)) // game.tiles
+    start_x = (WIDTH - (tile_w * game.tiles + tile_gap * (game.tiles - 1))) // 2
+
+    for level in range(rows_visible):
+        # Draw the next level at the top, so climbing moves upward visually.
+        y = bottom_y - row_h - level * (row_h + row_gap)
+        current = level == game.level
+        completed = level < game.level
+
+        # Level number.
+        draw.text(
+            (60, y + row_h // 2 - 13),
+            str(level + 1),
+            font=tower_font(22, True),
+            fill=GOLD if current else MUTED,
+        )
+
+        for tile_index in range(game.tiles):
+            x1 = start_x + tile_index * (tile_w + tile_gap)
+            x2 = x1 + tile_w
+            y1 = y
+            y2 = y + row_h
+
+            state = game.revealed.get(level, {}).get(tile_index)
+
+            fill = TILE
+            outline = TILE_BORDER
+            if state == "safe":
+                fill = TILE_OPEN
+                outline = GREEN
+            elif state == "bomb":
+                fill = TILE_BOMB
+                outline = RED
+            elif current:
+                fill = PANEL_2
+                outline = BLUE
+            elif completed:
+                fill = (39, 52, 63)
+
+            draw.rounded_rectangle(
+                (x1, y1, x2, y2),
+                radius=12,
+                fill=fill,
+                outline=outline,
+                width=3,
+            )
+
+            if state == "safe":
+                # Diamond/safe marker.
+                mx = (x1 + x2) // 2
+                my = (y1 + y2) // 2
+                draw.polygon(
+                    [(mx, my - 18), (mx + 18, my),
+                     (mx, my + 18), (mx - 18, my)],
+                    fill=GREEN,
+                )
+            elif state == "bomb":
+                mx = (x1 + x2) // 2
+                my = (y1 + y2) // 2
+                draw.ellipse(
+                    (mx - 17, my - 17, mx + 17, my + 17),
+                    fill=RED,
+                )
+                draw.line((mx - 23, my - 23, mx + 23, my + 23), fill=WHITE, width=5)
+                draw.line((mx + 23, my - 23, mx - 23, my + 23), fill=WHITE, width=5)
+
+    # Footer.
+    footer = f"Level {min(game.level + 1, TOWER_LEVELS)}/{TOWER_LEVELS}"
+    if game.finished:
+        footer = "GAME OVER"
+    fb = draw.textbbox((0, 0), footer, font=tower_font(24, True))
+    draw.text(
+        ((WIDTH - (fb[2] - fb[0])) / 2, HEIGHT - 55),
+        footer,
+        font=tower_font(24, True),
+        fill=WHITE,
+    )
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return discord.File(output, filename="tower.png")
+
+
+class TowerGame:
+    def __init__(
+        self,
+        bot: CasinoBot,
+        user_id: int,
+        amount: Decimal,
+        difficulty: str,
+        game_id: int,
+        server_hash: str,
+        server_seed: str,
+        client_seed: str,
+        nonce: int,
+    ):
+        self.bot = bot
+        self.user_id = user_id
+        self.amount = amount
+        self.difficulty = difficulty
+        self.tiles = int(TOWER_CONFIG[difficulty]["tiles"])
+        self.game_id = game_id
+        self.server_hash = server_hash
+        self.server_seed = server_seed
+        self.client_seed = client_seed
+        self.nonce = nonce
+        self.level = 0
+        self.opened = 0
+        self.finished = False
+        self.message_id = None
+        self.channel_id = None
+        self.bombs: dict[int, int] = {}
+        self.revealed: dict[int, dict[int, str]] = {}
+
+        # One bomb per level. The position is derived from the same
+        # provably-fair seed system already used by the casino.
+        for level in range(TOWER_LEVELS):
+            self.bombs[level] = self.bot.fair_int(
+                server_seed,
+                client_seed,
+                nonce + level,
+                0,
+                self.tiles - 1,
+                "tower",
+            )
+
+    @property
+    def safe_probability(self) -> Decimal:
+        return Decimal(self.tiles - 1) / Decimal(self.tiles)
+
+    @property
+    def multiplier(self) -> Decimal:
+        if self.opened <= 0:
+            return Decimal("1.00")
+
+        value = (
+            Decimal("1") / (self.safe_probability ** self.opened)
+        ) * TOWER_HOUSE_EDGE
+
+        return value.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+    @property
+    def payout(self) -> Decimal:
+        return (
+            self.amount * self.multiplier
+        ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+
+class TowerDifficultyView(ButtonView):
+    def __init__(self, bot: CasinoBot, user_id: int, amount: Decimal):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.user_id = user_id
+        self.amount = amount
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This Tower setup belongs to another player.",
+                ephemeral=False,
+            )
+            return False
+        return True
+
+    async def choose(self, interaction: discord.Interaction, difficulty: str):
+        await start_tower_game(
+            self.bot,
+            interaction,
+            self.user_id,
+            self.amount,
+            difficulty,
+        )
+
+    @discord.ui.button(label="Easy", style=discord.ButtonStyle.success, custom_id="tower_easy")
+    async def easy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(interaction, "easy")
+
+    @discord.ui.button(label="Mid", style=discord.ButtonStyle.primary, custom_id="tower_mid")
+    async def mid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(interaction, "mid")
+
+    @discord.ui.button(label="Hard", style=discord.ButtonStyle.danger, custom_id="tower_hard")
+    async def hard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(interaction, "hard")
+
+
+def tower_embed(game: TowerGame, result: Optional[str] = None) -> discord.Embed:
+    color = 0x00E676 if not game.finished else 0xED4245
+    lines = [
+        f"**Bet:** {money(game.amount)}",
+        f"**Difficulty:** {game.difficulty.title()}",
+        f"**Level:** {game.level}/{TOWER_LEVELS}",
+        f"**Multiplier:** {game.multiplier:.2f}x",
+    ]
+
+    if game.opened > 0 and not game.finished:
+        lines.append(f"**Cashout:** {money(game.payout)}")
+
+    if result:
+        lines.extend(["", result])
+
+    embed = base_embed(
+        "Tower",
+        "\n".join(lines),
+        color,
+    )
+    embed.set_image(url="attachment://tower.png")
+    embed.set_footer(text=f"Game #{game.game_id} • Provably fair")
+    return embed
+
+
+def tower_view(game: TowerGame) -> "TowerView":
+    return TowerView(game)
+
+
+class TowerView(ButtonView):
+    def __init__(self, game: TowerGame):
+        super().__init__(timeout=300)
+        self.game = game
+
+        # Tile choices for the current level.
+        for index in range(game.tiles):
+            button = discord.ui.Button(
+                label=str(index + 1),
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"tower:{index}",
+                row=0,
+            )
+            button.callback = self.make_tile_callback(index)
+            self.add_item(button)
+
+        if game.opened > 0 and not game.finished:
+            cashout = discord.ui.Button(
+                label=f"Cash Out {money(game.payout)}",
+                style=discord.ButtonStyle.success,
+                custom_id="tower_cashout",
+                row=1,
+            )
+            cashout.callback = self.cashout
+            self.add_item(cashout)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.game.user_id:
+            await interaction.response.send_message(
+                "This Tower game belongs to another player.",
+                ephemeral=False,
+            )
+            return False
+        return True
+
+    def make_tile_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            await tower_click_impl(
+                self.game.bot,
+                interaction,
+                self.game,
+                index,
+            )
+        return callback
+
+    async def cashout(self, interaction: discord.Interaction):
+        await tower_cashout_impl(
+            self.game.bot,
+            interaction,
+            self.game,
+        )
+
+
+async def send_tower_state(
+    interaction: discord.Interaction,
+    game: TowerGame,
+    result: Optional[str] = None,
+):
+    file = create_tower_image(game)
+    await interaction.edit_original_response(
+        embed=tower_embed(game, result=result),
+        view=None if game.finished else tower_view(game),
+        attachments=[file],
+    )
+
+
+async def start_tower_game(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    user_id: int,
+    amount: Decimal,
+    difficulty: str,
+):
+    difficulty = str(difficulty).lower().strip()
+    if difficulty not in TOWER_CONFIG:
+        await bot_instance.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Difficulty",
+                "Choose **easy**, **mid**, or **hard**.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if user_id in bot_instance.active_towers:
+        await bot_instance.safe_send(
+            interaction,
+            content="You already have an active Tower game.",
+            ephemeral=False,
+        )
+        return
+
+    balance = await bot_instance.get_balance(user_id)
+    if amount > balance:
+        await bot_instance.safe_send(
+            interaction,
+            content="You Dont Have Enough Crypto\n-# use .deposit to top-up Funds",
+            ephemeral=False,
+        )
+        return
+
+    deducted = await bot_instance.deduct_bet(
+        user_id,
+        amount,
+        "tower",
+    )
+    if not deducted:
+        await bot_instance.safe_send(
+            interaction,
+            content="Your balance changed. Please try again.",
+            ephemeral=False,
+        )
+        return
+
+    game_id = bot_instance.next_game_id()
+    server_seed = bot_instance.create_server_seed()
+    server_hash = bot_instance.server_hash(server_seed)
+    client_seed = bot_instance.create_client_seed(user_id)
+
+    game = TowerGame(
+        bot=bot_instance,
+        user_id=user_id,
+        amount=amount,
+        difficulty=difficulty,
+        game_id=game_id,
+        server_hash=server_hash,
+        server_seed=server_seed,
+        client_seed=client_seed,
+        nonce=0,
+    )
+
+    bot_instance.active_towers[user_id] = game
+
+    file = create_tower_image(game)
+    await interaction.response.send_message(
+        embed=tower_embed(game),
+        view=TowerView(game),
+        file=file,
+    )
+
+    message = await interaction.original_response()
+    game.message_id = message.id
+    game.channel_id = interaction.channel_id
+
+
+async def tower_click_impl(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    game: TowerGame,
+    index: int,
+):
+    if game.finished:
+        await interaction.response.send_message(
+            "This Tower game has already ended.",
+            ephemeral=False,
+        )
+        return
+
+    if index < 0 or index >= game.tiles:
+        return
+
+    await interaction.response.defer()
+
+    bomb = game.bombs[game.level]
+    game.revealed.setdefault(game.level, {})
+
+    if index == bomb:
+        game.revealed[game.level][index] = "bomb"
+        game.finished = True
+        await bot_instance.settle_loss(
+            game.user_id,
+            game.amount,
+            "tower",
+        )
+        bot_instance.active_towers.pop(game.user_id, None)
+
+        file = create_tower_image(game)
+        await interaction.edit_original_response(
+            embed=tower_embed(
+                game,
+                result=f"You hit the bomb and lost **{money(game.amount)}**.",
+            ),
+            view=None,
+            attachments=[file],
+        )
+        return
+
+    game.revealed[game.level][index] = "safe"
+    game.opened += 1
+    game.level += 1
+
+    # Clearing all levels wins the game automatically.
+    if game.level >= TOWER_LEVELS:
+        game.finished = True
+        payout = game.payout
+        await bot_instance.settle_win(
+            game.user_id,
+            game.amount,
+            payout,
+            "tower",
+        )
+        bot_instance.active_towers.pop(game.user_id, None)
+
+        file = create_tower_image(game)
+        await interaction.edit_original_response(
+            embed=tower_embed(
+                game,
+                result=f"All levels cleared! You won **{money(payout)}**.",
+            ),
+            view=None,
+            attachments=[file],
+        )
+        await bot_instance.check_rank_up(game.user_id)
+        return
+
+    # Safe tile: player can now cash out or continue to the next level.
+    file = create_tower_image(game)
+    await interaction.edit_original_response(
+        embed=tower_embed(
+            game,
+            result=(
+                f"Safe! Choose **Cash Out** for {money(game.payout)} "
+                "or pick a tile on the next level."
+            ),
+        ),
+        view=TowerView(game),
+        attachments=[file],
+    )
+
+
+async def tower_cashout_impl(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    game: TowerGame,
+):
+    if game.finished:
+        await interaction.response.send_message(
+            "This Tower game has already ended.",
+            ephemeral=False,
+        )
+        return
+
+    if game.opened <= 0:
+        await interaction.response.send_message(
+            "Open at least one safe tile before cashing out.",
+            ephemeral=False,
+        )
+        return
+
+    await interaction.response.defer()
+
+    game.finished = True
+    payout = game.payout
+
+    await bot_instance.settle_win(
+        game.user_id,
+        game.amount,
+        payout,
+        "tower",
+    )
+    bot_instance.active_towers.pop(game.user_id, None)
+
+    file = create_tower_image(game)
+    await interaction.edit_original_response(
+        embed=tower_embed(
+            game,
+            result=f"Cashed out for **{money(payout)}** at **{game.multiplier:.2f}x**.",
+        ),
+        view=None,
+        attachments=[file],
+    )
+    await bot_instance.check_rank_up(game.user_id)
+
+
+@prefix_command(name="tower")
+async def tower_command(
+    interaction: discord.Interaction,
+    amount: str,
+    difficulty: Optional[str] = None,
+):
+    cooldown = bot.check_game_cooldown(
+        interaction.user.id,
+        "tower",
+    )
+
+    if cooldown:
+        await bot.safe_send(
+            interaction,
+            content=(
+                f"Please wait **{cooldown:.1f}s** "
+                "before starting another game."
+            ),
+            ephemeral=False,
+        )
+        return
+
+    bet = normalize_amount(amount)
+
+    if bet is None or bet < MIN_BET:
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Invalid Bet",
+                f"Minimum bet is {money(MIN_BET)}.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    if interaction.user.id in bot.active_towers:
+        await bot.safe_send(
+            interaction,
+            content="You already have an active Tower game.",
+            ephemeral=False,
+        )
+        return
+
+    if difficulty is None or not str(difficulty).strip():
+        await bot.safe_send(
+            interaction,
+            embed=base_embed(
+                "Choose Difficulty Level",
+                f"**Bet:** {money(bet)}\n\nChoose how many tiles you want on each level.",
+                0x4B8BFF,
+            ),
+            view=TowerDifficultyView(
+                bot,
+                interaction.user.id,
+                bet,
+            ),
+            ephemeral=False,
+        )
+        return
+
+    await start_tower_game(
+        bot,
+        interaction,
+        interaction.user.id,
+        bet,
+        str(difficulty),
+    )
 
 
 
