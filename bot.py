@@ -6317,11 +6317,13 @@ class RouletteView(ButtonView):
 
     def _build_buttons(self):
         buttons = [
+            # Discord allows a maximum of 5 buttons per row.
+            # Keep the 10 roulette bets across two full rows.
             ("red", "RED", discord.ButtonStyle.danger, 0),
             ("black", "BLACK", discord.ButtonStyle.secondary, 0),
             ("low", "1-19", discord.ButtonStyle.secondary, 0),
             ("high", "20-36", discord.ButtonStyle.secondary, 0),
-            ("col1", "COL 1", discord.ButtonStyle.secondary, 1),
+            ("col1", "COL 1", discord.ButtonStyle.secondary, 0),
             ("col2", "COL 2", discord.ButtonStyle.secondary, 1),
             ("col3", "COL 3", discord.ButtonStyle.secondary, 1),
             ("zero", "0", discord.ButtonStyle.secondary, 1),
