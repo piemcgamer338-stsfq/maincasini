@@ -1295,6 +1295,7 @@ class CasinoBot(commands.Bot):
         bet: Decimal,
         payout: Decimal,
         game: str,
+        race_amount=None,
     ):
 
         await self.db.record_game(
@@ -1302,6 +1303,7 @@ class CasinoBot(commands.Bot):
             bet,
             payout,
             game,
+            race_amount=race_amount,
         )
 
         await self.send_win_log(
@@ -1316,6 +1318,7 @@ class CasinoBot(commands.Bot):
         user_id: int,
         bet: Decimal,
         game: str,
+        race_amount=None,
     ):
 
         await self.db.record_game(
@@ -1323,6 +1326,7 @@ class CasinoBot(commands.Bot):
             bet,
             Decimal("0"),
             game,
+            race_amount=race_amount,
         )
 
     # ========================================================
@@ -5269,6 +5273,26 @@ async def mines_command(
     mines: app_commands.Range[int, 1, 20],
 ):
 
+    # Prefix commands do not get Discord's slash-command Range validation.
+    # Always normalize the mines count before doing numeric comparisons.
+    try:
+        mines = int(str(mines).strip())
+    except (TypeError, ValueError):
+        await bot.safe_send(
+            interaction,
+            content="Choose between 1 and 20 mines.",
+            ephemeral=False,
+        )
+        return
+
+    if mines < 1 or mines > 20:
+        await bot.safe_send(
+            interaction,
+            content="Choose between 1 and 20 mines.",
+            ephemeral=False,
+        )
+        return
+
     cooldown = bot.check_game_cooldown(
         interaction.user.id,
         "mines",
@@ -5327,14 +5351,6 @@ async def mines_command(
             ephemeral=False,
         )
 
-        return
-
-    if mines >= 24:
-        await bot.safe_send(
-            interaction,
-            content="Choose between 1 and 20 mines.",
-            ephemeral=False,
-        )
         return
 
     deducted = await bot.deduct_bet(
@@ -12690,6 +12706,11 @@ async def limbo(
             bet,
             payout,
             "limbo",
+            race_amount=(
+                bet
+                if target >= Decimal("1.30")
+                else Decimal("0")
+            ),
         )
 
         title = (
@@ -12718,6 +12739,11 @@ async def limbo(
             user_id,
             bet,
             "limbo",
+            race_amount=(
+                bet
+                if target >= Decimal("1.30")
+                else Decimal("0")
+            ),
         )
 
         title = (
