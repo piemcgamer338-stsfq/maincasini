@@ -46,7 +46,7 @@ MIN_MINES_BET = Decimal("0.10")
 MIN_FROG_BET = Decimal("0.10")
 
 COINFLIP_MULTIPLIER = Decimal("1.92")
-DICE_MULTIPLIER = Decimal("1.92")
+DICE_MULTIPLIER = Decimal("3.30")
 
 MAX_MINES = 20
 MAX_MINES_TILES = 25
@@ -220,7 +220,7 @@ def amount_or_all(
 
     value = str(raw).strip().lower()
 
-    if value == "all":
+    if value in {"all", "max"}:
         return balance
 
     if value == "half":
@@ -1294,6 +1294,27 @@ class CasinoBot(commands.Bot):
             )
         )
 
+        # Restore pending withdrawal admin buttons after a restart.
+        try:
+            pending_withdrawals = await self.db.pool.fetch(
+                """
+                SELECT id
+                FROM withdrawals
+                WHERE status = 'pending'
+                ORDER BY id DESC
+                LIMIT 100
+                """
+            )
+            for row in pending_withdrawals:
+                self.add_view(
+                    WithdrawalAdminView(
+                        self,
+                        int(row["id"]),
+                    )
+                )
+        except Exception as exc:
+            print(f"[WITHDRAW] Could not restore admin buttons: {exc}")
+
         print("[BOT] Prefix commands loaded with . and , prefixes.")
 
     async def close(self):
@@ -1577,6 +1598,13 @@ def prefix_owner_only():
     def decorator(func): func.__prefix_owner_only__=True; return func
     return decorator
 
+def bot_owner_only():
+    """Strict owner-only decorator: only config.OWNER_ID may use it."""
+    def decorator(func):
+        func.__prefix_bot_owner_only__=True
+        return func
+    return decorator
+
 def owner_only():
     return prefix_owner_only()
 
@@ -1591,6 +1619,16 @@ def prefix_command(*, name=None, aliases=None):
         params=list(sig.parameters.values())[1:]
         required=[p for p in params if p.default is inspect._empty]
         async def wrapper(ctx: commands.Context,*raw_args):
+            if getattr(wrapper,'__prefix_bot_owner_only__',False):
+                owner_id=getattr(config,'OWNER_ID',None)
+                try:
+                    owner_id=int(owner_id) if owner_id is not None else 0
+                except (TypeError, ValueError):
+                    owner_id=0
+                if not owner_id or ctx.author.id != owner_id:
+                    await ctx.send(embed=error_embed('Permission Denied','Only the bot owner can use this command.'))
+                    return
+
             if getattr(wrapper,'__prefix_owner_only__',False):
                 admin_ids=set(getattr(config,'ADMIN_USER_IDS',[]) or [])
                 owner_id=getattr(config,'OWNER_ID',None)
@@ -2028,7 +2066,7 @@ def create_balance_image(
     # CRYPTOBET BRAND
     # ========================================================
 
-    brand = "CryptoBet"
+    brand = "SwiftBet"
 
     brand_bbox = draw.textbbox(
         (0, 0),
@@ -2372,7 +2410,7 @@ async def create_balance_image_async(
     # CRYPTOBET
     # ========================================================
 
-    brand = "CryptoBet"
+    brand = "SwiftBet"
 
     brand_bbox = draw.textbbox(
         (0, 0),
@@ -2864,7 +2902,7 @@ async def create_balance_image(
     # CRYPTOBET
     # ========================================================
 
-    brand = "CryptoBet"
+    brand = "SwiftBet"
 
     brand_bbox = draw.textbbox(
         (
@@ -2914,7 +2952,7 @@ async def create_balance_image(
 # /BALANCE
 # ============================================================
 
-@prefix_command(name="balance", aliases=["b"])
+@prefix_command(name="balance", aliases=["b", "bal"])
 async def balance_command(
     interaction: discord.Interaction,
 ):
@@ -2997,11 +3035,13 @@ HELP_GENERAL = (
     "`.help` — Show this help menu\n"
     "`.balance` — View your wallet\n"
     "`.deposit` — Deposit cryptocurrency\n"
-    "`.withdraw` — Withdraw funds\n"
+    "`.withdraw <ltc/sol address> <amount>` — Submit a withdrawal\n"
     "`.stats` — View your player statistics\n"
     "`.history` — View recent game history\n"
     "`.howtoplay` — Learn how to play\n"
     "`.rewardinfo` — View rewards and perks\n"
+    "`.affiliate` — View your affiliate card\n"
+    "`.aff <code>` — Use an affiliate code\n"
     "`.affiliateinfo` — View affiliate rates\n"
     "`.verify <game_number>` — Verify a completed game"
 )
@@ -3028,6 +3068,8 @@ HELP_REWARDS = (
     "`.rank-rewards` — Claim rank rewards\n"
     "`.affiliates` — View your affiliates\n"
     "`.affiliate-claim` — Claim affiliate earnings\n"
+    "`.affiliate` — Show your affiliate card\n"
+    "`.aff <code>` — Apply an affiliate code\n"
     "`.claim` — Claim a promo code\n"
     "`.leaderboard` — View top wagerers\n"
     "`.race` — View the active wager race"
@@ -3218,7 +3260,7 @@ async def fair_command(
         ),
         inline=False,
     )
-    embed.set_footer(text="CryptoBet • Provably Fair Verification")
+    embed.set_footer(text="SwiftBet • Provably Fair Verification")
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
 # ============================================================
@@ -3353,6 +3395,348 @@ def rank_progress(
     return current, upcoming
 
 # ============================================================
+# WITHDRAWAL ADMIN WORKFLOW
+# ============================================================
+
+async def get_crypto_usd_price(currency: str) -> Optional[Decimal]:
+    """Fetch a current USD price for the requested withdrawal coin."""
+    currency = currency.upper()
+    symbols = {"LTC": "LTCUSDT", "SOL": "SOLUSDT"}
+    if currency not in symbols:
+        return None
+
+    urls = [
+        f"https://api.binance.com/api/v3/ticker/price?symbol={symbols[currency]}",
+        f"https://api.coingecko.com/api/v3/simple/price?ids={'litecoin' if currency == 'LTC' else 'solana'}&vs_currencies=usd",
+    ]
+
+    session = getattr(bot, "http_session", None)
+    if session is None:
+        session = aiohttp.ClientSession()
+        temporary = True
+    else:
+        temporary = False
+
+    try:
+        for url in urls:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as response:
+                    if response.status != 200:
+                        continue
+                    data = await response.json()
+                    if "binance" in url:
+                        price = Decimal(str(data.get("price", "0")))
+                    else:
+                        coin_id = "litecoin" if currency == "LTC" else "solana"
+                        price = Decimal(str(data.get(coin_id, {}).get("usd", "0")))
+                    if price > 0:
+                        return price
+            except Exception:
+                continue
+    finally:
+        if temporary:
+            await session.close()
+
+    return None
+
+
+async def create_withdrawal_request(
+    self,
+    user_id: int,
+    currency: str,
+    address: str,
+    amount,
+    fee=Decimal("0"),
+):
+    """Create a pending withdrawal and return its database ID."""
+    amount = Decimal(str(amount))
+    fee = Decimal(str(fee))
+    total = amount + fee
+
+    async with self.pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE users
+                SET
+                    balance = balance - $2,
+                    lifetime_withdraw = lifetime_withdraw + $2,
+                    updated_at = NOW()
+                WHERE user_id=$1
+                  AND frozen=FALSE
+                  AND balance >= $2
+                RETURNING balance
+                """,
+                user_id,
+                total,
+            )
+            if not row:
+                return None
+
+            withdrawal_id = await conn.fetchval(
+                """
+                INSERT INTO withdrawals(
+                    user_id,
+                    currency,
+                    address,
+                    amount,
+                    fee,
+                    status
+                )
+                VALUES($1,$2,$3,$4,$5,'pending')
+                RETURNING id
+                """,
+                user_id,
+                currency.upper(),
+                address,
+                amount,
+                fee,
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO transactions(
+                    user_id,
+                    kind,
+                    amount,
+                    balance_after,
+                    note
+                )
+                VALUES($1,'withdraw',$2,$3,$4)
+                """,
+                user_id,
+                -total,
+                row["balance"],
+                f"{currency.upper()} withdrawal #{withdrawal_id}",
+            )
+
+            return int(withdrawal_id)
+
+
+Database.create_withdrawal_request = create_withdrawal_request
+
+
+class WithdrawalAdminView(discord.ui.View):
+    def __init__(self, bot_instance: "CasinoBot", withdrawal_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot_instance
+        self.withdrawal_id = int(withdrawal_id)
+
+        self.accept_button = discord.ui.Button(
+            label="Accept",
+            style=discord.ButtonStyle.success,
+            custom_id=f"withdraw_accept:{self.withdrawal_id}",
+        )
+        self.decline_button = discord.ui.Button(
+            label="Decline",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"withdraw_decline:{self.withdrawal_id}",
+        )
+        self.accept_button.callback = self.accept
+        self.decline_button.callback = self.decline
+        self.add_item(self.accept_button)
+        self.add_item(self.decline_button)
+
+    async def _admin_check(self, interaction: discord.Interaction) -> bool:
+        admin_ids = set(getattr(config, "ADMIN_USER_IDS", []) or [])
+        owner_id = getattr(config, "OWNER_ID", None)
+        try:
+            if owner_id is not None:
+                admin_ids.add(int(owner_id))
+        except (TypeError, ValueError):
+            pass
+        if interaction.user.id not in admin_ids:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Permission Denied",
+                    "Only a bot administrator can manage withdrawals.",
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _get_row(self):
+        return await self.bot.db.pool.fetchrow(
+            """
+            SELECT id, user_id, currency, address, amount, fee, status, created_at
+            FROM withdrawals
+            WHERE id=$1
+            """,
+            self.withdrawal_id,
+        )
+
+    async def accept(self, interaction: discord.Interaction):
+        if not await self._admin_check(interaction):
+            return
+
+        row = await self._get_row()
+        if not row:
+            await interaction.response.send_message("Withdrawal not found.", ephemeral=True)
+            return
+        if str(row["status"]).lower() != "pending":
+            await interaction.response.send_message(
+                f"This withdrawal is already `{row['status']}`.",
+                ephemeral=True,
+            )
+            return
+
+        updated = await self.bot.db.pool.execute(
+            """
+            UPDATE withdrawals
+            SET status='approved', processed_at=NOW()
+            WHERE id=$1 AND status='pending'
+            """,
+            self.withdrawal_id,
+        )
+        if not updated.endswith("1"):
+            await interaction.response.send_message(
+                "This withdrawal was already processed.",
+                ephemeral=True,
+            )
+            return
+
+        user = self.bot.get_user(int(row["user_id"]))
+        crypto_price = await get_crypto_usd_price(str(row["currency"]))
+        crypto_amount = (
+            (Decimal(str(row["amount"])) / crypto_price).quantize(Decimal("0.00000001"))
+            if crypto_price and crypto_price > 0
+            else None
+        )
+        crypto_text = (
+            f"({crypto_amount:.8f} {row['currency'].upper()})"
+            if crypto_amount is not None
+            else f"({row['currency'].upper()} amount unavailable)"
+        )
+
+        if user:
+            try:
+                await user.send(
+                    embed=success_embed(
+                        "Withdrawal Approved",
+                        (
+                            f"Your withdrawal of **{money(Decimal(str(row['amount'])))} USD** "
+                            f"{crypto_text} has been **approved**.\n\n"
+                            "An admin will send the funds to your wallet."
+                        ),
+                    )
+                )
+            except Exception as exc:
+                print(f"[WITHDRAW] User DM failed: {exc}")
+
+        self.accept_button.disabled = True
+        self.decline_button.disabled = True
+        await interaction.response.edit_message(
+            embed=base_embed(
+                "SwiftBet Withdrawal — Approved",
+                (
+                    f"**User:** <@{row['user_id']}>\n"
+                    f"**Amount:** {money(Decimal(str(row['amount'])))} USD {crypto_text}\n"
+                    f"**Currency:** `{row['currency'].upper()}`\n"
+                    f"**Address:** `{row['address']}`\n"
+                    f"**Approved by:** {interaction.user.mention}\n\n"
+                    "**Status:** `Approved — Pay the user manually`"
+                ),
+            ),
+            view=self,
+        )
+
+    async def decline(self, interaction: discord.Interaction):
+        if not await self._admin_check(interaction):
+            return
+
+        row = await self._get_row()
+        if not row:
+            await interaction.response.send_message("Withdrawal not found.", ephemeral=True)
+            return
+        if str(row["status"]).lower() != "pending":
+            await interaction.response.send_message(
+                f"This withdrawal is already `{row['status']}`.",
+                ephemeral=True,
+            )
+            return
+
+        async with self.bot.db.pool.acquire() as conn:
+            async with conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE",
+                    self.withdrawal_id,
+                )
+                if not locked or str(locked["status"]).lower() != "pending":
+                    await interaction.response.send_message(
+                        "This withdrawal was already processed.",
+                        ephemeral=True,
+                    )
+                    return
+
+                amount = Decimal(str(locked["amount"]))
+                await conn.execute(
+                    """
+                    UPDATE withdrawals
+                    SET status='declined', processed_at=NOW()
+                    WHERE id=$1
+                    """,
+                    self.withdrawal_id,
+                )
+                balance_after = await conn.fetchval(
+                    """
+                    UPDATE users
+                    SET balance=balance+$2,
+                        lifetime_withdraw=GREATEST(0, lifetime_withdraw-$2),
+                        updated_at=NOW()
+                    WHERE user_id=$1
+                    RETURNING balance
+                    """,
+                    int(locked["user_id"]),
+                    amount,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO transactions(
+                        user_id, kind, amount, balance_after, note
+                    ) VALUES($1,'withdraw_refund',$2,$3,$4)
+                    """,
+                    int(locked["user_id"]),
+                    amount,
+                    balance_after,
+                    f"Declined withdrawal #{self.withdrawal_id}",
+                )
+
+        user = self.bot.get_user(int(row["user_id"]))
+        if user:
+            try:
+                await user.send(
+                    embed=error_embed(
+                        "Withdrawal Declined",
+                        (
+                            f"Your withdrawal of **{money(Decimal(str(row['amount'])))} USD** "
+                            "was declined by an admin.\n\n"
+                            "The withdrawal amount has been returned to your balance."
+                        ),
+                    )
+                )
+            except Exception as exc:
+                print(f"[WITHDRAW] User DM failed: {exc}")
+
+        self.accept_button.disabled = True
+        self.decline_button.disabled = True
+        await interaction.response.edit_message(
+            embed=base_embed(
+                "SwiftBet Withdrawal — Declined",
+                (
+                    f"**User:** <@{row['user_id']}>\n"
+                    f"**Amount:** {money(Decimal(str(row['amount'])))}\n"
+                    f"**Currency:** `{row['currency'].upper()}`\n"
+                    f"**Address:** `{row['address']}`\n"
+                    f"**Declined by:** {interaction.user.mention}\n\n"
+                    "**Status:** `Declined — Amount refunded`"
+                ),
+            ),
+            view=self,
+        )
+
+
+# ============================================================
 # /WITHDRAW
 # ============================================================
 
@@ -3362,242 +3746,150 @@ async def withdraw_command(
     address: str,
     amount: str,
 ):
-
-    # ========================================================
-    # DATABASE
-    # ========================================================
-
     if not await require_database(interaction):
         return
 
     user_id = interaction.user.id
     address = address.strip()
-
-    # ========================================================
-    # AMOUNT
-    # ========================================================
-
     value = normalize_amount(amount)
 
     if value is None or value <= 0:
-
         await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Amount",
-                "Enter a valid withdrawal amount.",
-            ),
+            embed=error_embed("Invalid Amount", "Enter a valid withdrawal amount."),
             ephemeral=False,
         )
-
         return
-
-    # ========================================================
-    # MINIMUM $0.50
-    # ========================================================
 
     if value < Decimal("0.50"):
-
         await interaction.response.send_message(
-            embed=error_embed(
-                "Minimum Withdrawal",
-                "The minimum withdrawal is **$0.50**.",
-            ),
+            embed=error_embed("Minimum Withdrawal", "The minimum withdrawal is **$0.50**."),
             ephemeral=False,
         )
-
         return
-
-    # ========================================================
-    # DETECT LTC
-    # ========================================================
 
     is_ltc = (
         address.lower().startswith("ltc1")
-        or (
-            address.startswith(("L", "M", "m"))
-            and 26 <= len(address) <= 35
-        )
+        or (address.startswith(("L", "M", "m")) and 26 <= len(address) <= 35)
     )
-
-    # ========================================================
-    # DETECT SOL
-    # ========================================================
-
-    is_sol = (
-        32 <= len(address) <= 44
-        and not address.lower().startswith("ltc1")
-    )
-
-    # ========================================================
-    # DETERMINE CURRENCY
-    # ========================================================
+    is_sol = 32 <= len(address) <= 44 and not address.lower().startswith("ltc1")
 
     if is_ltc:
-
         currency = "LTC"
-
     elif is_sol:
-
         currency = "SOL"
-
     else:
-
         await interaction.response.send_message(
             embed=error_embed(
                 "Invalid Address",
-                (
-                    "Please enter a valid **LTC** or **SOL** "
-                    "withdrawal address."
-                ),
+                "Please enter a valid **LTC** or **SOL** withdrawal address.",
             ),
             ephemeral=False,
         )
-
         return
 
-    # ========================================================
-    # LIFETIME DEPOSIT
-    # ========================================================
-
     lifetime_deposit = await bot.db.pool.fetchval(
-        """
-        SELECT lifetime_deposit
-        FROM users
-        WHERE user_id=$1
-        """,
+        "SELECT lifetime_deposit FROM users WHERE user_id=$1",
         user_id,
     )
-
-    lifetime_deposit = Decimal(
-        str(lifetime_deposit or 0)
-    )
-
-    if lifetime_deposit < Decimal("1"):
-
+    if Decimal(str(lifetime_deposit or 0)) < Decimal("1"):
         await interaction.response.send_message(
             embed=error_embed(
                 "Withdrawal Unavailable",
-                (
-                    "You must have deposited at least "
-                    "**$1.00 lifetime** before withdrawing."
-                ),
+                "You must have deposited at least **$1.00 lifetime** before withdrawing.",
             ),
             ephemeral=False,
         )
-
         return
 
-    # ========================================================
-    # BALANCE
-    # ========================================================
-
-    balance = await bot.get_balance(
-        user_id
-    )
-
+    balance = await bot.get_balance(user_id)
     if value > balance:
-
         await interaction.response.send_message(
             embed=error_embed(
                 "Insufficient Balance",
-                (
-                    f"Your balance is **{money(balance)}**.\n"
-                    f"You cannot withdraw **{money(value)}**."
-                ),
+                f"Your balance is **{money(balance)}**.\nYou cannot withdraw **{money(value)}**.",
             ),
             ephemeral=False,
         )
-
         return
 
-    # ========================================================
-    # CREATE WITHDRAWAL
-    #
-    # create_withdrawal() handles the balance deduction.
-    # DO NOT call change_balance() here.
-    # ========================================================
+    # Do not accept a withdrawal that has nowhere to be reviewed.
+    admin_channel_id = getattr(bot, "withdraw_admin_channel_id", None)
+    admin_channel = bot.get_channel(admin_channel_id) if admin_channel_id else None
+    if admin_channel is None:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Withdrawal Unavailable",
+                "The withdrawal admin channel has not been configured yet. An administrator must run `.withdrawadmin #channel` first.",
+            ),
+            ephemeral=False,
+        )
+        return
 
-    created = await bot.db.create_withdrawal(
+    crypto_price = await get_crypto_usd_price(currency)
+    if crypto_price is None or crypto_price <= 0:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Price Unavailable",
+                f"I couldn't get the current {currency} price. Please try again in a moment.",
+            ),
+            ephemeral=False,
+        )
+        return
+
+    crypto_amount = (value / crypto_price).quantize(Decimal("0.00000001"))
+    withdrawal_id = await bot.db.create_withdrawal_request(
         user_id=user_id,
         currency=currency,
         address=address,
         amount=value,
     )
 
-    if not created:
-
+    if not withdrawal_id:
         await interaction.response.send_message(
             embed=error_embed(
                 "Withdrawal Failed",
-                (
-                    "The withdrawal could not be created. "
-                    "Your balance was not changed."
-                ),
+                "The withdrawal could not be created. Your balance was not changed.",
             ),
             ephemeral=False,
         )
-
         return
 
-    # ========================================================
-    # WITHDRAWAL LOG
-    # ========================================================
+    # Admin notification channel configured by .withdrawadmin <channel>.
+    channel = admin_channel
 
-    log_channel = None
-
-    channel_id = getattr(
-        bot,
-        "withdraw_log_channel_id",
-        None,
+    admin_embed = base_embed(
+        "SwiftBet Withdrawal — Pending",
+        (
+            f"**User:** {interaction.user.mention}\n"
+            f"**User ID:** `{user_id}`\n\n"
+            f"**Sent:** {money(value)} USD ({crypto_amount:.8f} {currency})\n"
+            f"**Address:** `{address}`\n"
+            f"**Withdrawal ID:** `#{withdrawal_id}`\n\n"
+            "**Status:** `Pending admin approval`"
+        ),
     )
 
-    if channel_id:
+    view = WithdrawalAdminView(bot, withdrawal_id)
 
-        log_channel = bot.get_channel(
-            channel_id
-        )
-
-    if log_channel:
-
+    if channel:
         try:
-
-            await log_channel.send(
-                embed=base_embed(
-                    "CryptoBet Withdrawal",
-                    (
-                        f"**User:** {interaction.user.mention}\n"
-                        f"**User ID:** `{user_id}`\n\n"
-                        f"**Amount:** {money(value)}\n"
-                        f"**Currency:** `{currency}`\n"
-                        f"**Address:** `{address}`\n\n"
-                        "**Status:** `Pending`"
-                    ),
-                )
-            )
-
+            await channel.send(embed=admin_embed, view=view)
+            bot.add_view(view)
         except Exception as exc:
-
-            print(
-                f"[WITHDRAW] Log error: {exc}"
-            )
-
-    # ========================================================
-    # SUCCESS
-    # ========================================================
+            print(f"[WITHDRAW] Admin notification failed: {exc}")
 
     await interaction.response.send_message(
-        embed=success_embed(
-            "Withdrawal Requested",
+        embed=base_embed(
+            "Withdrawal submitted",
             (
-                f"**Amount:** {money(value)}\n"
-                f"**Currency:** `{currency}`\n\n"
-                f"**Address:** `{address}`\n\n"
-                "Your withdrawal has been created and is "
-                "**pending processing**."
+                f"Sent **{money(value)} USD** ({crypto_amount:.8f} {currency}) to `{address}`\n\n"
+                "**[wait until it get proceed by an admin]**"
             ),
         ),
         ephemeral=False,
     )
+
+
 # ============================================================
 # /STATS
 # ============================================================
@@ -3918,25 +4210,22 @@ async def rewardinfo(
 # /WITHDRAWLOG
 # ============================================================
 
-@prefix_command(name="withdrawlog")
-async def withdrawlog_command(
+@prefix_command(name="withdrawadmin", aliases=["withdrawlog"])
+@owner_only()
+async def withdrawadmin_command(
     interaction: discord.Interaction,
+    channel: discord.TextChannel,
 ):
-
-    if not allowed_admin(interaction):
-        await interaction.response.send_message(
-            "You do not have permission to use this command.",
-            ephemeral=True,
-        )
-        return
-
-    bot.withdraw_log_channel_id = interaction.channel.id
-
+    bot.withdraw_admin_channel_id = channel.id
+    bot.withdraw_log_channel_id = channel.id
     await interaction.response.send_message(
-        f"Withdrawal logs will now be sent to {interaction.channel.mention}.",
+        embed=success_embed(
+            "Withdrawal Admin Channel Set",
+            f"Withdrawal approval notifications will be sent to {channel.mention}.\n\nUse `.withdraw <ltc/sol address> <amount>` to submit a withdrawal.",
+        ),
         ephemeral=False,
     )
-    
+
 # ============================================================
 # /AFFILIATEINFO
 # ============================================================
@@ -4175,7 +4464,7 @@ async def create_race_image(rows):
         star.append((952 + math.cos(angle) * radius, 101 + math.sin(angle) * radius))
     draw.polygon(star, fill=(8, 28, 56, 90), outline=(125, 199, 255, 230))
 
-    # Brand lockup: same upper-left placement as the supplied sample, renamed CryptoBet.
+    # Brand lockup: same upper-left placement as the supplied sample, renamed SwiftBet.
     draw.line((315, 100, 315, 233), fill=(0, 113, 255, 190), width=2)
     # Spade-style brand mark.
     draw.ellipse((133, 52, 224, 126), fill=(224, 240, 255, 245))
@@ -4184,7 +4473,7 @@ async def create_race_image(rows):
     draw.polygon([(178, 102), (159, 137), (176, 128), (188, 141), (198, 132)], fill=(224, 240, 255, 245))
     brand_font = _race_font(47, True)
     tagline_font = _race_font(12, False)
-    _draw_centered(draw, (178, 174), "CryptoBet", brand_font, (225, 241, 255, 255))
+    _draw_centered(draw, (178, 174), "SwiftBet", brand_font, (225, 241, 255, 255))
     _draw_centered(draw, (198, 230), "W A G E R   R A C E S", tagline_font, (192, 211, 233, 255))
 
     # Podiums, in reference order: second on left, first in center, third on right.
@@ -4306,13 +4595,13 @@ async def race_prefix_command(ctx: commands.Context, action: Optional[str] = Non
                     if hasattr(bot.db, "reset_race"):
                         await bot.db.reset_race()
                     await bot.db.set_setting("race_active", "1")
-                await ctx.send("**CryptoBet Race Reset**\nA new race has started and the leaderboard has been reset.")
+                await ctx.send("**SwiftBet Race Reset**\nA new race has started and the leaderboard has been reset.")
                 return
             if action == "end":
                 if hasattr(bot.db, "finish_race"):
                     await bot.db.finish_race()
                 await bot.db.set_setting("race_active", "0")
-                await ctx.send("**CryptoBet Race Ended**\nThe current race has ended.")
+                await ctx.send("**SwiftBet Race Ended**\nThe current race has ended.")
                 return
         except Exception as exc:
             print(f"[RACE] Action error: {exc}")
@@ -4367,9 +4656,8 @@ async def tip_command(
         )
         return
 
-    value = normalize_amount(
-        amount
-    )
+    balance = await bot.get_balance(interaction.user.id)
+    value = amount_or_all(amount, balance)
 
     if value is None:
         await interaction.response.send_message(
@@ -5267,7 +5555,8 @@ async def mines_command(
         )
         return
 
-    bet = normalize_amount(amount)
+    balance = await bot.get_balance(interaction.user.id)
+    bet = amount_or_all(amount, balance)
 
     if bet is None or bet < MIN_MINES_BET:
 
@@ -6028,7 +6317,8 @@ async def tower_command(
         )
         return
 
-    bet = normalize_amount(amount)
+    balance = await bot.get_balance(interaction.user.id)
+    bet = amount_or_all(amount, balance)
 
     if bet is None or bet < MIN_BET:
         await bot.safe_send(
@@ -6535,13 +6825,14 @@ async def roulette_command(
         )
         return
 
-    bet = normalize_amount(amount)
+    balance = await bot.get_balance(user_id)
+    bet = amount_or_all(amount, balance)
     if bet is None or bet < MIN_BET:
         await bot.safe_send(
             interaction,
             embed=error_embed(
                 "Invalid Bet",
-                f"Minimum bet is {money(MIN_BET)}.",
+                f"Minimum bet is {money(MIN_BET)}. Use `all`, `half`, or `max` for balance-based bets.",
             ),
             ephemeral=False,
         )
@@ -6910,11 +7201,53 @@ CasinoBot.finish_rain = finish_rain
 # RAIN COMMAND
 # ============================================================
 
+def parse_rain_duration(raw: str):
+    """Parse rain duration such as 30s, 1m, 5m, or 1h."""
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+
+    units = {
+        "s": 1,
+        "sec": 1,
+        "secs": 1,
+        "second": 1,
+        "seconds": 1,
+        "m": 60,
+        "min": 60,
+        "mins": 60,
+        "minute": 60,
+        "minutes": 60,
+        "h": 3600,
+        "hr": 3600,
+        "hrs": 3600,
+        "hour": 3600,
+        "hours": 3600,
+    }
+
+    if text.isdigit():
+        # Bare numbers are treated as minutes for convenience.
+        seconds = int(text) * 60
+    else:
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([a-z]+)", text)
+        if not match:
+            return None
+        value = Decimal(match.group(1))
+        multiplier = units.get(match.group(2))
+        if multiplier is None:
+            return None
+        seconds = int(value * multiplier)
+
+    if seconds < 10 or seconds > 86400:
+        return None
+    return seconds
+
+
 @prefix_command(name="rain")
 async def rain_command(
     interaction: discord.Interaction,
     amount: str,
-    duration: app_commands.Choice[int],
+    duration: str,
 ):
 
     # --------------------------------------------------------
@@ -6943,6 +7276,23 @@ async def rain_command(
             ephemeral=True,
         )
 
+        return
+
+    # --------------------------------------------------------
+    # PARSE DURATION
+    # --------------------------------------------------------
+
+    seconds = parse_rain_duration(duration)
+
+    if seconds is None:
+        await bot.safe_send(
+            interaction,
+            content=(
+                "Enter a valid rain time. Examples: `30s`, `1m`, `5m`. "
+                "Duration must be between 10 seconds and 24 hours."
+            ),
+            ephemeral=True,
+        )
         return
 
     # --------------------------------------------------------
@@ -7052,11 +7402,6 @@ async def rain_command(
     # --------------------------------------------------------
     # START TIMER
     # --------------------------------------------------------
-
-    seconds = RAIN_DURATIONS.get(
-        duration.value,
-        60,
-    )
 
     asyncio.create_task(
         rain_timer(
@@ -9454,6 +9799,7 @@ HELP_TEXT = """
  Rain & Affiliates
 `.rain`
 `.affiliate`
+`.aff <code>`
 `.affiliates`
 `.affiliate-claim`
 `.affiliateinfo`
@@ -9622,6 +9968,128 @@ async def rakeback(
     )
 
 
+
+# ============================================================
+# AFFILIATE CARD IMAGE
+# ============================================================
+
+async def create_affiliate_image(
+    user: discord.User | discord.Member,
+    referrals: int,
+    code: str,
+    earnings: Decimal,
+    commission: Decimal,
+) -> discord.File:
+    """Create the SwiftBet affiliate card shown by `.affiliate`."""
+    width, height = 1500, 620
+    bg = (7, 9, 14, 255)
+    panel = (17, 20, 28, 255)
+    panel2 = (22, 26, 36, 255)
+    white = (245, 247, 250, 255)
+    muted = (157, 165, 179, 255)
+    accent = (160, 95, 255, 255)
+    accent2 = (103, 63, 210, 255)
+
+    image = Image.new("RGBA", (width, height), bg)
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    # Background glow / subtle casino-card geometry.
+    for i in range(9):
+        alpha = max(0, 48 - i * 5)
+        draw.rounded_rectangle(
+            (18 + i * 8, 18 + i * 8, width - 18 - i * 8, height - 18 - i * 8),
+            radius=42,
+            outline=(*accent2[:3], alpha),
+            width=2,
+        )
+
+    draw.rounded_rectangle(
+        (28, 28, width - 28, height - 28),
+        radius=42,
+        fill=panel,
+        outline=(*accent[:3], 120),
+        width=3,
+    )
+
+    # Accent strip.
+    draw.rounded_rectangle(
+        (28, 28, 48, height - 28),
+        radius=10,
+        fill=accent,
+    )
+
+    title_font = create_balance_font(58, True)
+    name_font = create_balance_font(54, True)
+    label_font = create_balance_font(25, True)
+    value_font = create_balance_font(42, True)
+    small_font = create_balance_font(25, False)
+    code_font = create_balance_font(38, True)
+
+    # Avatar.
+    avatar_size = 220
+    avatar_x, avatar_y = 92, 105
+    try:
+        avatar_bytes = await user.display_avatar.replace(size=256).read()
+        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    except Exception:
+        avatar = Image.new("RGBA", (avatar_size, avatar_size), (55, 59, 70, 255))
+
+    avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+    mask = Image.new("L", (avatar_size, avatar_size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
+    image.paste(avatar, (avatar_x, avatar_y), mask)
+    draw.ellipse(
+        (avatar_x - 7, avatar_y - 7, avatar_x + avatar_size + 7, avatar_y + avatar_size + 7),
+        outline=accent,
+        width=7,
+    )
+
+    draw.text((360, 88), "SwiftBet", font=title_font, fill=white)
+    draw.text((360, 158), "AFFILIATE PROGRAM", font=label_font, fill=accent)
+    draw.text((360, 205), str(user.display_name)[:24], font=name_font, fill=white)
+
+    # Code card.
+    draw.rounded_rectangle(
+        (360, 285, 1000, 405),
+        radius=24,
+        fill=panel2,
+        outline=(*accent[:3], 110),
+        width=2,
+    )
+    draw.text((395, 310), "AFFILIATE CODE", font=small_font, fill=muted)
+    draw.text((395, 347), code, font=code_font, fill=white)
+
+    # Stats.
+    cards = [
+        (1040, 100, 1408, 220, "REFERRED", str(referrals)),
+        (1040, 250, 1408, 370, "EARNINGS", money(earnings)),
+        (1040, 400, 1408, 520, "COMMISSION", f"{commission:.2f}%"),
+    ]
+    for x1, y1, x2, y2, label, value in cards:
+        draw.rounded_rectangle(
+            (x1, y1, x2, y2),
+            radius=24,
+            fill=panel2,
+            outline=(54, 61, 78, 255),
+            width=2,
+        )
+        draw.text((x1 + 24, y1 + 18), label, font=small_font, fill=muted)
+        draw.text((x1 + 24, y1 + 58), value, font=value_font, fill=white)
+
+    draw.text(
+        (360, 470),
+        "Share your code with friends and earn from qualifying activity.",
+        font=small_font,
+        fill=muted,
+    )
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return discord.File(output, filename="affiliate.png")
+
+
 # ============================================================
 # /AFFILIATE / /AFFILIATES
 # ============================================================
@@ -9630,52 +10098,161 @@ async def rakeback(
 async def affiliate(
     interaction: discord.Interaction,
 ):
+    """Generate the user's SwiftBet affiliate card."""
+    if not await require_database(interaction):
+        return
 
     user_id = interaction.user.id
 
-    if hasattr(
-        bot.db,
-        "affiliate_stats",
-    ):
+    try:
+        row = await bot.db.affiliate(user_id)
 
-        data = await bot.db.affiliate_stats(
-            user_id
+        if not row:
+            # Generate a short, readable unique affiliate code.
+            for _ in range(10):
+                code = "SWIFT-" + secrets.token_hex(3).upper()
+                try:
+                    row = await bot.db.create_affiliate(user_id, code)
+                    break
+                except Exception as exc:
+                    if "unique" not in str(exc).lower():
+                        raise
+                    row = None
+
+            if not row:
+                raise RuntimeError("Could not create a unique affiliate code.")
+
+        stats = await bot.db.pool.fetchrow(
+            """
+            SELECT
+                a.code,
+                a.referrals,
+                a.earnings
+            FROM affiliates a
+            WHERE a.user_id = $1
+            """,
+            user_id,
         )
 
-        referrals = int(
-            data.get("referrals", 0)
+        if not stats:
+            raise RuntimeError("Affiliate record was not found after creation.")
+
+        referrals = int(stats["referrals"] or 0)
+        earnings = D(stats["earnings"] or 0)
+        rate = Decimal("0")
+        for minimum, tier_rate in AFFILIATE_TIERS:
+            if referrals >= minimum:
+                rate = tier_rate
+        commission = rate * Decimal("100")
+
+        file = await create_affiliate_image(
+            interaction.user,
+            referrals,
+            str(stats["code"]),
+            earnings,
+            commission,
         )
 
-        earnings = D(
-            data.get("earnings", 0)
+        embed = base_embed(
+            title="",
+            description="",
+        )
+        embed.set_image(url="attachment://affiliate.png")
+
+        await interaction.response.send_message(
+            embed=embed,
+            file=file,
+            ephemeral=False,
         )
 
-        commission = D(
-            data.get("rate", 0)
+    except Exception as exc:
+        print(f"[AFFILIATE] {type(exc).__name__}: {exc}")
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Affiliate Error",
+                "Your affiliate information could not be generated right now.",
+            ),
+            ephemeral=False,
         )
 
-    else:
 
-        referrals = 0
-        earnings = Decimal("0")
-        commission = Decimal("0")
+@prefix_command(name="aff")
+async def aff_command(
+    interaction: discord.Interaction,
+    code: str,
+):
+    """Apply another player's affiliate code."""
+    if not await require_database(interaction):
+        return
 
-    percent = (
-        commission * Decimal("100")
-    )
+    code = str(code).strip().upper()
+    if not code:
+        await interaction.response.send_message(
+            embed=error_embed("Invalid Code", "Please provide an affiliate code."),
+            ephemeral=False,
+        )
+        return
 
-    await interaction.response.send_message(
-        embed=base_embed(
-            description=(
-                " Affiliate\n\n"
-                f"**Referrals:** {referrals}\n"
-                f"**Commission:** {percent:.2f}%\n"
-                f"**Available:** {money(earnings)}"
+    try:
+        row = await bot.db.pool.fetchrow(
+            """
+            SELECT user_id, code
+            FROM affiliates
+            WHERE UPPER(code) = UPPER($1)
+            LIMIT 1
+            """,
+            code,
+        )
+
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Invalid Affiliate Code", "That affiliate code does not exist."),
+                ephemeral=False,
             )
+            return
+
+        affiliate_id = int(row["user_id"])
+
+        if affiliate_id == interaction.user.id:
+            await interaction.response.send_message(
+                embed=error_embed("Invalid Referral", "You cannot use your own affiliate code."),
+                ephemeral=False,
+            )
+            return
+
+        # set_referrer() is transactional and refuses duplicate referrals/self-referrals.
+        applied = await bot.db.set_referrer(
+            interaction.user.id,
+            affiliate_id,
         )
-    )
 
+        if not applied:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Referral Already Set",
+                    "Your account already has an affiliate/referrer and cannot be changed.",
+                ),
+                ephemeral=False,
+            )
+            return
 
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Affiliate Code Applied",
+                f"You are now referred by affiliate code **{row['code']}**.",
+            ),
+            ephemeral=False,
+        )
+
+    except Exception as exc:
+        print(f"[AFF CODE] {type(exc).__name__}: {exc}")
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Affiliate Error",
+                "The affiliate code could not be applied right now.",
+            ),
+            ephemeral=False,
+        )
 
 
 
@@ -10425,9 +11002,8 @@ async def code_command(
     requirement: int,
 ):
 
-    value = normalize_amount(
-        amount
-    )
+    balance = await bot.get_balance(interaction.user.id)
+    value = amount_or_all(amount, balance)
 
     if value is None:
 
@@ -10503,12 +11079,30 @@ async def code_command(
 # ============================================================
 
 @prefix_command(name="addbal")
-@owner_only()
+@bot_owner_only()
 async def addbal_command(
     interaction: discord.Interaction,
     user: discord.Member,
     amount: str,
 ):
+
+    # .addbal is STRICTLY owner-only. Do not allow ADMIN_USER_IDS or
+    # Discord permissions to bypass the bot owner check.
+    owner_id = getattr(config, "OWNER_ID", None)
+    try:
+        owner_id = int(owner_id) if owner_id is not None else None
+    except (TypeError, ValueError):
+        owner_id = None
+
+    if owner_id is None or interaction.user.id != owner_id:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Permission Denied",
+                "Only the bot owner can use `.addbal`.",
+            ),
+            ephemeral=False,
+        )
+        return
 
     if not await require_database(interaction):
         return
@@ -10746,7 +11340,8 @@ CasinoBot.frog_step = _frog_step
 
 @prefix_command(name="frog-run")
 async def frog_run(interaction: discord.Interaction, amount: str):
-    value = normalize_amount(amount)
+    balance = await bot.get_balance(interaction.user.id)
+    value = amount_or_all(amount, balance)
     if value is None or value < MIN_FROG_BET:
         await interaction.response.send_message("Minimum Frog Run bet is $0.10.", ephemeral=False)
         return
@@ -10900,11 +11495,15 @@ async def dice_command(
     mode: str,
     number: Optional[str] = None,
 ):
-    """Play Dice.
+    """Play Dice with an exact 30% player win probability.
 
     .dice <amount> under <number>
     .dice <amount> low
     .dice <amount> high
+
+    The first provably-fair HMAC value decides the 30% win/loss outcome.
+    A second HMAC value chooses a roll inside the corresponding winning or
+    losing region, so the displayed roll always matches the selected rule.
     """
     if not await require_database(interaction):
         return
@@ -10919,11 +11518,12 @@ async def dice_command(
         )
         return
 
-    bet = normalize_amount(amount)
+    balance = await bot.get_balance(user_id)
+    bet = amount_or_all(amount, balance)
     if bet is None or bet < MIN_BET:
         await bot.safe_send(
             interaction,
-            embed=error_embed("Invalid Bet", f"Minimum bet is {money(MIN_BET)}."),
+            embed=error_embed("Invalid Bet", f"Minimum bet is {money(MIN_BET)}. Use `all`, `half`, or `max` for balance-based bets."),
             ephemeral=False,
         )
         return
@@ -10942,10 +11542,13 @@ async def dice_command(
         try:
             target = Decimal(str(number))
         except (InvalidOperation, ValueError):
-            await bot.safe_send(interaction, embed=error_embed("Invalid Number", "The target must be between 1 and 99.99."), ephemeral=False)
-            return
-        if target <= 0 or target >= 100:
-            await bot.safe_send(interaction, embed=error_embed("Invalid Number", "The target must be greater than 0 and less than 100."), ephemeral=False)
+            target = None
+        if target is None or target <= 0 or target >= 100:
+            await bot.safe_send(
+                interaction,
+                embed=error_embed("Invalid Number", "The target must be greater than 0 and less than 100."),
+                ephemeral=False,
+            )
             return
     elif mode in {"low", "high"}:
         if number is not None:
@@ -10976,14 +11579,8 @@ async def dice_command(
         )
         return
 
-    # Continuous 0..100 roll. House edge is 1%.
-    if mode == "under":
-        chance = target
-    else:
-        chance = Decimal("50")
-
-    multiplier = (Decimal("99") / chance).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-    multiplier = max(multiplier, Decimal("1.01"))
+    WIN_CHANCE = Decimal("30")
+    multiplier = DICE_MULTIPLIER
 
     game_id = bot.next_game_id()
     server_seed = bot.create_server_seed()
@@ -10991,7 +11588,11 @@ async def dice_command(
     nonce = 0
 
     if not await bot.deduct_bet(user_id, bet, "dice"):
-        await bot.safe_send(interaction, content="Your balance changed. Please try again or deposit funds.", ephemeral=False)
+        await bot.safe_send(
+            interaction,
+            content="Your balance changed. Please try again or deposit funds.",
+            ephemeral=False,
+        )
         return
 
     bot.register_fair_game(
@@ -11001,17 +11602,73 @@ async def dice_command(
         server_seed,
         client_seed,
         nonce,
-        f"{chance.quantize(Decimal('0.01'))}%",
-        f"Mode={mode}; target={target}; roll is generated from HMAC-SHA256.",
+        "30%",
+        f"Mode={mode}; target={target}; weighted result generated from HMAC-SHA256."
     )
 
-    roll = bot.fair_roll(server_seed, client_seed, nonce, "dice")
+    # --------------------------------------------------------
+    # PROVABLY FAIR 30% RESULT
+    # --------------------------------------------------------
+    # One deterministic HMAC decides whether the player wins.
+    # A second deterministic HMAC chooses the displayed roll inside the
+    # appropriate region, ensuring the image and result always agree.
+    outcome_digest = bot.fair_digest(
+        server_seed,
+        client_seed,
+        nonce,
+        "dice-outcome",
+    )
+    position_digest = bot.fair_digest(
+        server_seed,
+        client_seed,
+        nonce,
+        "dice-position",
+    )
+
+    outcome_number = int.from_bytes(outcome_digest[:8], "big")
+    position_number = int.from_bytes(position_digest[:8], "big")
+    outcome_unit = Decimal(outcome_number) / Decimal(2**64)
+    position_unit = Decimal(position_number) / Decimal(2**64)
+
+    won = outcome_unit < (WIN_CHANCE / Decimal("100"))
+
     if mode == "under":
-        won = roll < target
+        winning_min = Decimal("0")
+        winning_max = target
+        losing_min = target
+        losing_max = Decimal("100")
     elif mode == "low":
-        won = roll <= Decimal("50")
+        winning_min = Decimal("0")
+        winning_max = Decimal("50")
+        losing_min = Decimal("50.01")
+        losing_max = Decimal("100")
     else:
-        won = roll >= Decimal("50")
+        winning_min = Decimal("50")
+        winning_max = Decimal("100")
+        losing_min = Decimal("0")
+        losing_max = Decimal("49.99")
+
+    region_min = winning_min if won else losing_min
+    region_max = winning_max if won else losing_max
+    roll = region_min + ((region_max - region_min) * position_unit)
+    roll = roll.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+    # Keep the exact boundary semantics after quantization.
+    if mode == "under":
+        if won and roll >= target:
+            roll = max(Decimal("0.00"), target - Decimal("0.01"))
+        elif not won and roll < target:
+            roll = target
+    elif mode == "low":
+        if won and roll > Decimal("50"):
+            roll = Decimal("50.00")
+        elif not won and roll <= Decimal("50"):
+            roll = Decimal("50.01")
+    else:
+        if won and roll < Decimal("50"):
+            roll = Decimal("50.00")
+        elif not won and roll >= Decimal("50"):
+            roll = Decimal("49.99")
 
     payout = (bet * multiplier).quantize(Decimal("0.01"), rounding=ROUND_DOWN) if won else Decimal("0")
 
@@ -11021,13 +11678,19 @@ async def dice_command(
         else:
             await bot.settle_loss(user_id, bet, "dice")
     except Exception:
-        # Protect the stake if settlement itself fails.
         try:
             await bot.db.change_balance(user_id, bet, kind="game_refund", note="dice_settlement_error")
         except Exception:
             pass
         bot.clear_fair_game(user_id)
-        await bot.safe_send(interaction, embed=error_embed("Game Error", "The result was generated but settlement failed. Your bet was refunded if possible."), ephemeral=False)
+        await bot.safe_send(
+            interaction,
+            embed=error_embed(
+                "Game Error",
+                "The result was generated but settlement failed. Your bet was refunded if possible.",
+            ),
+            ephemeral=False,
+        )
         return
 
     result = "WIN" if won else "LOSS"
@@ -11039,20 +11702,28 @@ async def dice_command(
             won=won,
             bet=bet,
             payout=payout,
-            chance=chance,
+            chance=WIN_CHANCE,
             username=interaction.user.display_name,
         )
     except Exception as exc:
         print(f"[DICE IMAGE] {type(exc).__name__}: {exc}")
         file = None
 
+    condition = (
+        f"UNDER {target.quantize(Decimal('0.01'))}"
+        if mode == "under"
+        else "LOW ≤ 50"
+        if mode == "low"
+        else "HIGH ≥ 50"
+    )
+
     embed = base_embed(
         title=f"Dice — {result}",
         description=(
             f"**Game:** `#{game_id}`\n"
             f"**Roll:** `{roll.quantize(Decimal('0.01'))}`\n"
-            f"**Condition:** `{mode.upper()} {target.quantize(Decimal('0.01')) if target is not None else ''}`\n"
-            f"**Winning Chance:** `{chance.quantize(Decimal('0.01'))}%`\n"
+            f"**Condition:** `{condition}`\n"
+            f"**Winning Chance:** `30%`\n"
             f"**Bet:** `{money(bet)}`\n"
             f"**Payout:** `{money(payout)}`\n"
             f"**Multiplier:** `{multiplier}x`"
@@ -12691,7 +13362,7 @@ async def housebal(
     interaction: discord.Interaction,
 ):
     embed = base_embed(
-        title="## CryptoBet — House",
+        title="## SwiftBet — House",
         description=(
             "> .live reserves & player-fund held\n\n"
             f"> .house balance · **`{HOUSE_BALANCE}`** ·\n"
@@ -13522,27 +14193,36 @@ async def limbo(
     # One nonce per Limbo round.
     nonce = game_id
 
-    chance = (Decimal("0.99") / target * Decimal("100")).quantize(Decimal("0.01"))
-    if chance > Decimal("100"):
-        chance = Decimal("100")
+    # Limbo is configured for an exact 40% player win chance.
+    # The first fair roll determines the outcome; the second determines
+    # the displayed result on the appropriate side of the target.
+    chance = Decimal("40.00")
+    outcome_roll = bot.fair_roll(server_seed, client_seed, nonce, "limbo-outcome")
+    won = outcome_roll < chance
+
     bot.register_fair_game(
         user_id, "limbo", game_id, server_seed, client_seed, nonce,
-        f"{chance}%", f"Target: {target}x"
+        "40.00%", f"Target: {target}x; outcome roll: {outcome_roll}%"
     )
 
-    # --------------------------------------------------------
-    # GENERATE RESULT
-    # --------------------------------------------------------
+    result_roll = bot.fair_roll(server_seed, client_seed, nonce + 1, "limbo-result")
+    if won:
+        # Always land at or above the target when the fair 40% roll wins.
+        result = target + (result_roll / Decimal("100")) * (LIMBO_MAX_RESULT - target)
+        if result < target:
+            result = target
+    else:
+        # Always land below the target when the fair 40% roll loses.
+        if target <= Decimal("1.01"):
+            result = Decimal("1.00")
+        else:
+            result = Decimal("1.00") + (result_roll / Decimal("100")) * (target - Decimal("1.01"))
+        if result >= target:
+            result = target - Decimal("0.01")
+        if result < Decimal("1.00"):
+            result = Decimal("1.00")
 
-    result = limbo_result(
-        server_seed,
-        client_seed,
-        nonce,
-    )
-
-    won = (
-        result >= target
-    )
+    result = result.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
     # --------------------------------------------------------
     # WIN
@@ -13642,14 +14322,8 @@ async def limbo(
     )
 
     embed.add_field(
-        name="RTP",
-        value="**99.00%**",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="House Edge",
-        value="**1.00%**",
+        name="Winning Chance",
+        value="**40.00%**",
         inline=True,
     )
 
@@ -13940,4 +14614,3 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
-
