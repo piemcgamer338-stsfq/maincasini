@@ -13330,10 +13330,10 @@ async def blackjack(
 # /HOUSEBAL
 # ============================================================
 
-HOUSE_BALANCE = "$00.00"
-HOUSE_LTC = "$00.00"
-HOUSE_SOL = "$00.00"
-HOUSE_USDT = "$00.00"
+HOUSE_BALANCE = "$9.87"
+HOUSE_LTC = "$05.00"
+HOUSE_SOL = "$03.00"
+HOUSE_USDT = "$01.87"
 
 
 class HouseBalanceView(discord.ui.View):
