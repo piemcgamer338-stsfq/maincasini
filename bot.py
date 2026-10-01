@@ -1,5 +1,3 @@
-
-
 # ============================================================
 # bot.py — PART 1 / 10
 # ZETHER CASINO — REGENERATED SLASH-COMMAND BOT
@@ -1294,10 +1292,21 @@ class CasinoBot(commands.Bot):
                     sol_balance NUMERIC(20,4) NOT NULL DEFAULT 3.00,
                     usdt_balance NUMERIC(20,4) NOT NULL DEFAULT 1.87
                 )
-                
-                ALTER TABLE house ADD COLUMN IF NOT EXISTS ltc_balance NUMERIC(20,4) NOT NULL DEFAULT 5.00
-                ALTER TABLE house ADD COLUMN IF NOT EXISTS sol_balance NUMERIC(20,4) NOT NULL DEFAULT 3.00
-                ALTER TABLE house ADD COLUMN IF NOT EXISTS usdt_balance NUMERIC(20,4) NOT NULL DEFAULT 1.87
+            """)
+            await connection.execute("""
+                ALTER TABLE house
+                ADD COLUMN IF NOT EXISTS ltc_balance
+                NUMERIC(20,4) NOT NULL DEFAULT 5.00
+            """)
+            await connection.execute("""
+                ALTER TABLE house
+                ADD COLUMN IF NOT EXISTS sol_balance
+                NUMERIC(20,4) NOT NULL DEFAULT 3.00
+            """)
+            await connection.execute("""
+                ALTER TABLE house
+                ADD COLUMN IF NOT EXISTS usdt_balance
+                NUMERIC(20,4) NOT NULL DEFAULT 1.87
             """)
             await connection.execute("""
                 INSERT INTO house(id, balance, ltc_balance, sol_balance, usdt_balance)
