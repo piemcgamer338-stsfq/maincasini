@@ -14009,13 +14009,20 @@ async def limbo(
     )
 
     result_roll = bot.fair_roll(server_seed, client_seed, nonce + 1, "limbo-result")
+    # IMPORTANT: Do not generate a winning result from the full
+    # 1,000,000x range. That made a normal 2.00x target display
+    # absurd results such as 15,501.96x.
+    #
+    # The result is kept close to the selected target while the first
+    # fair roll remains the sole 40% win/loss decision.
     if won:
-        # Always land at or above the target when the fair 40% roll wins.
-        result = target + (result_roll / Decimal("100")) * (LIMBO_MAX_RESULT - target)
+        # Winning results are between target and target * 2.00.
+        # This keeps the displayed crash point realistic and stable.
+        result = target + (result_roll / Decimal("100")) * target
         if result < target:
             result = target
     else:
-        # Always land below the target when the fair 40% roll loses.
+        # Losing results are between 1.00x and just below the target.
         if target <= Decimal("1.01"):
             result = Decimal("1.00")
         else:
