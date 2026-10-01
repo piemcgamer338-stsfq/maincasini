@@ -28,6 +28,17 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
+
+# ============================================================
+# OWNER CONFIGURATION
+# ============================================================
+# Canonical bot owner. This is intentionally defined here so the
+# owner ID works even if Railway/config.py is missing or stale.
+BOT_OWNER_ID = 1519015243710201927
+config.OWNER_ID = BOT_OWNER_ID
+_existing_admin_ids = list(getattr(config, "ADMIN_USER_IDS", []) or [])
+config.ADMIN_USER_IDS = list(dict.fromkeys([*(_existing_admin_ids), BOT_OWNER_ID]))
+
 from database import Database
 from PIL import Image, ImageDraw, ImageFont
 
@@ -13330,10 +13341,10 @@ async def blackjack(
 # /HOUSEBAL
 # ============================================================
 
-HOUSE_BALANCE = "$9.87"
-HOUSE_LTC = "$05.00"
-HOUSE_SOL = "$03.00"
-HOUSE_USDT = "$01.87"
+HOUSE_BALANCE = "$00.00"
+HOUSE_LTC = "$00.00"
+HOUSE_SOL = "$00.00"
+HOUSE_USDT = "$00.00"
 
 
 class HouseBalanceView(discord.ui.View):
@@ -14614,3 +14625,4 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
+
