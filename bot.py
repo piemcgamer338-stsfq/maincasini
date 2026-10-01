@@ -1287,36 +1287,36 @@ class CasinoBot(commands.Bot):
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS house (
                     id INTEGER PRIMARY KEY,
-                    balance NUMERIC(20,4) NOT NULL DEFAULT 9.87,
-                    ltc_balance NUMERIC(20,4) NOT NULL DEFAULT 5.00,
-                    sol_balance NUMERIC(20,4) NOT NULL DEFAULT 3.00,
-                    usdt_balance NUMERIC(20,4) NOT NULL DEFAULT 1.87
+                    balance NUMERIC(20,4) NOT NULL DEFAULT 87.00,
+                    ltc_balance NUMERIC(20,4) NOT NULL DEFAULT 52.20,
+                    sol_balance NUMERIC(20,4) NOT NULL DEFAULT 26.10,
+                    usdt_balance NUMERIC(20,4) NOT NULL DEFAULT 8.70
                 )
             """)
             await connection.execute("""
                 ALTER TABLE house
                 ADD COLUMN IF NOT EXISTS ltc_balance
-                NUMERIC(20,4) NOT NULL DEFAULT 5.00
+                NUMERIC(20,4) NOT NULL DEFAULT 52.20
             """)
             await connection.execute("""
                 ALTER TABLE house
                 ADD COLUMN IF NOT EXISTS sol_balance
-                NUMERIC(20,4) NOT NULL DEFAULT 3.00
+                NUMERIC(20,4) NOT NULL DEFAULT 26.10
             """)
             await connection.execute("""
                 ALTER TABLE house
                 ADD COLUMN IF NOT EXISTS usdt_balance
-                NUMERIC(20,4) NOT NULL DEFAULT 1.87
+                NUMERIC(20,4) NOT NULL DEFAULT 8.70
             """)
             await connection.execute("""
                 INSERT INTO house(id, balance, ltc_balance, sol_balance, usdt_balance)
-                VALUES(1, 9.87, 5.00, 3.00, 1.87)
+                VALUES(1, 87.00, 52.20, 26.10, 8.70)
                 ON CONFLICT(id) DO NOTHING
             """)
             await connection.execute("""
                 UPDATE house
-                SET balance=9.87, ltc_balance=5.00, sol_balance=3.00, usdt_balance=1.87
-                WHERE id=1 AND balance=0 AND ltc_balance=5.00 AND sol_balance=3.00 AND usdt_balance=1.87
+                SET balance=87.00, ltc_balance=52.20, sol_balance=26.10, usdt_balance=8.70
+                WHERE id=1 AND balance=9.87 AND ltc_balance=5.00 AND sol_balance=3.00 AND usdt_balance=1.87
             """)
             await connection.execute("ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS owner_override BOOLEAN NOT NULL DEFAULT FALSE")
 
@@ -14417,3 +14417,4 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
+
