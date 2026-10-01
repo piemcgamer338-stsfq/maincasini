@@ -1,3 +1,5 @@
+
+
 # ============================================================
 # bot.py — PART 1 / 10
 # ZETHER CASINO — REGENERATED SLASH-COMMAND BOT
@@ -1287,14 +1289,27 @@ class CasinoBot(commands.Bot):
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS house (
                     id INTEGER PRIMARY KEY,
-                    balance NUMERIC(20,4) NOT NULL DEFAULT 0
+                    balance NUMERIC(20,4) NOT NULL DEFAULT 9.87,
+                    ltc_balance NUMERIC(20,4) NOT NULL DEFAULT 5.00,
+                    sol_balance NUMERIC(20,4) NOT NULL DEFAULT 3.00,
+                    usdt_balance NUMERIC(20,4) NOT NULL DEFAULT 1.87
                 )
+                
+                ALTER TABLE house ADD COLUMN IF NOT EXISTS ltc_balance NUMERIC(20,4) NOT NULL DEFAULT 5.00
+                ALTER TABLE house ADD COLUMN IF NOT EXISTS sol_balance NUMERIC(20,4) NOT NULL DEFAULT 3.00
+                ALTER TABLE house ADD COLUMN IF NOT EXISTS usdt_balance NUMERIC(20,4) NOT NULL DEFAULT 1.87
             """)
             await connection.execute("""
-                INSERT INTO house(id, balance)
-                VALUES(1, 0)
+                INSERT INTO house(id, balance, ltc_balance, sol_balance, usdt_balance)
+                VALUES(1, 9.87, 5.00, 3.00, 1.87)
                 ON CONFLICT(id) DO NOTHING
             """)
+            await connection.execute("""
+                UPDATE house
+                SET balance=9.87, ltc_balance=5.00, sol_balance=3.00, usdt_balance=1.87
+                WHERE id=1 AND balance=0 AND ltc_balance=5.00 AND sol_balance=3.00 AND usdt_balance=1.87
+            """)
+            await connection.execute("ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS owner_override BOOLEAN NOT NULL DEFAULT FALSE")
 
         self.http_session = aiohttp.ClientSession()
 
@@ -3413,6 +3428,8 @@ async def get_crypto_usd_price(currency: str) -> Optional[Decimal]:
     """Fetch a current USD price for the requested withdrawal coin."""
     currency = currency.upper()
     symbols = {"LTC": "LTCUSDT", "SOL": "SOLUSDT"}
+    if currency == "USDT":
+        return Decimal("1")
     if currency not in symbols:
         return None
 
@@ -3451,78 +3468,21 @@ async def get_crypto_usd_price(currency: str) -> Optional[Decimal]:
     return None
 
 
-async def create_withdrawal_request(
-    self,
-    user_id: int,
-    currency: str,
-    address: str,
-    amount,
-    fee=Decimal("0"),
-):
-    """Create a pending withdrawal and return its database ID."""
-    amount = Decimal(str(amount))
-    fee = Decimal(str(fee))
-    total = amount + fee
-
+async def create_withdrawal_request(self, user_id: int, currency: str, address: str, amount, fee=Decimal("0"), owner_override: bool=False):
+    amount=Decimal(str(amount)); fee=Decimal(str(fee)); total=amount+fee
     async with self.pool.acquire() as conn:
         async with conn.transaction():
-            row = await conn.fetchrow(
-                """
-                UPDATE users
-                SET
-                    balance = balance - $2,
-                    lifetime_withdraw = lifetime_withdraw + $2,
-                    updated_at = NOW()
-                WHERE user_id=$1
-                  AND frozen=FALSE
-                  AND balance >= $2
-                RETURNING balance
-                """,
-                user_id,
-                total,
-            )
-            if not row:
-                return None
-
-            withdrawal_id = await conn.fetchval(
-                """
-                INSERT INTO withdrawals(
-                    user_id,
-                    currency,
-                    address,
-                    amount,
-                    fee,
-                    status
-                )
-                VALUES($1,$2,$3,$4,$5,'pending')
-                RETURNING id
-                """,
-                user_id,
-                currency.upper(),
-                address,
-                amount,
-                fee,
-            )
-
-            await conn.execute(
-                """
-                INSERT INTO transactions(
-                    user_id,
-                    kind,
-                    amount,
-                    balance_after,
-                    note
-                )
-                VALUES($1,'withdraw',$2,$3,$4)
-                """,
-                user_id,
-                -total,
-                row["balance"],
-                f"{currency.upper()} withdrawal #{withdrawal_id}",
-            )
-
-            return int(withdrawal_id)
-
+            if owner_override:
+                row=await conn.fetchrow("SELECT balance FROM users WHERE user_id=$1", user_id)
+                balance_after=row["balance"] if row else Decimal("0")
+            else:
+                row=await conn.fetchrow("""UPDATE users SET balance=balance-$2, lifetime_withdraw=lifetime_withdraw+$2, updated_at=NOW() WHERE user_id=$1 AND frozen=FALSE AND balance >= $2 RETURNING balance""", user_id,total)
+                if not row: return None
+                balance_after=row["balance"]
+            wid=await conn.fetchval("""INSERT INTO withdrawals(user_id,currency,address,amount,fee,status,owner_override) VALUES($1,$2,$3,$4,$5,'pending',$6) RETURNING id""",user_id,currency.upper(),address,amount,fee,owner_override)
+            if not owner_override:
+                await conn.execute("""INSERT INTO transactions(user_id,kind,amount,balance_after,note) VALUES($1,'withdraw',$2,$3,$4)""",user_id,-total,balance_after,f"{currency.upper()} withdrawal #{wid}")
+            return int(wid)
 
 Database.create_withdrawal_request = create_withdrawal_request
 
@@ -3570,7 +3530,7 @@ class WithdrawalAdminView(discord.ui.View):
     async def _get_row(self):
         return await self.bot.db.pool.fetchrow(
             """
-            SELECT id, user_id, currency, address, amount, fee, status, created_at
+            SELECT id, user_id, currency, address, amount, fee, status, owner_override, created_at
             FROM withdrawals
             WHERE id=$1
             """,
@@ -3592,20 +3552,20 @@ class WithdrawalAdminView(discord.ui.View):
             )
             return
 
-        updated = await self.bot.db.pool.execute(
-            """
-            UPDATE withdrawals
-            SET status='approved', processed_at=NOW()
-            WHERE id=$1 AND status='pending'
-            """,
-            self.withdrawal_id,
-        )
-        if not updated.endswith("1"):
-            await interaction.response.send_message(
-                "This withdrawal was already processed.",
-                ephemeral=True,
-            )
-            return
+        currency = str(row["currency"]).upper()
+        amount = Decimal(str(row["amount"]))
+        reserve_column = {"LTC":"ltc_balance", "SOL":"sol_balance", "USDT":"usdt_balance"}.get(currency)
+        if reserve_column is None:
+            await interaction.response.send_message("Unsupported withdrawal currency.", ephemeral=True); return
+        async with self.bot.db.pool.acquire() as conn:
+            async with conn.transaction():
+                locked=await conn.fetchrow("SELECT * FROM withdrawals WHERE id=$1 FOR UPDATE", self.withdrawal_id)
+                if not locked or str(locked["status"]).lower() != "pending":
+                    await interaction.response.send_message("This withdrawal was already processed.", ephemeral=True); return
+                reserve=await conn.fetchrow(f"UPDATE house SET {reserve_column}={reserve_column}-$1, balance=balance-$1 WHERE id=1 AND {reserve_column}>=$1 AND balance>=$1 RETURNING {reserve_column},balance", amount)
+                if not reserve:
+                    await interaction.response.send_message(embed=error_embed("Insufficient House Balance", f"The house does not have enough **{currency}** reserve to approve this withdrawal."), ephemeral=True); return
+                await conn.execute("UPDATE withdrawals SET status='approved', processed_at=NOW() WHERE id=$1", self.withdrawal_id)
 
         user = self.bot.get_user(int(row["user_id"]))
         crypto_price = await get_crypto_usd_price(str(row["currency"]))
@@ -3689,29 +3649,9 @@ class WithdrawalAdminView(discord.ui.View):
                     """,
                     self.withdrawal_id,
                 )
-                balance_after = await conn.fetchval(
-                    """
-                    UPDATE users
-                    SET balance=balance+$2,
-                        lifetime_withdraw=GREATEST(0, lifetime_withdraw-$2),
-                        updated_at=NOW()
-                    WHERE user_id=$1
-                    RETURNING balance
-                    """,
-                    int(locked["user_id"]),
-                    amount,
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO transactions(
-                        user_id, kind, amount, balance_after, note
-                    ) VALUES($1,'withdraw_refund',$2,$3,$4)
-                    """,
-                    int(locked["user_id"]),
-                    amount,
-                    balance_after,
-                    f"Declined withdrawal #{self.withdrawal_id}",
-                )
+                if not bool(locked.get("owner_override", False)):
+                    balance_after = await conn.fetchval("""UPDATE users SET balance=balance+$2, lifetime_withdraw=GREATEST(0,lifetime_withdraw-$2), updated_at=NOW() WHERE user_id=$1 RETURNING balance""", int(locked["user_id"]), amount)
+                    await conn.execute("""INSERT INTO transactions(user_id,kind,amount,balance_after,note) VALUES($1,'withdraw_refund',$2,$3,$4)""", int(locked["user_id"]), amount,balance_after,f"Declined withdrawal #{self.withdrawal_id}")
 
         user = self.bot.get_user(int(row["user_id"]))
         if user:
@@ -3752,153 +3692,40 @@ class WithdrawalAdminView(discord.ui.View):
 # ============================================================
 
 @prefix_command(name="withdraw")
-async def withdraw_command(
-    interaction: discord.Interaction,
-    address: str,
-    amount: str,
-):
-    if not await require_database(interaction):
-        return
-
-    user_id = interaction.user.id
-    address = address.strip()
-    value = normalize_amount(amount)
-
-    if value is None or value <= 0:
-        await interaction.response.send_message(
-            embed=error_embed("Invalid Amount", "Enter a valid withdrawal amount."),
-            ephemeral=False,
-        )
-        return
-
-    if value < Decimal("0.50"):
-        await interaction.response.send_message(
-            embed=error_embed("Minimum Withdrawal", "The minimum withdrawal is **$0.50**."),
-            ephemeral=False,
-        )
-        return
-
-    is_ltc = (
-        address.lower().startswith("ltc1")
-        or (address.startswith(("L", "M", "m")) and 26 <= len(address) <= 35)
-    )
-    is_sol = 32 <= len(address) <= 44 and not address.lower().startswith("ltc1")
-
-    if is_ltc:
-        currency = "LTC"
-    elif is_sol:
-        currency = "SOL"
-    else:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Address",
-                "Please enter a valid **LTC** or **SOL** withdrawal address.",
-            ),
-            ephemeral=False,
-        )
-        return
-
-    lifetime_deposit = await bot.db.pool.fetchval(
-        "SELECT lifetime_deposit FROM users WHERE user_id=$1",
-        user_id,
-    )
-    if Decimal(str(lifetime_deposit or 0)) < Decimal("1"):
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Withdrawal Unavailable",
-                "You must have deposited at least **$1.00 lifetime** before withdrawing.",
-            ),
-            ephemeral=False,
-        )
-        return
-
-    balance = await bot.get_balance(user_id)
-    if value > balance:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Insufficient Balance",
-                f"Your balance is **{money(balance)}**.\nYou cannot withdraw **{money(value)}**.",
-            ),
-            ephemeral=False,
-        )
-        return
-
-    # Do not accept a withdrawal that has nowhere to be reviewed.
-    admin_channel_id = getattr(bot, "withdraw_admin_channel_id", None)
-    admin_channel = bot.get_channel(admin_channel_id) if admin_channel_id else None
+async def withdraw_command(interaction: discord.Interaction, amount: str, address: str, crypto: str):
+    if not await require_database(interaction): return
+    user_id=interaction.user.id; is_owner=user_id==int(getattr(config,"OWNER_ID",BOT_OWNER_ID)); address=address.strip(); crypto=crypto.strip().upper(); value=normalize_amount(amount)
+    if value is None or value<=0:
+        await interaction.response.send_message(embed=error_embed("Invalid Amount","Enter a valid withdrawal amount.")); return
+    if crypto not in {"LTC","SOL","USDT"}:
+        await interaction.response.send_message(embed=error_embed("Invalid Crypto","Crypto must be **LTC**, **SOL**, or **USDT**.")); return
+    if not is_owner and value<Decimal("0.50"):
+        await interaction.response.send_message(embed=error_embed("Minimum Withdrawal","The minimum withdrawal is **$0.50**.")); return
+    if crypto=="LTC": valid=address.lower().startswith("ltc1") or (address.startswith(("L","M","m")) and 26<=len(address)<=35)
+    elif crypto=="SOL": valid=32<=len(address)<=44
+    else: valid=(address.startswith("0x") and len(address)==42) or (len(address) in {34,35} and address.upper().startswith("T"))
+    if not valid:
+        await interaction.response.send_message(embed=error_embed("Invalid Address",f"Please enter a valid **{crypto}** withdrawal address.")); return
+    if not is_owner:
+        lifetime=await bot.db.pool.fetchval("SELECT lifetime_deposit FROM users WHERE user_id=$1",user_id)
+        if Decimal(str(lifetime or 0))<Decimal("1"):
+            await interaction.response.send_message(embed=error_embed("Withdrawal Unavailable","You must have deposited at least **$1.00 lifetime** before withdrawing.")); return
+        balance=await bot.get_balance(user_id)
+        if value>balance:
+            await interaction.response.send_message(embed=error_embed("Insufficient Balance",f"Your balance is **{money(balance)}**.\nYou cannot withdraw **{money(value)}**.")); return
+    admin_channel_id=getattr(bot,"withdraw_admin_channel_id",None); admin_channel=bot.get_channel(admin_channel_id) if admin_channel_id else None
     if admin_channel is None:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Withdrawal Unavailable",
-                "The withdrawal admin channel has not been configured yet. An administrator must run `.withdrawadmin #channel` first.",
-            ),
-            ephemeral=False,
-        )
-        return
-
-    crypto_price = await get_crypto_usd_price(currency)
-    if crypto_price is None or crypto_price <= 0:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Price Unavailable",
-                f"I couldn't get the current {currency} price. Please try again in a moment.",
-            ),
-            ephemeral=False,
-        )
-        return
-
-    crypto_amount = (value / crypto_price).quantize(Decimal("0.00000001"))
-    withdrawal_id = await bot.db.create_withdrawal_request(
-        user_id=user_id,
-        currency=currency,
-        address=address,
-        amount=value,
-    )
-
-    if not withdrawal_id:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Withdrawal Failed",
-                "The withdrawal could not be created. Your balance was not changed.",
-            ),
-            ephemeral=False,
-        )
-        return
-
-    # Admin notification channel configured by .withdrawadmin <channel>.
-    channel = admin_channel
-
-    admin_embed = base_embed(
-        "SwiftBet Withdrawal — Pending",
-        (
-            f"**User:** {interaction.user.mention}\n"
-            f"**User ID:** `{user_id}`\n\n"
-            f"**Sent:** {money(value)} USD ({crypto_amount:.8f} {currency})\n"
-            f"**Address:** `{address}`\n"
-            f"**Withdrawal ID:** `#{withdrawal_id}`\n\n"
-            "**Status:** `Pending admin approval`"
-        ),
-    )
-
-    view = WithdrawalAdminView(bot, withdrawal_id)
-
-    if channel:
-        try:
-            await channel.send(embed=admin_embed, view=view)
-            bot.add_view(view)
-        except Exception as exc:
-            print(f"[WITHDRAW] Admin notification failed: {exc}")
-
-    await interaction.response.send_message(
-        embed=base_embed(
-            "Withdrawal submitted",
-            (
-                f"Sent **{money(value)} USD** ({crypto_amount:.8f} {currency}) to `{address}`\n\n"
-                "**[wait until it get proceed by an admin]**"
-            ),
-        ),
-        ephemeral=False,
-    )
+        await interaction.response.send_message(embed=error_embed("Withdrawal Unavailable","Run `.withdrawadmin #channel` first.")); return
+    price=await get_crypto_usd_price(crypto)
+    if price is None or price<=0:
+        await interaction.response.send_message(embed=error_embed("Price Unavailable",f"I couldn't get the current {crypto} price.")); return
+    crypto_amount=(value/price).quantize(Decimal("0.00000001"))
+    wid=await bot.db.create_withdrawal_request(user_id,crypto,address,value,owner_override=is_owner)
+    if not wid:
+        await interaction.response.send_message(embed=error_embed("Withdrawal Failed","The withdrawal could not be created.")); return
+    embed=base_embed("SwiftBet Withdrawal — Pending",f"**User:** {interaction.user.mention}\n**User ID:** `{user_id}`\n\n**Sent:** {money(value)} USD ({crypto_amount:.8f} {crypto})\n**Address:** `{address}`\n**Withdrawal ID:** `#{wid}`\n**Owner Withdrawal:** `{'Yes' if is_owner else 'No'}`\n\n**Status:** `Pending admin approval`")
+    view=WithdrawalAdminView(bot,wid); await admin_channel.send(embed=embed,view=view); bot.add_view(view)
+    await interaction.response.send_message(embed=base_embed("Withdrawal submitted",f"Sent **{money(value)} USD** ({crypto_amount:.8f} {crypto}) to `{address}`\n\n**[wait until it get proceed by an admin]**"))
 
 
 # ============================================================
@@ -4232,7 +4059,7 @@ async def withdrawadmin_command(
     await interaction.response.send_message(
         embed=success_embed(
             "Withdrawal Admin Channel Set",
-            f"Withdrawal approval notifications will be sent to {channel.mention}.\n\nUse `.withdraw <ltc/sol address> <amount>` to submit a withdrawal.",
+            f"Withdrawal approval notifications will be sent to {channel.mention}.\n\nUse `.withdraw <amount> <address> <LTC|SOL|USDT>` to submit a withdrawal.",
         ),
         ephemeral=False,
     )
@@ -13341,69 +13168,25 @@ async def blackjack(
 # /HOUSEBAL
 # ============================================================
 
-HOUSE_BALANCE = "$00.00"
-HOUSE_LTC = "$00.00"
-HOUSE_SOL = "$00.00"
-HOUSE_USDT = "$00.00"
-
+async def get_house_balances():
+    row=await bot.db.pool.fetchrow("SELECT balance,ltc_balance,sol_balance,usdt_balance FROM house WHERE id=1")
+    if not row: return {"total":Decimal("0"),"LTC":Decimal("0"),"SOL":Decimal("0"),"USDT":Decimal("0")}
+    return {"total":Decimal(str(row["balance"])),"LTC":Decimal(str(row["ltc_balance"])),"SOL":Decimal(str(row["sol_balance"])),"USDT":Decimal(str(row["usdt_balance"]))}
 
 class HouseBalanceView(discord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="Add Funds",
-        style=discord.ButtonStyle.success,
-        custom_id="house_add_funds",
-    )
-    async def add_funds(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        await interaction.response.send_message(
-            embed=house_add_funds_embed(),
-            ephemeral=False,
-        )
-
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label="Add Funds",style=discord.ButtonStyle.success,custom_id="house_add_funds")
+    async def add_funds(self,interaction: discord.Interaction,button: discord.ui.Button):
+        await interaction.response.send_message(embed=house_add_funds_embed())
 
 @prefix_command(name="housebal")
-async def housebal(
-    interaction: discord.Interaction,
-):
-    embed = base_embed(
-        title="## SwiftBet — House",
-        description=(
-            "> .live reserves & player-fund held\n\n"
-            f"> .house balance · **`{HOUSE_BALANCE}`** ·\n"
-            f"> .LTC · **`{HOUSE_LTC}`**\n"
-            f"> .SOL · **`{HOUSE_SOL}`**\n"
-            f"> .USDT · **`{HOUSE_USDT}`**"
-        ),
-    )
-
-    await interaction.response.send_message(
-        embed=embed,
-        view=HouseBalanceView(),
-    )
-
-# ============================================================
-# HOUSE ADD FUNDS EMBED
-# ============================================================
+async def housebal(interaction: discord.Interaction):
+    if not await require_database(interaction): return
+    b=await get_house_balances()
+    await interaction.response.send_message(embed=base_embed(title="## SwiftBet — House",description=(f"> Total · **`{money(b['total'])}`**\n\n> LTC · **`{money(b['LTC'])}`**\n> SOL · **`{money(b['SOL'])}`**\n> USDT · **`{money(b['USDT'])}`")),view=HouseBalanceView())
 
 def house_add_funds_embed():
-    return base_embed(
-        title="Housebalance Credit",
-        description=(
-            "<:ltc:1550062603693457430> "
-            "`ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s`\n\n"
-            "<:Solana:1550062641081356348> "
-            "`Cannot Generate an Deposit address Message Owner for Manual Deposit`\n\n"
-            "<:usdt:1550062695380819978> "
-            "`Cannot Generate an Deposit address Message Owner for Manual Deposit`"
-        ),
-    )
+    return base_embed(title="Housebalance Credit",description=("<:ltc:1550062603693457430> `ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s`\n\n<:Solana:1550062641081356348> `Cannot Generate an Deposit address Message Owner for Manual Deposit`\n\n<:usdt:1550062695380819978> `Cannot Generate an Deposit address Message Owner for Manual Deposit`"))
 
 # ============================================================
 # LIMBO — STAKE-STYLE
@@ -14625,4 +14408,3 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
-
