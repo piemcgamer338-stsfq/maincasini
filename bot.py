@@ -3514,90 +3514,241 @@ async def balance_command(
     )
 
 # ============================================================
-# /HELP
+# /HELP — DM HELP CENTER
 # ============================================================
 
-HELP_GENERAL = (
-    "## General\n"
-    "`.help` — Show this help menu\n"
-    "`.balance` — View your wallet\n"
-    "`.deposit` — Deposit cryptocurrency\n"
-    "`.withdraw <ltc/sol address> <amount>` — Submit a withdrawal\n"
-    "`.stats` — View your player statistics\n"
-    "`.history` — View recent game history\n"
-    "`.howtoplay` — Learn how to play\n"
-    "`.rewardinfo` — View rewards and perks\n"
-    "`.affiliate` — View your affiliate card\n"
-    "`.aff <code>` — Use an affiliate code\n"
-    "`.affiliateinfo` — View affiliate rates\n"
-    "`.verify <game_number>` — Verify a completed game"
-)
+HELP_CATEGORIES = {
+    "games": {
+        "label": "Games",
+        "description": "pick a category below",
+        "text": (
+            "## Games\n\n"
+            "> ﹒`.dice <amount> <mode> <target>` ﹒﹒under/low/high dice · e.g. `.dice 5 under 60`\n"
+            "> ﹒`.flip <amount> <heads/tails>` `.cf` ﹒﹒coinflip · **1.92×** · e.g. `.cf 5 heads`\n"
+            "> ﹒`.limbo <amount> <target>` `.lb` ﹒﹒pick a target multiplier · payout = stake × target · e.g. `.limbo 5 3`\n"
+            "> ﹒`.mines <amount> <mines>` `.m` `.mine` ﹒﹒find gems, dodge bombs · cash out anytime · e.g. `.mines 5 3`\n"
+            "> ﹒`.blackjack <amount>` `.bj` ﹒﹒beat the dealer · hit/stand/double · e.g. `.bj 5`\n"
+            "> ﹒`.roulette <amount>` `.rl` ﹒﹒red/black, numbers, dozens, columns · single-zero wheel · e.g. `.roulette 5`\n"
+            "> ﹒`.tower` ﹒﹒climb through the tower and cash out before a loss\n"
+            "> ﹒`.frog-run` ﹒﹒move through the board and cash out before losing\n"
+            "> ﹒`.retrigger` ﹒﹒restore an unfinished active game\n"
+            "\n"
+            "-# Use `all`, `half`, or `max` where the game accepts balance-based bets."
+        ),
+    },
+    "general": {
+        "label": "General",
+        "description": "wallet, deposits, withdrawals and account tools",
+        "text": (
+            "## General\n\n"
+            "> ﹒`.balance` `.b` `.bal` ﹒﹒view your wallet balance\n"
+            "> ﹒`.deposit` ﹒﹒open the supported crypto deposit panel\n"
+            "> ﹒`.withdraw` ﹒﹒start the withdrawal flow in your DMs\n"
+            "> ﹒`.stats` ﹒﹒view your player statistics\n"
+            "> ﹒`.history` ﹒﹒view recent game history\n"
+            "> ﹒`.verify <bet_id>` `.fair` ﹒﹒verify a completed game by its ID\n"
+            "> ﹒`.howtoplay` ﹒﹒game and account guide\n"
+            "> ﹒`.retrigger` ﹒﹒recover an unfinished game\n"
+            "> ﹒`.help` ﹒﹒open this DM help center\n"
+        ),
+    },
+    "rewards": {
+        "label": "Rewards",
+        "description": "promo codes, ranks, rakeback and races",
+        "text": (
+            "## Rewards\n\n"
+            "> ﹒`.claim <code>` ﹒﹒redeem an eligible promo code\n"
+            "> ﹒`.rakeback` ﹒﹒claim available rakeback\n"
+            "> ﹒`.ranks` ﹒﹒view your rank progression\n"
+            "> ﹒`.rank-rewards` ﹒﹒claim available rank rewards\n"
+            "> ﹒`.leaderboard` `.lb` ﹒﹒view the wager leaderboard\n"
+            "> ﹒`.race` ﹒﹒view the active wager race\n"
+            "> ﹒`.affiliate` ﹒﹒view your affiliate information\n"
+            "> ﹒`.affiliates` ﹒﹒view referred players\n"
+            "> ﹒`.affiliate-claim` ﹒﹒claim affiliate earnings\n"
+            "> ﹒`.aff <code>` ﹒﹒apply an affiliate code\n"
+            "> ﹒`.affiliateinfo` ﹒﹒view affiliate rates\n"
+            "> ﹒`.rewardinfo` ﹒﹒view rewards and perks\n"
+        ),
+    },
+    "social": {
+        "label": "Social",
+        "description": "tips, rain and server features",
+        "text": (
+            "## Social\n\n"
+            "> ﹒`.tip` ﹒﹒tip another player\n"
+            "> ﹒`.rain` ﹒﹒start or join a rain event\n"
+            "> ﹒`.private-channel` ﹒﹒manage a private gaming channel\n"
+        ),
+    },
+}
 
-HELP_GAMES = (
-    "## Games\n"
-    "`.dice <amount> under <number>` — Dice under a target\n"
-    "`.dice <amount> low` — Dice 50 or less\n"
-    "`.dice <amount> high` — Dice 50 or more\n"
-    "`.coinflip` — Play Red or Blue coinflip\n"
-    "`.mines` — Play Mines\n"
-    "`.tower` — Play Tower\n"
-    "`.roulette` — Play Roulette\n"
-    "`.limbo` — Play Limbo\n"
-    "`.blackjack` — Play Blackjack\n"
-    "`.frog-run` — Play Frog Run\n"
-    "`.retrigger` — Retrigger an unfinished game\n"
-)
 
-HELP_REWARDS = (
-    "## Rewards\n"
-    "`.rakeback` — Claim available rakeback\n"
-    "`.ranks` — View rank progression\n"
-    "`.rank-rewards` — Claim rank rewards\n"
-    "`.affiliates` — View your affiliates\n"
-    "`.affiliate-claim` — Claim affiliate earnings\n"
-    "`.affiliate` — Show your affiliate card\n"
-    "`.aff <code>` — Apply an affiliate code\n"
-    "`.claim` — Claim a promo code\n"
-    "`.leaderboard` — View top wagerers\n"
-    "`.race` — View the active wager race"
-)
+def _help_category_options(include_admin=False):
+    options = [
+        discord.SelectOption(label="Games", value="games", description="Casino games and betting commands"),
+        discord.SelectOption(label="General", value="general", description="Wallet, deposits and account tools"),
+        discord.SelectOption(label="Rewards", value="rewards", description="Promo codes, ranks and rewards"),
+        discord.SelectOption(label="Social", value="social", description="Tips, rain and social features"),
+    ]
+    if include_admin:
+        options.append(discord.SelectOption(label="Admin", value="admin", description="Administrator-only commands and logs"))
+    return options
 
-HELP_SOCIAL = (
-    "## Social\n"
-    "`.tip` — Tip another player\n"
-    "`.rain` — Start a rain event\n"
-    "`.private-channel` — Manage a private gaming channel"
-)
 
-HELP_ADMIN = (
-    "## Admin\n"
-    "`.ranksetup` — Configure rank roles\n"
-    "`.code` — Create a promotional code\n"
-    "`.race start` — Start a wager race\n"
-    "`.race end` — End a wager race\n"
-    "`.winlogs` — Set the win-log channel"
-)
+class HelpCategorySelect(discord.ui.Select):
+    def __init__(self, parent_view):
+        self.parent_view = parent_view
+        super().__init__(
+            placeholder="Select a category",
+            min_values=1,
+            max_values=1,
+            options=_help_category_options(parent_view.is_admin),
+            custom_id="casino_help_category",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.parent_view.show_category(interaction, self.values[0])
+
+
+class HelpView(CasinoV2View):
+    def __init__(self, *, is_admin=False):
+        super().__init__(timeout=600)
+        self.is_admin = is_admin
+        self.category = "games"
+        self.rebuild()
+
+    def _category_text(self):
+        casino_name = str(getattr(config, "CASINO_NAME", "Casino"))
+        if self.category == "admin":
+            return f"## {casino_name} — Admin\n\n" + ADMIN_HELP_CATEGORIES["overview"]
+        return (
+            f"## {casino_name} — Commands\n\n"
+            f"> ﹒**{HELP_CATEGORIES[self.category]['label']}**  ·  {HELP_CATEGORIES[self.category]['description']}\n\n"
+            + HELP_CATEGORIES[self.category]["text"]
+        )
+
+    def rebuild(self):
+        self.clear_items()
+        category = HELP_CATEGORIES.get(self.category)
+        if self.category == "admin":
+            title = "Admin"
+            subtitle = "administrator-only commands and logs"
+        else:
+            title = category["label"]
+            subtitle = category["description"]
+
+        menu_label = f"[{title}] selection menu"
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(self._category_text()),
+            discord.ui.Separator(visible=True),
+            discord.ui.TextDisplay(f"**{menu_label}**\n-# {subtitle}"),
+            accent_color=0x7C4DFF if self.category != "admin" else 0xED4245,
+        ))
+        self.add_item(discord.ui.ActionRow(HelpCategorySelect(self)))
+
+    async def show_category(self, interaction, category):
+        if category == "admin" and not self.is_admin:
+            await interaction.response.send_message("Admin tools are restricted to bot administrators.", ephemeral=True)
+            return
+        self.category = category
+        self.rebuild()
+        await interaction.response.edit_message(view=self)
+
+
+ADMIN_HELP_CATEGORIES = {
+    "overview": (
+        "## Admin\n\n"
+        "> ﹒**Logs** · configure withdrawal and WIN/LOSE log channels\n"
+        "> ﹒**Channels** · configure voucher and promo-code channels\n"
+        "> ﹒**Economy** · manage balances and inspect house funds\n"
+        "> ﹒**Promotions** · create promo codes and configure their channel\n"
+        "> ﹒**Races & Ranks** · manage wager races and rank roles\n\n"
+        "**Admin commands**\n"
+        "`.withdrawadmin #channel` `.withdrawlog #channel` · withdrawal approval/log channel\n"
+        "`.winlogs #channel` · WIN/LOSE game-log channel\n"
+        "`.set voucher #channel` · voucher channel shown on payout messages\n"
+        "`.codechannel #channel` · promo-code image channel\n"
+        "`.code <amount> <max> <deposit> [status]` · create a promo code\n"
+        "`.addbal @user <amount>` · owner-only balance credit\n"
+        "`.housebal` · view house balances\n"
+        "`.houseaddfund` · house-funding panel\n"
+        "`.race-start` · start the wager race\n"
+        "`.race-end` · end the wager race\n"
+        "`.ranksetup` · create missing casino rank roles"
+    ),
+}
 
 
 @prefix_command(name="help")
-async def help_command(
-    interaction: discord.Interaction,
-):
+async def help_command(interaction: discord.Interaction):
+    """DM the interactive Components V2 help center."""
+    admin_ids = set(getattr(config, "ADMIN_USER_IDS", []) or [])
+    try:
+        owner_id = int(getattr(config, "OWNER_ID", BOT_OWNER_ID))
+    except (TypeError, ValueError):
+        owner_id = BOT_OWNER_ID
+    admin_ids.add(owner_id)
+    is_admin = interaction.user.id in admin_ids
 
-    embed = base_embed(
-        title="Help",
-        description=(
-            f"{HELP_GENERAL}\n\n"
-            f"{HELP_GAMES}\n\n"
-            f"{HELP_REWARDS}\n\n"
-            f"{HELP_SOCIAL}"
-        ),
-    )
+    try:
+        dm_view = HelpView(is_admin=is_admin)
+        await interaction.user.send(view=dm_view)
+    except discord.Forbidden:
+        fail_view = CasinoV2View(timeout=60)
+        fail_view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## Help"),
+            discord.ui.TextDisplay("> ﹒I couldn't DM you. Enable DMs from this server and run `.help` again."),
+            accent_color=0xED4245,
+        ))
+        await interaction.response.send_message(view=fail_view)
+        return
+    except Exception as exc:
+        print(f"[HELP DM] {type(exc).__name__}: {exc}")
+        fail_view = CasinoV2View(timeout=60)
+        fail_view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## Help"),
+            discord.ui.TextDisplay("> ﹒The help DM could not be sent right now."),
+            accent_color=0xED4245,
+        ))
+        await interaction.response.send_message(view=fail_view)
+        return
 
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=False,
-    )
+    sent_view = CasinoV2View(timeout=60)
+    sent_view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay("## Help"),
+        discord.ui.TextDisplay("> ﹒the help center was sent to your DMs\n> ﹒open the chat to choose a category"),
+        accent_color=0x57F287,
+    ))
+    await interaction.response.send_message(view=sent_view)
+
+
+@prefix_command(name="admin")
+@owner_only()
+async def admin_command(interaction: discord.Interaction):
+    """Open the administrator-only command and log center."""
+    view = HelpView(is_admin=True)
+    view.category = "admin"
+    view.rebuild()
+    await interaction.response.send_message(view=view)
+
+
+@prefix_command(name="winlogs")
+@owner_only()
+async def winlogs_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Set the channel receiving public WIN and LOSE logs."""
+    if not await require_database(interaction):
+        return
+    await bot.db.set_setting("winlog_channel_id", str(channel.id))
+    view = CasinoV2View(timeout=120)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay("## Game Log Channel"),
+        discord.ui.TextDisplay(f"> ﹒WIN and LOSE logs will now be sent to {channel.mention}"),
+        accent_color=0x5865F2,
+    ))
+    await interaction.response.send_message(view=view)
+
+
 @prefix_command(name="fair", aliases=["verify"])
 async def fair_command(
     interaction: discord.Interaction,
@@ -13623,6 +13774,7 @@ class HouseBalanceView(discord.ui.View):
         await interaction.response.send_message(embed=house_add_funds_embed())
 
 @prefix_command(name="housebal")
+@owner_only()
 async def housebal(interaction: discord.Interaction):
     if not await require_database(interaction): return
     b=await get_house_balances()
@@ -14226,6 +14378,7 @@ async def limbo(
 # ============================================================
 
 @prefix_command(name="houseaddfund")
+@owner_only()
 async def houseaddfund(
     interaction: discord.Interaction,
 ):
