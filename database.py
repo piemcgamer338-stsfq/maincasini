@@ -231,6 +231,9 @@ class Database:
 
                     requirement INTEGER NOT NULL DEFAULT 0,
 
+                    required_deposit NUMERIC(20,8) NOT NULL DEFAULT 0,
+                    required_status TEXT NOT NULL DEFAULT '',
+
                     active BOOLEAN NOT NULL DEFAULT TRUE,
 
                     created_by BIGINT,
@@ -249,6 +252,13 @@ class Database:
 
                     PRIMARY KEY(code, user_id)
                 );
+
+                ALTER TABLE promo_codes
+                ADD COLUMN IF NOT EXISTS required_deposit NUMERIC(20,8) NOT NULL DEFAULT 0;
+
+                ALTER TABLE promo_codes
+                ADD COLUMN IF NOT EXISTS required_status TEXT NOT NULL DEFAULT '';
+
 
                 CREATE TABLE IF NOT EXISTS affiliates (
                     user_id BIGINT PRIMARY KEY,
@@ -1511,8 +1521,10 @@ class Database:
         code: str,
         amount,
         max_uses: int,
-        requirement: int,
-        created_by: int,
+        requirement: int = 0,
+        created_by: int = 0,
+        required_deposit=Decimal("0"),
+        required_status: str = "",
     ):
 
         return await self.pool.fetchrow(
@@ -1522,15 +1534,19 @@ class Database:
                 amount,
                 max_uses,
                 requirement,
+                required_deposit,
+                required_status,
                 created_by
             )
-            VALUES($1,$2,$3,$4,$5)
+            VALUES($1,$2,$3,$4,$5,$6,$7)
             RETURNING *
             """,
             code.upper(),
             Decimal(str(amount)),
             max_uses,
             requirement,
+            Decimal(str(required_deposit)),
+            str(required_status or ""),
             created_by,
         )
 
@@ -1600,35 +1616,24 @@ class Database:
                     user_id,
                 )
 
-                if requirement == 1:
-                    if Decimal(
-                        str(user["lifetime_deposit"])
-                    ) < Decimal("1"):
+                if not user:
+                    return (False, "Your account is not ready yet.", Decimal("0"))
+
+                required_deposit = Decimal(str(promo["required_deposit"] or 0))
+                if required_deposit > 0:
+                    if Decimal(str(user["lifetime_deposit"])) < required_deposit:
                         return (
                             False,
-                            "You need at least $1 deposited.",
+                            f"You need at least ${required_deposit:.2f} deposited.",
                             Decimal("0"),
                         )
 
-                elif requirement == 2:
-                    if Decimal(
-                        str(user["lifetime_deposit"])
-                    ) < Decimal("25"):
-                        return (
-                            False,
-                            "You need at least $25 deposited.",
-                            Decimal("0"),
-                        )
-
-                elif requirement == 3:
-                    if Decimal(
-                        str(user["wagered"])
-                    ) < Decimal("10"):
-                        return (
-                            False,
-                            "You need at least $10 wagered.",
-                            Decimal("0"),
-                        )
+                if requirement == 1 and Decimal(str(user["lifetime_deposit"])) < Decimal("1"):
+                    return (False, "You need at least $1 deposited.", Decimal("0"))
+                elif requirement == 2 and Decimal(str(user["lifetime_deposit"])) < Decimal("25"):
+                    return (False, "You need at least $25 deposited.", Decimal("0"))
+                elif requirement == 3 and Decimal(str(user["wagered"])) < Decimal("10"):
+                    return (False, "You need at least $10 wagered.", Decimal("0"))
 
                 amount = Decimal(
                     str(promo["amount"])
@@ -2308,3 +2313,4 @@ class Database:
                     )
 
                 return True
+
