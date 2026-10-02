@@ -2070,6 +2070,18 @@ async def _finish_withdrawal_request(user, amount_text: str, crypto: str, addres
     if value < MIN_WITHDRAWAL:
         return await user.send(f"﹒minimum withdrawal is `{money(MIN_WITHDRAWAL)}`.")
 
+    # Every user must have at least $2.00 in confirmed lifetime deposits.
+    lifetime_deposit = await bot.db.pool.fetchval(
+        "SELECT lifetime_deposit FROM users WHERE user_id=$1",
+        user_id,
+    )
+    lifetime_deposit = Decimal(str(lifetime_deposit or 0))
+    if lifetime_deposit < Decimal("2.00"):
+        return await user.send(
+            f"﹒you must have at least **$2.00 lifetime deposited** before withdrawing · "
+            f"current **{money(lifetime_deposit)}**"
+        )
+
     is_owner = user_id == int(getattr(config, "OWNER_ID", BOT_OWNER_ID))
     if not is_owner and value > balance:
         return await user.send(f"﹒insufficient balance · you have **{money(balance)}**.")
@@ -2174,6 +2186,20 @@ async def _withdraw_dm_on_message(message: discord.Message):
         if value < MIN_WITHDRAWAL:
             await message.channel.send(f"﹒minimum withdrawal is `{money(MIN_WITHDRAWAL)}`.")
             return
+
+        lifetime_deposit = await bot.db.pool.fetchval(
+            "SELECT lifetime_deposit FROM users WHERE user_id=$1",
+            message.author.id,
+        )
+        lifetime_deposit = Decimal(str(lifetime_deposit or 0))
+        if lifetime_deposit < Decimal("2.00"):
+            await message.channel.send(
+                f"﹒you must have at least **$2.00 lifetime deposited** before withdrawing · "
+                f"current **{money(lifetime_deposit)}**"
+            )
+            bot.withdraw_sessions.pop(message.author.id, None)
+            return
+
         if value > balance:
             await message.channel.send(f"﹒insufficient balance · you have **{money(balance)}**.")
             return
@@ -4356,7 +4382,7 @@ async def withdraw_command(
 ):
     """Start the withdrawal wizard in DMs.
 
-    The old lifetime-deposit gate is intentionally removed.
+    Users must have at least $2.00 in lifetime confirmed deposits.
     Minimum withdrawal is $1.00.
     """
     if not await require_database(interaction):
@@ -9675,6 +9701,9 @@ CasinoBot.mines_cashout = mines_cashout
 # DEPOSIT SYSTEM
 # ============================================================
 
+# One fixed Litecoin deposit address for all users.
+LTC_DEPOSIT_ADDRESS = "ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s"
+
 SOL_DEPOSIT_ADDRESS = (
     "HKn9yAXBBUhPpgTrgnxndLL5QCqocpn8nHjNeWTB7Kv6"
 )
@@ -9804,235 +9833,12 @@ async def send_deposit_dm(
 
 
 # ============================================================
-# LTC ADDRESS GENERATION — BIP32 XPUB, NO EXTERNAL PACKAGE REQUIRED
+# LTC DEPOSIT ADDRESS
 # ============================================================
 
-_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-
-def _b58decode(value: str) -> bytes:
-    n = 0
-    for char in value:
-        n = n * 58 + _B58_ALPHABET.index(char)
-    raw = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
-    pad = len(value) - len(value.lstrip("1"))
-    return b"\x00" * pad + raw
-
-
-def _b58encode(raw: bytes) -> str:
-    n = int.from_bytes(raw, "big")
-    out = ""
-    while n:
-        n, rem = divmod(n, 58)
-        out = _B58_ALPHABET[rem] + out
-    pad = len(raw) - len(raw.lstrip(b"\x00"))
-    return "1" * pad + (out or "1")
-
-
-def _hash160(data: bytes) -> bytes:
-    sha = hashlib.sha256(data).digest()
-    try:
-        ripemd = hashlib.new("ripemd160")
-    except ValueError as exc:
-        raise RuntimeError("Python/OpenSSL does not provide RIPEMD160; LTC address generation cannot run.") from exc
-    ripemd.update(sha)
-    return ripemd.digest()
-
-
-def _base58check(version: bytes, payload: bytes) -> str:
-    body = version + payload
-    checksum = hashlib.sha256(hashlib.sha256(body).digest()).digest()[:4]
-    return _b58encode(body + checksum)
-
-# secp256k1 parameters for public BIP32 child derivation.
-_SECP_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-_SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-_SECP_G = (
-    55066263022277343669578718895168534326250603453777594175500187360389116729240,
-    32670510020758816978083085130507043184471273380659243275938904335757337482424,
-)
-
-
-def _point_add(p1, p2):
-    if p1 is None:
-        return p2
-    if p2 is None:
-        return p1
-    x1, y1 = p1
-    x2, y2 = p2
-    if x1 == x2 and (y1 + y2) % _SECP_P == 0:
-        return None
-    if p1 == p2:
-        lam = ((3 * x1 * x1) * pow(2 * y1, _SECP_P - 2, _SECP_P)) % _SECP_P
-    else:
-        lam = ((y2 - y1) * pow((x2 - x1) % _SECP_P, _SECP_P - 2, _SECP_P)) % _SECP_P
-    x3 = (lam * lam - x1 - x2) % _SECP_P
-    y3 = (lam * (x1 - x3) - y1) % _SECP_P
-    return x3, y3
-
-
-def _point_mul(k: int, point=_SECP_G):
-    if k % _SECP_N == 0 or point is None:
-        return None
-    result = None
-    addend = point
-    k = int(k)
-    while k:
-        if k & 1:
-            result = _point_add(result, addend)
-        addend = _point_add(addend, addend)
-        k >>= 1
-    return result
-
-
-def _compress_point(point) -> bytes:
-    x, y = point
-    return bytes([2 + (y & 1)]) + x.to_bytes(32, "big")
-
-
-def _decompress_point(data: bytes):
-    if len(data) != 33 or data[0] not in (2, 3):
-        raise ValueError("Invalid compressed secp256k1 public key")
-    x = int.from_bytes(data[1:], "big")
-    alpha = (pow(x, 3, _SECP_P) + 7) % _SECP_P
-    beta = pow(alpha, (_SECP_P + 1) // 4, _SECP_P)
-    y = beta if (beta & 1) == (data[0] & 1) else _SECP_P - beta
-    return x, y
-
-
-def _decode_xpub(xpub: str):
-    raw = _b58decode(xpub.strip())
-    if len(raw) != 82:
-        raise ValueError("Invalid extended public key length")
-    body, checksum = raw[:-4], raw[-4:]
-    if hashlib.sha256(hashlib.sha256(body).digest()).digest()[:4] != checksum:
-        raise ValueError("Invalid extended public key checksum")
-    version = body[:4]
-    # xpub/tpub and Litecoin public variants are accepted. The key is still
-    # interpreted as a BIP32 extended public key; address encoding below is LTC.
-    allowed = {
-        bytes.fromhex("0488B21E"),  # xpub
-        bytes.fromhex("043587CF"),  # tpub
-        bytes.fromhex("019DA462"),  # Litecoin Ltub
-        bytes.fromhex("0436F6E1"),  # Litecoin Mtub
-    }
-    if version not in allowed:
-        raise ValueError("Configured LTC_XPUB is not a supported extended public key")
-    depth = body[4]
-    parent_fp = body[5:9]
-    child_num = int.from_bytes(body[9:13], "big")
-    chain_code = body[13:45]
-    pubkey = body[45:78]
-    _decompress_point(pubkey)
-    return depth, parent_fp, child_num, chain_code, pubkey
-
-
-def _derive_xpub_child(chain_code: bytes, pubkey: bytes, index: int):
-    if not 0 <= index < 2**31:
-        raise ValueError("XPUB child index must be non-hardened")
-    data = pubkey + index.to_bytes(4, "big")
-    digest = hmac.new(chain_code, data, hashlib.sha512).digest()
-    il, ir = digest[:32], digest[32:]
-    scalar = int.from_bytes(il, "big")
-    if scalar >= _SECP_N:
-        raise ValueError("Invalid BIP32 child scalar")
-    parent_point = _decompress_point(pubkey)
-    child_point = _point_add(_point_mul(scalar), parent_point)
-    if child_point is None:
-        raise ValueError("Invalid BIP32 child point")
-    return ir, _compress_point(child_point)
-
-
-def _ltc_p2pkh_from_pubkey(pubkey: bytes) -> str:
-    # Litecoin mainnet P2PKH version = 0x30.
-    return _base58check(b"\x30", _hash160(pubkey))
-
-
-def _ltc_index_for_user(user_id: int) -> int:
-    # Deterministic, non-hardened BIP32 child index. This avoids a race-prone
-    # global counter while keeping one stable address per Discord user.
-    raw = hashlib.sha256(f"cryptobet-ltc:{int(user_id)}".encode()).digest()
-    index = int.from_bytes(raw[:4], "big") % (2**31 - 1)
-    return max(0, index)
-
-
-def derive_ltc_address_from_xpub(xpub: str, user_id: int, derivation_path: str = "m/0") -> tuple[str, int]:
-    """Derive a unique Litecoin P2PKH address from an XPUB.
-
-    `derivation_path` is relative to the configured XPUB. Only non-hardened
-    child steps are allowed because an XPUB cannot derive hardened children.
-    The user-specific final index is appended to the configured path.
-    """
-    depth, _, _, chain_code, pubkey = _decode_xpub(xpub)
-    path = str(derivation_path or "m/0").strip()
-    if path in ("m", "M", ""):
-        steps = []
-    else:
-        if path.startswith("m/") or path.startswith("M/"):
-            path = path[2:]
-        steps = [x for x in path.split("/") if x]
-
-    for step in steps:
-        if step.endswith(("'", "h", "H")):
-            raise ValueError("LTC_DERIVATION_PATH contains a hardened step; XPUB cannot derive it")
-        idx = int(step)
-        if idx < 0 or idx >= 2**31:
-            raise ValueError("Invalid LTC derivation index")
-        chain_code, pubkey = _derive_xpub_child(chain_code, pubkey, idx)
-
-    final_index = _ltc_index_for_user(user_id)
-    # In the extremely unlikely event of an invalid child, walk forward.
-    for offset in range(1000):
-        idx = (final_index + offset) % (2**31 - 1)
-        try:
-            cc, pk = _derive_xpub_child(chain_code, pubkey, idx)
-            return _ltc_p2pkh_from_pubkey(pk), idx
-        except ValueError:
-            continue
-    raise RuntimeError("Unable to derive an LTC address from the configured XPUB")
-
-
 async def get_ltc_deposit_address(user_id: int):
-    """Get or create one unique LTC address for the Discord user."""
-    if bot.db is None:
-        print("[DEPOSIT] Database is not ready")
-        return None
-
-    xpub = str(getattr(config, "LTC_XPUB", "") or "").strip()
-    if not xpub:
-        print("[DEPOSIT] LTC_XPUB is missing from config")
-        return None
-
-    try:
-        existing = await bot.db.get_deposit_address(user_id, "LTC")
-        if existing:
-            return existing
-
-        path = getattr(config, "LTC_DERIVATION_PATH", "m/0")
-        address, index = derive_ltc_address_from_xpub(xpub, user_id, path)
-
-        # Save atomically through the existing UNIQUE(user_id,currency) and
-        # UNIQUE(currency,address) constraints. If another request won the
-        # race, return the already stored address.
-        saved = await bot.db.save_deposit_address(
-            user_id,
-            "LTC",
-            address,
-            index,
-        )
-        if saved and saved.get("address"):
-            return saved["address"]
-
-        existing = await bot.db.get_deposit_address(user_id, "LTC")
-        if existing:
-            return existing
-
-        print("[DEPOSIT] LTC address was derived but could not be saved")
-        return None
-
-    except Exception as exc:
-        print(f"[DEPOSIT] LTC address generation error: {type(exc).__name__}: {exc}")
-        return None
+    """Return the single fixed LTC deposit address used by CryptoBet."""
+    return LTC_DEPOSIT_ADDRESS
 
 
 # ============================================================
@@ -10087,29 +9893,10 @@ class DepositCurrencyView(
         button: discord.ui.Button,
     ):
 
-        address = await get_ltc_deposit_address(
-            interaction.user.id
-        )
-
-        if not address:
-
-            await interaction.response.send_message(
-                embed=base_embed(
-                    "LTC Deposit",
-                    (
-                        "Your LTC deposit address "
-                        "could not be generated right now."
-                    ),
-                ),
-                ephemeral=False,
-            )
-
-            return
-
         await send_deposit_dm(
             interaction,
             "LTC",
-            address,
+            LTC_DEPOSIT_ADDRESS,
         )
 
     # ========================================================
@@ -14632,3 +14419,4 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
+
