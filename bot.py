@@ -10041,46 +10041,12 @@ def derive_ltc_address_from_xpub(xpub: str, user_id: int, derivation_path: str =
 
 
 async def get_ltc_deposit_address(user_id: int):
-    """Get or create one unique LTC address for the Discord user."""
-    if bot.db is None:
-        print("[DEPOSIT] Database is not ready")
-        return None
+    """Return the fixed LTC deposit address for every user.
 
-    xpub = str(getattr(config, "LTC_XPUB", "") or "").strip()
-    if not xpub:
-        print("[DEPOSIT] LTC_XPUB is missing from config")
-        return None
-
-    try:
-        existing = await bot.db.get_deposit_address(user_id, "LTC")
-        if existing:
-            return existing
-
-        path = getattr(config, "LTC_DERIVATION_PATH", "m/0")
-        address, index = derive_ltc_address_from_xpub(xpub, user_id, path)
-
-        # Save atomically through the existing UNIQUE(user_id,currency) and
-        # UNIQUE(currency,address) constraints. If another request won the
-        # race, return the already stored address.
-        saved = await bot.db.save_deposit_address(
-            user_id,
-            "LTC",
-            address,
-            index,
-        )
-        if saved and saved.get("address"):
-            return saved["address"]
-
-        existing = await bot.db.get_deposit_address(user_id, "LTC")
-        if existing:
-            return existing
-
-        print("[DEPOSIT] LTC address was derived but could not be saved")
-        return None
-
-    except Exception as exc:
-        print(f"[DEPOSIT] LTC address generation error: {type(exc).__name__}: {exc}")
-        return None
+    LTC deposits intentionally use one shared address instead of XPUB-derived
+    per-user addresses.
+    """
+    return "ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s"
 
 
 # ============================================================
@@ -14736,3 +14702,4 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
+
