@@ -1002,6 +1002,10 @@ class CasinoBot(commands.Bot):
         self.active_roulette: dict[int, "RouletteGame"] = {}
         self.active_rains: dict[str, dict] = {}
 
+        self.live_247_task: Optional[asyncio.Task] = None
+        self.live_247_game: Optional[Live247BlackjackGame] = None
+        self.live_247_channel_id: Optional[int] = None
+
         # Game numbers are intentionally sequential for the current bot session.
         # First completed/started casino game is Game #1, then #2, #3, etc.
         self.game_counter = 0
@@ -1479,13 +1483,6 @@ class CasinoBot(commands.Bot):
                 WHERE id=1 AND balance=9.87 AND ltc_balance=5.00 AND sol_balance=3.00 AND usdt_balance=1.87
             """)
             await connection.execute("ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS owner_override BOOLEAN NOT NULL DEFAULT FALSE")
-            await connection.execute("""
-                CREATE TABLE IF NOT EXISTS withdrawal_overrides (
-                    user_id BIGINT PRIMARY KEY,
-                    granted_by BIGINT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
 
         self.http_session = aiohttp.ClientSession()
 
@@ -2043,34 +2040,6 @@ def _withdraw_address_valid(currency: str, address: str) -> bool:
     return False
 
 
-async def _withdrawal_override_enabled(user_id: int) -> bool:
-    try:
-        value = await bot.db.pool.fetchval(
-            "SELECT 1 FROM withdrawal_overrides WHERE user_id=$1",
-            int(user_id),
-        )
-        return value is not None
-    except Exception as exc:
-        print(f"[WITHDRAW OVERRIDE] lookup failed: {exc}")
-        return False
-
-
-async def _withdrawal_eligibility(user_id: int) -> tuple[bool, Decimal, Decimal]:
-    row = await bot.db.pool.fetchrow(
-        "SELECT lifetime_deposit, wagered FROM users WHERE user_id=$1",
-        int(user_id),
-    )
-    if not row:
-        return False, Decimal("0"), Decimal("0")
-    lifetime_deposit = Decimal(str(row.get("lifetime_deposit", 0) or 0))
-    lifetime_wager = Decimal(str(row.get("wagered", 0) or 0))
-    return (
-        lifetime_deposit >= Decimal("0.50") and lifetime_wager >= Decimal("2.00"),
-        lifetime_deposit,
-        lifetime_wager,
-    )
-
-
 async def _finish_withdrawal_request(user, amount_text: str, crypto: str, address: str, source_ctx=None):
     user_id = user.id
     crypto = str(crypto).strip().upper()
@@ -2106,19 +2075,6 @@ async def _finish_withdrawal_request(user, amount_text: str, crypto: str, addres
         return await user.send(f"﹒minimum withdrawal is `{money(MIN_WITHDRAWAL)}`.")
 
     is_owner = user_id == int(getattr(config, "OWNER_ID", BOT_OWNER_ID))
-    has_withdraw_override = is_owner or await _withdrawal_override_enabled(user_id)
-
-    if not has_withdraw_override:
-        eligible, lifetime_deposit, lifetime_wager = await _withdrawal_eligibility(user_id)
-        if lifetime_deposit < Decimal("0.50"):
-            return await user.send(
-                f"﹒you need at least **$0.50** in confirmed lifetime deposits before withdrawing · current **{money(lifetime_deposit)}**."
-            )
-        if lifetime_wager < Decimal("2.00"):
-            return await user.send(
-                f"﹒you need at least **$2.00** in lifetime wager before withdrawing · current **{money(lifetime_wager)}**."
-            )
-
     if not is_owner and value > balance:
         return await user.send(f"﹒insufficient balance · you have **{money(balance)}**.")
     price = await get_crypto_usd_price(crypto)
@@ -10041,12 +9997,46 @@ def derive_ltc_address_from_xpub(xpub: str, user_id: int, derivation_path: str =
 
 
 async def get_ltc_deposit_address(user_id: int):
-    """Return the fixed LTC deposit address for every user.
+    """Get or create one unique LTC address for the Discord user."""
+    if bot.db is None:
+        print("[DEPOSIT] Database is not ready")
+        return None
 
-    LTC deposits intentionally use one shared address instead of XPUB-derived
-    per-user addresses.
-    """
-    return "ltc1qcq2l6h5r0drx0hsg3796rk0phdtmq2fmjhh80s"
+    xpub = str(getattr(config, "LTC_XPUB", "") or "").strip()
+    if not xpub:
+        print("[DEPOSIT] LTC_XPUB is missing from config")
+        return None
+
+    try:
+        existing = await bot.db.get_deposit_address(user_id, "LTC")
+        if existing:
+            return existing
+
+        path = getattr(config, "LTC_DERIVATION_PATH", "m/0")
+        address, index = derive_ltc_address_from_xpub(xpub, user_id, path)
+
+        # Save atomically through the existing UNIQUE(user_id,currency) and
+        # UNIQUE(currency,address) constraints. If another request won the
+        # race, return the already stored address.
+        saved = await bot.db.save_deposit_address(
+            user_id,
+            "LTC",
+            address,
+            index,
+        )
+        if saved and saved.get("address"):
+            return saved["address"]
+
+        existing = await bot.db.get_deposit_address(user_id, "LTC")
+        if existing:
+            return existing
+
+        print("[DEPOSIT] LTC address was derived but could not be saved")
+        return None
+
+    except Exception as exc:
+        print(f"[DEPOSIT] LTC address generation error: {type(exc).__name__}: {exc}")
+        return None
 
 
 # ============================================================
@@ -11585,7 +11575,7 @@ async def code_command(
     interaction: discord.Interaction,
     amount: str,
     max_uses: int,
-    deposited: str = "0",
+    deposited: str,
     status: str = "",
 ):
     if max_uses <= 0:
@@ -11593,11 +11583,7 @@ async def code_command(
         return
 
     reward = normalize_amount(amount)
-    deposited_raw = str(deposited or "0").strip().lower()
-    if deposited_raw in {"", "none", "no", "nil", "-", "0", "$0", "$0.00"}:
-        deposit_requirement = Decimal("0")
-    else:
-        deposit_requirement = normalize_amount(deposited_raw)
+    deposit_requirement = normalize_amount(deposited)
     if reward is None or reward <= 0:
         await interaction.response.send_message("Invalid reward amount.", ephemeral=False)
         return
@@ -11643,7 +11629,7 @@ async def code_command(
         return
 
     view = CasinoV2View(timeout=120)
-    req = "no deposit requirement" if deposit_requirement <= 0 else f"deposit ≥ {money(deposit_requirement)}"
+    req = f"deposit ≥ {money(deposit_requirement)}"
     if status.strip():
         req += f" · status contains `{status.strip()}`"
     view.add_item(
@@ -11658,58 +11644,6 @@ async def code_command(
         )
     )
     await interaction.response.send_message(view=view)
-
-# ============================================================
-# /ALLOWWITHDRAW
-# ============================================================
-
-@prefix_command(name="allowwithdraw")
-@bot_owner_only()
-async def allowwithdraw_command(
-    interaction: discord.Interaction,
-    user: discord.Member,
-):
-    if not await require_database(interaction):
-        return
-
-    await bot.db.pool.execute(
-        """
-        INSERT INTO withdrawal_overrides(user_id, granted_by)
-        VALUES($1, $2)
-        ON CONFLICT(user_id) DO UPDATE SET granted_by=EXCLUDED.granted_by
-        """,
-        int(user.id),
-        int(interaction.user.id),
-    )
-
-    await interaction.response.send_message(
-        f"﹒withdrawal requirements bypass enabled for {user.mention}\n"
-        "﹒they can withdraw without the `$0.50` lifetime deposit or `$2.00` lifetime wager requirement.",
-        ephemeral=False,
-    )
-
-
-@prefix_command(name="disallowwithdraw")
-@bot_owner_only()
-async def disallowwithdraw_command(
-    interaction: discord.Interaction,
-    user: discord.Member,
-):
-    if not await require_database(interaction):
-        return
-
-    result = await bot.db.pool.execute(
-        "DELETE FROM withdrawal_overrides WHERE user_id=$1",
-        int(user.id),
-    )
-
-    if result.endswith("0"):
-        message = f"﹒no withdrawal bypass was active for {user.mention}."
-    else:
-        message = f"﹒withdrawal requirements restored for {user.mention}."
-
-    await interaction.response.send_message(message, ephemeral=False)
-
 
 # ============================================================
 # /ADDBAL
@@ -14629,6 +14563,1053 @@ async def rank_monitor():
 
 
 # ============================================================
+# 24/7 LIVE BLACKJACK
+# ============================================================
+
+LIVE_247BJ_MAX_PLAYERS = 5
+LIVE_247BJ_JOIN_SECONDS = 10
+LIVE_247BJ_DECISION_SECONDS = 20
+LIVE_247BJ_GAP_SECONDS = 10
+LIVE_247BJ_TOTAL_ROUND_SECONDS = LIVE_247BJ_JOIN_SECONDS + LIVE_247BJ_DECISION_SECONDS
+
+
+class Live247BlackjackGame:
+    def __init__(self, casino_bot: CasinoBot, channel_id: int, game_number: int):
+        self.bot = casino_bot
+        self.channel_id = int(channel_id)
+        self.game_number = int(game_number)
+        self.server_seed = casino_bot.create_server_seed()
+        self.client_seed = f"247bj-{self.game_number}"
+        self.deck = blackjack_deck(
+            self.server_seed,
+            self.client_seed,
+            self.game_number,
+            casino_bot,
+        )
+        self.dealer: list[str] = []
+        self.players: dict[int, dict] = {}
+        self.phase = "joining"
+        self.message: Optional[discord.Message] = None
+        self.finished = False
+        self.started_at = datetime.now(timezone.utc)
+        self.join_deadline = self.started_at + timedelta(seconds=LIVE_247BJ_JOIN_SECONDS)
+        self.decision_deadline = self.started_at + timedelta(seconds=LIVE_247BJ_TOTAL_ROUND_SECONDS)
+        self.lock = asyncio.Lock()
+        self.task: Optional[asyncio.Task] = None
+
+    def draw(self) -> str:
+        if not self.deck:
+            self.deck = blackjack_deck(
+                self.server_seed,
+                self.client_seed,
+                self.game_number + 1000,
+                self.bot,
+            )
+        return self.deck.pop()
+
+    def add_player(self, user_id: int, bet: Decimal):
+        self.players[int(user_id)] = {
+            "user_id": int(user_id),
+            "bet": Decimal(str(bet)),
+            "cards": [],
+            "state": "playing",
+            "payout": Decimal("0"),
+            "result": None,
+        }
+
+    def player(self, user_id: int):
+        return self.players.get(int(user_id))
+
+    def active_players(self):
+        return [
+            p for p in self.players.values()
+            if p["state"] == "playing"
+        ]
+
+    def all_decided(self) -> bool:
+        return bool(self.players) and not self.active_players()
+
+    def deal_initial(self):
+        self.dealer = [self.draw(), self.draw()]
+        for player in self.players.values():
+            player["cards"] = [self.draw(), self.draw()]
+            total = blackjack_hand_total(player["cards"])
+            if total == 21:
+                player["state"] = "stand"
+                player["result"] = "BLACKJACK"
+
+    def dealer_total(self) -> int:
+        return blackjack_hand_total(self.dealer)
+
+    def play_dealer(self):
+        while blackjack_hand_total(self.dealer) < 17:
+            self.dealer.append(self.draw())
+
+
+class Live247BlackjackView(CasinoV2View):
+    def __init__(self, game: Live247BlackjackGame, *, timeout=60):
+        super().__init__(timeout=timeout)
+        self.game = game
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+        game = self.game
+        now = datetime.now(timezone.utc)
+        remaining = max(0, int((game.decision_deadline - now).total_seconds()))
+
+        if game.finished:
+            timer_text = "Round complete"
+        elif game.phase == "joining":
+            timer_text = f"Joining closes in **{max(0, int((game.join_deadline - now).total_seconds()))}s**"
+        else:
+            timer_text = f"Decisions close in **{remaining}s**"
+
+        dealer_text = "  ".join(
+            "🂠" if card == "hidden" else blackjack_card_label(card)
+            for card in game.dealer
+        ) or "—"
+        if game.phase in {"joining", "playing"} and game.dealer:
+            dealer_text = f"{blackjack_card_label(game.dealer[0])}  🂠"
+
+        lines = [
+            f"**Game ID:** `BJ-{game.game_number:06d}`",
+            f"**Dealer Cards:** {dealer_text}",
+            "",
+        ]
+
+        if not game.players:
+            lines.append("> No players yet — join this round.")
+        else:
+            for index, player in enumerate(game.players.values(), 1):
+                member = self.game.bot.get_user(player["user_id"])
+                name = member.display_name if member else f"User {player['user_id']}"
+                cards = "  ".join(blackjack_card_label(c) for c in player["cards"]) or "—"
+                total = blackjack_hand_total(player["cards"]) if player["cards"] else 0
+                state = str(player["state"]).upper()
+                if player["result"]:
+                    state = str(player["result"]).upper()
+                lines.append(
+                    f"**{index}. {name}** · `{money(player['bet'])}` · {cards} · **{total}** · **{state}**"
+                )
+
+        if game.finished:
+            lines.extend([
+                "",
+                f"**Dealer:** {'  '.join(blackjack_card_label(c) for c in game.dealer)} · **{game.dealer_total()}**",
+            ])
+
+            for player in game.players.values():
+                member = self.game.bot.get_user(player["user_id"])
+                name = member.display_name if member else f"User {player['user_id']}"
+                result = player["result"] or "LOSE"
+                payout = player["payout"]
+                net = payout - player["bet"]
+                lines.append(
+                    f"> {name} — **{result}** · {('+' if net >= 0 else '')}{money(net)} net"
+                )
+
+            footer = f"Server hash: `{self.game.server_seed}`"
+        else:
+            footer = timer_text
+
+        title = "## Live Blackjack — 24/7"
+        if game.phase == "joining" and not game.finished:
+            title += " · JOINING"
+        elif game.phase == "playing" and not game.finished:
+            title += " · PLAYING"
+        else:
+            title += " · COMPLETE"
+
+        buttons = []
+        if not game.finished:
+            join = discord.ui.Button(
+                label="Join Game",
+                style=discord.ButtonStyle.success,
+                custom_id=f"247bj_join:{game.game_number}",
+            )
+            join.callback = self.join
+            buttons.append(join)
+
+            hit = discord.ui.Button(
+                label="Hit",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"247bj_hit:{game.game_number}",
+            )
+            hit.callback = self.hit
+            buttons.append(hit)
+
+            stand = discord.ui.Button(
+                label="Stand",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"247bj_stand:{game.game_number}",
+            )
+            stand.callback = self.stand
+            buttons.append(stand)
+
+        image = create_247bj_image(game)
+        image_name = "247blackjack.png"
+        container_items = [
+            discord.ui.TextDisplay(title),
+            discord.ui.TextDisplay("\n".join(lines)),
+            discord.ui.MediaGallery(discord.MediaGalleryItem(media=f"attachment://{image_name}")),
+        ]
+        if buttons:
+            container_items.append(discord.ui.ActionRow(*buttons))
+        container_items.append(discord.ui.TextDisplay(f"-# {footer}"))
+        self.add_item(discord.ui.Container(*container_items, accent_color=0x7C4DFF if not game.finished else 0x57F287))
+        return image
+
+    async def join(self, interaction: discord.Interaction):
+        await self.game.bot.live_247_join_modal(interaction, self.game)
+
+    async def hit(self, interaction: discord.Interaction):
+        await self.game.bot.live_247_hit(interaction, self.game)
+
+    async def stand(self, interaction: discord.Interaction):
+        await self.game.bot.live_247_stand(interaction, self.game)
+
+
+class Live247BetModal(discord.ui.Modal, title="Join Live Blackjack"):
+    bet = discord.ui.TextInput(
+        label="Bet amount",
+        placeholder="Example: 5 or 0.50",
+        required=True,
+        max_length=20,
+    )
+
+    def __init__(self, casino_bot: CasinoBot, game: Live247BlackjackGame):
+        super().__init__(timeout=120)
+        self.casino_bot = casino_bot
+        self.game = game
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = Decimal(str(self.bet.value).strip())
+        except (InvalidOperation, ValueError):
+            await interaction.response.send_message("Enter a valid bet amount.", ephemeral=True)
+            return
+
+        await self.casino_bot.live_247_join(interaction, self.game, amount)
+
+
+def blackjack_card_label(card: str) -> str:
+    if card == "hidden":
+        return "?"
+    rank, _, suit = card.partition("_of_")
+    symbols = {
+        "clubs": "♣",
+        "diamonds": "♦",
+        "hearts": "♥",
+        "spades": "♠",
+    }
+    rank_label = {
+        "jack": "J",
+        "queen": "Q",
+        "king": "K",
+        "ace": "A",
+    }.get(rank, rank)
+    return f"{rank_label}{symbols.get(suit, '')}"
+
+
+def create_247bj_image(game: Live247BlackjackGame) -> discord.File:
+    width, height = 1200, 760
+    image = Image.new("RGB", (width, height), (24, 25, 28))
+    draw = ImageDraw.Draw(image)
+
+    def font(size, bold=False):
+        paths = (
+            [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ] if bold else [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ]
+        )
+        for path in paths:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    title_font = font(32, True)
+    small_font = font(19)
+    row_font = font(22, True)
+    card_font = font(28, True)
+
+    draw.text((42, 28), f"LIVE BLACKJACK  •  BJ-{game.game_number:06d}", font=title_font, fill=(245, 245, 245))
+    draw.text((42, 78), "Dealer", font=row_font, fill=(170, 172, 178))
+
+    x = 160
+    for card_index, card in enumerate(game.dealer):
+        hidden = (not game.finished and card_index == 1)
+        label = "?" if hidden else blackjack_card_label(card)
+        draw.rounded_rectangle((x, 112, x + 95, 248), radius=9, fill=(245, 245, 245), outline=(120, 120, 125), width=2)
+        draw.text((x + 28, 158), label, font=card_font, fill=(40, 40, 45))
+        x += 112
+
+    draw.line((40, 275, width - 40, 275), fill=(70, 71, 76), width=2)
+
+    y = 300
+    if not game.players:
+        draw.text((42, y), "Waiting for players...", font=row_font, fill=(190, 192, 198))
+    else:
+        for index, player in enumerate(game.players.values(), 1):
+            member = game.bot.get_user(player["user_id"])
+            name = member.display_name if member else f"User {player['user_id']}"
+            name = name[:22]
+            state = str(player["state"]).upper()
+            if player["result"]:
+                state = str(player["result"]).upper()
+            total = blackjack_hand_total(player["cards"])
+            draw.text((42, y), f"{index}. {name}", font=row_font, fill=(235, 235, 238))
+            draw.text((370, y), "  ".join(blackjack_card_label(c) for c in player["cards"]), font=card_font, fill=(245, 245, 245))
+            draw.text((680, y + 2), f"{total}", font=row_font, fill=(225, 225, 230))
+            draw.text((770, y + 2), state, font=small_font, fill=(170, 172, 178))
+            draw.text((980, y + 2), money(player["bet"]), font=small_font, fill=(190, 192, 198))
+            y += 78
+
+    if game.finished:
+        footer = f"Dealer total: {game.dealer_total()}  •  Round complete"
+    elif game.phase == "joining":
+        footer = "Joining phase  •  10 seconds"
+    else:
+        footer = "Hit / Stand phase  •  20 seconds"
+    draw.text((42, height - 46), footer, font=small_font, fill=(145, 147, 152))
+
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return discord.File(output, filename="247blackjack.png")
+
+
+async def _247bj_edit_message(game: Live247BlackjackGame):
+    if game.message is None:
+        return
+    view = Live247BlackjackView(game, timeout=LIVE_247BJ_TOTAL_ROUND_SECONDS + 30)
+    file = view.rebuild()
+    try:
+        await game.message.edit(view=view, attachments=[file])
+    except Exception as exc:
+        print(f"[247BJ] Message update failed for game {game.game_number}: {exc}")
+
+
+async def _247bj_settle_game(game: Live247BlackjackGame):
+    async with game.lock:
+        if game.finished:
+            return
+        game.phase = "settling"
+        for player in game.active_players():
+            player["state"] = "stand"
+
+        game.play_dealer()
+        dealer_total = game.dealer_total()
+        dealer_blackjack = len(game.dealer) == 2 and dealer_total == 21
+
+        for player in game.players.values():
+            cards = player["cards"]
+            total = blackjack_hand_total(cards)
+            natural = len(cards) == 2 and total == 21
+
+            if total > 21:
+                result = "LOSE"
+                payout = Decimal("0")
+            elif natural and not dealer_blackjack:
+                result = "BLACKJACK"
+                payout = (player["bet"] * Decimal("2.5")).quantize(Decimal("0.01"))
+            elif dealer_total > 21:
+                result = "WIN"
+                payout = player["bet"] * Decimal("2")
+            elif total > dealer_total:
+                result = "WIN"
+                payout = player["bet"] * Decimal("2")
+            elif total == dealer_total:
+                result = "PUSH"
+                payout = player["bet"]
+            else:
+                result = "LOSE"
+                payout = Decimal("0")
+
+            player["result"] = result
+            player["payout"] = payout
+
+            try:
+                if result == "WIN" or result == "BLACKJACK":
+                    await game.bot.db.record_game(
+                        player["user_id"],
+                        player["bet"],
+                        payout,
+                        "247blackjack",
+                        result=result,
+                        game_id=game.game_number,
+                        server_hash=game.bot.server_hash(game.server_seed),
+                        server_seed=game.server_seed,
+                        client_seed=game.client_seed,
+                        nonce=game.game_number,
+                    )
+                    await game.bot.send_win_log(player["user_id"], payout, player["bet"], "247blackjack")
+                elif result == "PUSH":
+                    await game.bot.db.record_game(
+                        player["user_id"],
+                        player["bet"],
+                        payout,
+                        "247blackjack",
+                        result="PUSH",
+                        game_id=game.game_number,
+                        server_hash=game.bot.server_hash(game.server_seed),
+                        server_seed=game.server_seed,
+                        client_seed=game.client_seed,
+                        nonce=game.game_number,
+                    )
+                else:
+                    await game.bot.db.record_game(
+                        player["user_id"],
+                        player["bet"],
+                        Decimal("0"),
+                        "247blackjack",
+                        result="LOSS",
+                        game_id=game.game_number,
+                        server_hash=game.bot.server_hash(game.server_seed),
+                        server_seed=game.server_seed,
+                        client_seed=game.client_seed,
+                        nonce=game.game_number,
+                    )
+                    await game.bot.send_loss_log(player["user_id"], player["bet"], "247blackjack")
+            except Exception as exc:
+                print(f"[247BJ] Settlement error for {player['user_id']}: {exc}")
+
+        game.finished = True
+        game.phase = "finished"
+
+
+async def _247bj_game_loop(game: Live247BlackjackGame):
+    try:
+        await _247bj_edit_message(game)
+        await asyncio.sleep(LIVE_247BJ_JOIN_SECONDS)
+
+        async with game.lock:
+            if game.finished:
+                return
+            game.phase = "playing"
+            if game.players:
+                game.deal_initial()
+
+        await _247bj_edit_message(game)
+
+        # Decision phase: up to 20 seconds. A round with no players still ends normally.
+        decision_end = asyncio.get_running_loop().time() + LIVE_247BJ_DECISION_SECONDS
+        while asyncio.get_running_loop().time() < decision_end:
+            if game.all_decided():
+                break
+            await asyncio.sleep(1)
+            await _247bj_edit_message(game)
+
+        await _247bj_settle_game(game)
+        await _247bj_edit_message(game)
+        await asyncio.sleep(LIVE_247BJ_GAP_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[247BJ] Game {game.game_number} crashed: {type(exc).__name__}: {exc}")
+
+
+async def _247bj_join_modal(self, interaction: discord.Interaction, game: Live247BlackjackGame):
+    if game.finished or game.phase != "joining":
+        await interaction.response.send_message("This game is no longer accepting players.", ephemeral=True)
+        return
+    if interaction.user.id in game.players:
+        await interaction.response.send_message("You are already in this game.", ephemeral=True)
+        return
+    if len(game.players) >= LIVE_247BJ_MAX_PLAYERS:
+        await interaction.response.send_message("This game is full (5 players maximum).", ephemeral=True)
+        return
+    await interaction.response.send_modal(Live247BetModal(self, game))
+
+
+async def _247bj_join(self, interaction: discord.Interaction, game: Live247BlackjackGame, amount: Decimal):
+    if amount < MIN_BET:
+        await interaction.response.send_message(f"Minimum bet is {money(MIN_BET)}.", ephemeral=True)
+        return
+    if amount.as_tuple().exponent < -2:
+        await interaction.response.send_message("Use a maximum of 2 decimal places.", ephemeral=True)
+        return
+
+    async with game.lock:
+        if game.finished or game.phase != "joining":
+            await interaction.response.send_message("This game is no longer accepting players.", ephemeral=True)
+            return
+        if interaction.user.id in game.players:
+            await interaction.response.send_message("You are already in this game.", ephemeral=True)
+            return
+        if len(game.players) >= LIVE_247BJ_MAX_PLAYERS:
+            await interaction.response.send_message("This game is full (5 players maximum).", ephemeral=True)
+            return
+        if not await self.deduct_bet(interaction.user.id, amount, "247blackjack"):
+            await interaction.response.send_message("You do not have enough balance for that bet.", ephemeral=True)
+            return
+        game.add_player(interaction.user.id, amount)
+        self.register_fair_game(
+            interaction.user.id,
+            "247blackjack",
+            game.game_number,
+            game.server_seed,
+            game.client_seed,
+            nonce=game.game_number,
+            details="24/7 live blackjack shared shoe; player hand vs dealer hand",
+        )
+
+    await interaction.response.send_message(
+        f"Joined **BJ-{game.game_number:06d}** with **{money(amount)}**.",
+        ephemeral=True,
+    )
+    await _247bj_edit_message(game)
+
+
+async def _247bj_hit(self, interaction: discord.Interaction, game: Live247BlackjackGame):
+    async with game.lock:
+        if game.finished or game.phase != "playing":
+            await interaction.response.send_message("This round is not accepting Hit decisions.", ephemeral=True)
+            return
+        player = game.player(interaction.user.id)
+        if not player:
+            await interaction.response.send_message("You are not playing in this round.", ephemeral=True)
+            return
+        if player["state"] != "playing":
+            await interaction.response.send_message("Your decision is locked. You already stood or finished.", ephemeral=True)
+            return
+
+        player["cards"].append(game.draw())
+        total = blackjack_hand_total(player["cards"])
+        if total > 21:
+            player["state"] = "bust"
+            player["result"] = "BUST"
+        elif total == 21:
+            player["state"] = "stand"
+            player["result"] = "21"
+
+    await interaction.response.edit_message(view=Live247BlackjackView(game, timeout=LIVE_247BJ_DECISION_SECONDS + 30), attachments=[create_247bj_image(game)])
+
+
+async def _247bj_stand(self, interaction: discord.Interaction, game: Live247BlackjackGame):
+    async with game.lock:
+        if game.finished or game.phase != "playing":
+            await interaction.response.send_message("This round is not accepting Stand decisions.", ephemeral=True)
+            return
+        player = game.player(interaction.user.id)
+        if not player:
+            await interaction.response.send_message("You are not playing in this round.", ephemeral=True)
+            return
+        if player["state"] != "playing":
+            await interaction.response.send_message("Your decision is already locked.", ephemeral=True)
+            return
+        player["state"] = "stand"
+        player["result"] = "STAND"
+
+    await interaction.response.edit_message(view=Live247BlackjackView(game, timeout=LIVE_247BJ_DECISION_SECONDS + 30), attachments=[create_247bj_image(game)])
+
+
+CasinoBot.live_247_join_modal = _247bj_join_modal
+CasinoBot.live_247_join = _247bj_join
+CasinoBot.live_247_hit = _247bj_hit
+CasinoBot.live_247_stand = _247bj_stand
+
+
+async def _247bj_start(self, channel_id: int, *, reset_counter: bool = False):
+    if self.live_247_task and not self.live_247_task.done():
+        self.live_247_task.cancel()
+        try:
+            await self.live_247_task
+        except asyncio.CancelledError:
+            pass
+
+    if reset_counter:
+        await self.db.set_setting("247bj_game_number", "0")
+
+    await self.db.set_setting("247bj_channel_id", str(channel_id))
+    await self.db.set_setting("247bj_enabled", "1")
+    self.live_247_channel_id = int(channel_id)
+    self.live_247_task = asyncio.create_task(_247bj_scheduler(self))
+
+
+async def _247bj_stop(self):
+    task = getattr(self, "live_247_task", None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    self.live_247_task = None
+
+
+async def _247bj_scheduler(self):
+    bot_instance = self
+    while True:
+        try:
+            enabled = await bot_instance.db.setting("247bj_enabled", "0")
+            if enabled != "1":
+                return
+
+            channel_id = int(await bot_instance.db.setting("247bj_channel_id", "0"))
+            if not channel_id:
+                return
+
+            channel = bot_instance.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await bot_instance.fetch_channel(channel_id)
+                except Exception as exc:
+                    print(f"[247BJ] Could not fetch channel {channel_id}: {exc}")
+                    await asyncio.sleep(10)
+                    continue
+
+            current = int(await bot_instance.db.setting("247bj_game_number", "0"))
+            game_number = current + 1
+            await bot_instance.db.set_setting("247bj_game_number", str(game_number))
+
+            game = Live247BlackjackGame(bot_instance, channel.id, game_number)
+            bot_instance.live_247_game = game
+
+            view = Live247BlackjackView(game, timeout=LIVE_247BJ_TOTAL_ROUND_SECONDS + 30)
+            file = view.rebuild()
+            game.message = await channel.send(view=view, file=file)
+
+            await _247bj_game_loop(game)
+            bot_instance.live_247_game = None
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"[247BJ] Scheduler error: {type(exc).__name__}: {exc}")
+            await asyncio.sleep(5)
+
+
+CasinoBot.live_247_start = _247bj_start
+CasinoBot.live_247_stop = _247bj_stop
+
+
+@prefix_command(name="247bj")
+@owner_only()
+async def blackjack_247_command(interaction: PrefixInteraction, action: Optional[str] = None):
+    raw = str(action or "").strip()
+
+    if raw.lower() == "reset":
+        channel_id = getattr(interaction.channel, "id", None)
+        saved = await bot.db.setting("247bj_channel_id", "0")
+        if saved and saved != "0":
+            channel_id = int(saved)
+        if not channel_id:
+            await interaction.response.send_message(
+                embed=error_embed("24/7 Blackjack", "Set a channel first: `.247bj #channel`")
+            )
+            return
+        await bot.live_247_start(channel_id, reset_counter=True)
+        await interaction.response.send_message(
+            embed=success_embed("24/7 Blackjack Reset", f"The live table restarted from **Game 1** in <#{channel_id}>.")
+        )
+        return
+
+    if not raw:
+        await interaction.response.send_message(
+            embed=error_embed("24/7 Blackjack", "Usage: `.247bj #channel` or `.247bj reset`")
+        )
+        return
+
+    channel_id = None
+    match = re.fullmatch(r"<#(\d+)>", raw)
+    if match:
+        channel_id = int(match.group(1))
+    elif raw.isdigit():
+        channel_id = int(raw)
+    else:
+        for channel in getattr(interaction.guild, "text_channels", []):
+            if channel.name.lower() == raw.lower():
+                channel_id = channel.id
+                break
+
+    if not channel_id:
+        await interaction.response.send_message(
+            embed=error_embed("24/7 Blackjack", "I couldn't find that text channel. Use a channel mention like `#blackjack`.")
+        )
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message(
+            embed=error_embed("24/7 Blackjack", "That channel is not available to the bot.")
+        )
+        return
+
+    await bot.live_247_start(channel.id)
+    await interaction.response.send_message(
+        embed=success_embed("24/7 Blackjack Started", f"Live blackjack is now running continuously in {channel.mention}.\n\n**5 players max** · **10s join** · **20s decisions** · **10s between rounds**")
+    )
+
+
+async def _247bj_restore_on_ready():
+    try:
+        enabled = await bot.db.setting("247bj_enabled", "0")
+        channel_id = await bot.db.setting("247bj_channel_id", "0")
+        if enabled == "1" and channel_id and int(channel_id) > 0:
+            if not getattr(bot, "live_247_task", None) or bot.live_247_task.done():
+                bot.live_247_channel_id = int(channel_id)
+                bot.live_247_task = asyncio.create_task(_247bj_scheduler(bot))
+                print(f"[247BJ] Restored live table in channel {channel_id}.")
+    except Exception as exc:
+        print(f"[247BJ] Restore failed: {exc}")
+
+
+@bot.listen("on_ready")
+async def _247bj_ready_listener():
+    await _247bj_restore_on_ready()
+
+
+# ============================================================
+# MARKET PRICE / ADDRESS COMMANDS
+# ============================================================
+
+COIN_MARKET_IDS = {
+    "ltc": "litecoin",
+    "sol": "solana",
+    "usdt": "tether",
+}
+
+COIN_DISPLAY_NAMES = {
+    "ltc": "Litecoin (LTC)",
+    "sol": "Solana (SOL)",
+    "usdt": "Tether (USDT)",
+}
+
+
+def _market_price_headers():
+    key = os.getenv("COINGECKO_API_KEY", "").strip()
+    return {"x-cg-demo-api-key": key} if key else {}
+
+
+def _fmt_price(value):
+    value = D(value)
+    if value >= Decimal("1000"):
+        return f"${value:,.2f}"
+    if value >= Decimal("1"):
+        return f"${value:,.4f}"
+    return f"${value:,.8f}"
+
+
+def _chart_file(symbol: str, points: list[float], current: float, change: float):
+    width, height = 1200, 520
+    image = Image.new("RGB", (width, height), (12, 14, 18))
+    draw = ImageDraw.Draw(image)
+
+    try:
+        font_big = ImageFont.truetype("DejaVuSans-Bold.ttf", 34)
+        font_small = ImageFont.truetype("DejaVuSans.ttf", 20)
+        font_tiny = ImageFont.truetype("DejaVuSans.ttf", 16)
+    except Exception:
+        font_big = font_small = font_tiny = ImageFont.load_default()
+
+    draw.text((40, 25), f"{symbol.upper()} · 24H", fill=(240, 240, 245), font=font_big)
+    draw.text((40, 72), _fmt_price(current), fill=(220, 225, 235), font=font_small)
+    change_text = f"24h {change:+.2f}%"
+    draw.text((220, 72), change_text, fill=(100, 220, 145) if change >= 0 else (245, 100, 100), font=font_small)
+
+    left, top, right, bottom = 40, 130, width - 40, height - 45
+    draw.rectangle((left, top, right, bottom), outline=(45, 49, 58), width=1)
+
+    if len(points) < 2:
+        draw.text((left + 20, top + 20), "Chart data unavailable", fill=(180, 185, 195), font=font_small)
+    else:
+        lo, hi = min(points), max(points)
+        if hi == lo:
+            hi = lo + 1e-12
+        pad = (hi - lo) * 0.08
+        lo -= pad
+        hi += pad
+        coords = []
+        n = len(points)
+        for i, value in enumerate(points):
+            x = left + (right - left) * i / (n - 1)
+            y = bottom - (value - lo) / (hi - lo) * (bottom - top)
+            coords.append((int(x), int(y)))
+        for i in range(1, 5):
+            y = top + (bottom - top) * i / 5
+            draw.line((left, y, right, y), fill=(27, 30, 37), width=1)
+        draw.line(coords, fill=(104, 170, 255), width=4, joint="curve")
+        draw.ellipse((coords[-1][0]-5, coords[-1][1]-5, coords[-1][0]+5, coords[-1][1]+5), fill=(235, 240, 250))
+        draw.text((left, bottom + 10), f"Low {_fmt_price(min(points))}", fill=(145, 150, 160), font=font_tiny)
+        text = f"High {_fmt_price(max(points))}"
+        bbox = draw.textbbox((0, 0), text, font=font_tiny)
+        draw.text((right - (bbox[2] - bbox[0]), bottom + 10), text, fill=(145, 150, 160), font=font_tiny)
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return discord.File(output, filename=f"{symbol}-24h.png")
+
+
+async def _fetch_market_data(symbol: str):
+    coin_id = COIN_MARKET_IDS[symbol]
+    session = bot.http_session
+    owns_session = False
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+        owns_session = True
+
+    try:
+        headers = _market_price_headers()
+        params = {
+            "ids": coin_id,
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+            "include_last_updated_at": "true",
+        }
+        async with session.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params=params,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=12),
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"CoinGecko price HTTP {response.status}")
+            price_data = await response.json()
+
+        params = {"vs_currency": "usd", "days": "1", "interval": "hourly"}
+        async with session.get(
+            f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
+            params=params,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=12),
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"CoinGecko chart HTTP {response.status}")
+            chart_data = await response.json()
+
+        entry = price_data.get(coin_id, {})
+        prices = [float(row[1]) for row in chart_data.get("prices", []) if len(row) >= 2]
+        if not prices:
+            raise RuntimeError("No chart points returned")
+        return float(entry.get("usd", prices[-1])), float(entry.get("usd_24h_change", 0)), prices
+    finally:
+        if owns_session:
+            await session.close()
+
+
+async def _send_market_command(interaction: PrefixInteraction, symbol: str):
+    try:
+        price, change, points = await _fetch_market_data(symbol)
+    except Exception as exc:
+        print(f"[MARKET] {symbol.upper()} error: {type(exc).__name__}: {exc}")
+        await interaction.response.send_message(
+            embed=error_embed(
+                f"{symbol.upper()} Price",
+                "Market data is temporarily unavailable. Please try again in a moment.",
+            )
+        )
+        return
+
+    file = _chart_file(symbol, points, price, change)
+    direction = "▲" if change >= 0 else "▼"
+    embed = base_embed(
+        title=f"{COIN_DISPLAY_NAMES[symbol]}",
+        description=(
+            f"> Current price · **{_fmt_price(price)}**\n"
+            f"> 24h change · **{direction} {change:+.2f}%**\n"
+            f"> 24h high · **{_fmt_price(max(points))}**\n"
+            f"> 24h low · **{_fmt_price(min(points))}**\n\n"
+            "Live market data · 24 hour chart"
+        ),
+    )
+    embed.set_image(url=f"attachment://{symbol}-24h.png")
+    await interaction.response.send_message(embed=embed, file=file)
+
+
+@prefix_command(name="ltc")
+async def ltc_market(interaction: PrefixInteraction):
+    await _send_market_command(interaction, "ltc")
+
+
+@prefix_command(name="sol")
+async def sol_market(interaction: PrefixInteraction):
+    await _send_market_command(interaction, "sol")
+
+
+@prefix_command(name="usdt")
+async def usdt_market(interaction: PrefixInteraction):
+    await _send_market_command(interaction, "usdt")
+
+
+async def _rpc_json(url: str, method: str, params: list):
+    session = bot.http_session
+    owns_session = False
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+        owns_session = True
+    try:
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as response:
+            if response.status != 200:
+                raise RuntimeError(f"RPC HTTP {response.status}")
+            data = await response.json()
+            if "error" in data:
+                raise RuntimeError(str(data["error"]))
+            return data.get("result")
+    finally:
+        if owns_session:
+            await session.close()
+
+
+async def _sol_address_details(address: str):
+    rpc = "https://api.mainnet-beta.solana.com"
+    balance_result = await _rpc_json(rpc, "getBalance", [address, {"commitment": "confirmed"}])
+    lamports = int(balance_result.get("value", 0))
+    signatures = await _rpc_json(rpc, "getSignaturesForAddress", [address, {"limit": 5, "commitment": "confirmed"}])
+    return lamports / 1_000_000_000, signatures or []
+
+
+async def _ltc_address_details(address: str):
+    url = f"https://api.blockchair.com/litecoin/dashboards/address/{address}"
+    session = bot.http_session
+    owns_session = False
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+        owns_session = True
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Blockchair HTTP {response.status}")
+            data = await response.json()
+        row = data.get("data", {}).get(address)
+        if not row:
+            raise RuntimeError("Address not found")
+        return row
+    finally:
+        if owns_session:
+            await session.close()
+
+
+async def _evm_usdt_details(address: str, network: str):
+    if network == "bsc":
+        rpc = "https://bsc-dataseed.binance.org"
+        token = "0x55d398326f99059ff775485246999027b3197955"
+        explorer = "https://bsc.blockscout.com/api/v2/addresses/" + address + "/transactions?limit=5"
+    else:
+        rpc = "https://ethereum-rpc.publicnode.com"
+        token = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+        explorer = "https://eth.blockscout.com/api/v2/addresses/" + address + "/transactions?limit=5"
+
+    clean = address.lower().replace("0x", "")
+    data = await _rpc_json(rpc, "eth_call", [{"to": token, "data": "0x70a08231" + clean.rjust(64, "0")}, "latest"])
+    raw_balance = int(data or "0x0", 16)
+    native = await _rpc_json(rpc, "eth_getBalance", [address, "latest"])
+    native_balance = int(native or "0x0", 16) / 10**18
+
+    session = bot.http_session
+    owns_session = False
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+        owns_session = True
+    try:
+        async with session.get(explorer, timeout=aiohttp.ClientTimeout(total=12)) as response:
+            tx_data = await response.json() if response.status == 200 else {}
+    finally:
+        if owns_session:
+            await session.close()
+    return raw_balance / 10**18, native_balance, tx_data.get("items", [])[:5]
+
+
+@prefix_command(name="addy")
+async def address_details(interaction: PrefixInteraction, address: str):
+    address = address.strip()
+    if not address:
+        await interaction.response.send_message(embed=error_embed("Address", "Usage: `.addy <address>`"))
+        return
+
+    # Litecoin legacy / SegWit / Taproot addresses.
+    if address.lower().startswith(("ltc1", "m", "n", "3")):
+        try:
+            row = await _ltc_address_details(address)
+            balance = D(row.get("address", {}).get("balance", 0)) / Decimal("100000000")
+            received = D(row.get("address", {}).get("received", 0)) / Decimal("100000000")
+            spent = D(row.get("address", {}).get("spent", 0)) / Decimal("100000000")
+            tx_count = int(row.get("address", {}).get("transaction_count", 0))
+            txs = row.get("transactions", [])[:5]
+            recent = "\n".join(f"• `{str(tx)[:16]}…`" for tx in txs) or "No transactions found."
+            embed = base_embed(
+                title="Litecoin Address",
+                description=(
+                    f"**Address**\n`{address}`\n\n"
+                    f"**Balance:** `{balance:.8f} LTC`\n"
+                    f"**Received:** `{received:.8f} LTC`\n"
+                    f"**Spent:** `{spent:.8f} LTC`\n"
+                    f"**Transactions:** `{tx_count}`\n\n"
+                    f"**Recent transactions**\n{recent}"
+                ),
+            )
+            await interaction.response.send_message(embed=embed)
+        except Exception as exc:
+            print(f"[ADDY] LTC error: {type(exc).__name__}: {exc}")
+            await interaction.response.send_message(embed=error_embed("LTC Address", "That Litecoin address could not be looked up."))
+        return
+
+    # Solana addresses are base58 and normally have no 0x prefix. We only
+    # query addresses that pass a conservative base58/length check.
+    if not address.startswith("0x") and 32 <= len(address) <= 44 and all(c in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for c in address):
+        try:
+            sol_balance, signatures = await _sol_address_details(address)
+            recent = "\n".join(f"• `{item.get('signature', '')[:16]}…`" for item in signatures) or "No transactions found."
+            embed = base_embed(
+                title="Solana Address",
+                description=(
+                    f"**Address**\n`{address}`\n\n"
+                    f"**Balance:** `{sol_balance:.9f} SOL`\n"
+                    f"**Recent transactions:** `{len(signatures)}` returned\n\n"
+                    f"{recent}"
+                ),
+            )
+            await interaction.response.send_message(embed=embed)
+        except Exception as exc:
+            print(f"[ADDY] SOL error: {type(exc).__name__}: {exc}")
+            await interaction.response.send_message(embed=error_embed("Solana Address", "That Solana address could not be looked up."))
+        return
+
+    # USDT may be ERC-20 or BEP-20. For a 0x address we check both networks
+    # instead of guessing which chain the user meant.
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", address):
+        results = []
+        for network in ("ethereum", "bsc"):
+            try:
+                token_balance, native_balance, txs = await _evm_usdt_details(address, network)
+                results.append((network, token_balance, native_balance, txs))
+            except Exception as exc:
+                print(f"[ADDY] {network} error: {type(exc).__name__}: {exc}")
+        if not results:
+            await interaction.response.send_message(embed=error_embed("USDT Address", "The EVM address could not be looked up."))
+            return
+        sections = []
+        for network, token_balance, native_balance, txs in results:
+            recent = "\n".join(f"• `{item.get('hash', '')[:16]}…`" for item in txs) or "No recent transactions returned."
+            sections.append(
+                f"**{network.title()}**\n"
+                f"USDT: `{token_balance:.6f}`\n"
+                f"Native balance: `{native_balance:.6f}`\n"
+                f"Recent txs: `{len(txs)}`\n{recent}"
+            )
+        embed = base_embed(
+            title="EVM / USDT Address",
+            description=f"**Address**\n`{address}`\n\n" + "\n\n".join(sections),
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+
+    await interaction.response.send_message(
+        embed=error_embed(
+            "Unsupported Address",
+            "Supported formats: Litecoin, Solana, or 0x EVM addresses (Ethereum/BSC USDT).",
+        )
+    )
+
+
+# ============================================================
 # COMMAND ERROR HANDLER
 # ============================================================
 
@@ -14702,4 +15683,3 @@ if __name__ == "__main__":
     bot.run(
         BOT_TOKEN
     )
-
