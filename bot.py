@@ -1061,6 +1061,7 @@ class MinesGame:
 
         self.opened: set[int] = set()
         self.finished = False
+        self.action_lock = asyncio.Lock()
 
     @property
     def multiplier(self) -> Decimal:
@@ -1092,8 +1093,9 @@ class MinesGame:
         )
 
 
-def create_mines_board_image(game: MinesGame) -> discord.File:
+def create_mines_board_image(game: MinesGame, *, concealed: Optional[set[int]] = None) -> discord.File:
     """Render a fresh 5x5 Waifu Mines board for each state change."""
+    concealed = concealed or set()
     W, H = 1200, 720
     im=Image.new("RGB",(W,H),(24,9,43)); d=ImageDraw.Draw(im)
     def f(sz,bold=False):
@@ -1123,10 +1125,10 @@ def create_mines_board_image(game: MinesGame) -> discord.File:
     bx,by,tile,gap=48,142,88,10
     for i in range(25):
         row,col=divmod(i,5); x=bx+col*(tile+gap); y=by+row*(tile+gap)
-        opened=i in game.opened
-        is_bomb=bool(game.finished and i in game.bombs)
+        opened=i in game.opened and i not in concealed
+        is_bomb=bool(game.finished and i in game.bombs and i not in concealed)
         if is_bomb: fill=(91,24,31); outline=(235,76,83); symbol="✹"; color=(255,135,139)
-        elif opened or game.finished: fill=(13,77,47); outline=(45,235,130); symbol="◆"; color=green
+        elif opened: fill=(13,77,47); outline=(45,235,130); symbol="◆"; color=green
         else: fill=(52,27,77); outline=(103,60,143); symbol="?"; color=(183,163,205)
         d.rounded_rectangle((x,y,x+tile,y+tile),radius=13,fill=fill,outline=outline,width=3)
         box=d.textbbox((0,0),symbol,font=f(35,True)); d.text((x+(tile-(box[2]-box[0]))//2,y+(tile-(box[3]-box[1]))//2-4),symbol,font=f(35,True),fill=color)
@@ -1148,6 +1150,55 @@ def create_mines_board_image(game: MinesGame) -> discord.File:
     d.text((48,670),status,font=f(20,True),fill=(255,115,120) if game.finished else green)
     out=io.BytesIO(); im.save(out,format="PNG",optimize=True); out.seek(0)
     return discord.File(out,filename="mines_board.png")
+
+
+def create_mines_board_gif(game: MinesGame, flip_index: Optional[int] = None) -> discord.File:
+    """Render the current board as a GIF, flipping only the tile just selected."""
+    import math
+
+    def render_board(concealed=None):
+        source = create_mines_board_image(game, concealed=concealed)
+        try:
+            return Image.open(io.BytesIO(source.fp.getvalue())).convert("RGB")
+        finally:
+            source.close()
+
+    final_frame = render_board()
+    frames = []
+    if flip_index is None or not 0 <= flip_index < 25:
+        frames = [final_frame]
+        durations = [700]
+    else:
+        closed_frame = render_board({flip_index})
+        row, col = divmod(flip_index, 5)
+        x, y, tile = 48 + col * 98, 142 + row * 98, 88
+        closed_tile = closed_frame.crop((x, y, x + tile, y + tile))
+        open_tile = final_frame.crop((x, y, x + tile, y + tile))
+
+        for step in range(9):
+            progress = step / 8
+            width = max(2, round(tile * abs(math.cos(math.pi * progress))))
+            tile_source = closed_tile if progress < 0.5 else open_tile
+            scaled = tile_source.resize((width, tile), Image.Resampling.LANCZOS)
+            frame = closed_frame.copy()
+            frame.paste(scaled, (x + (tile - width) // 2, y))
+            frames.append(frame)
+
+        frames[-1] = final_frame
+        durations = [55] * 8 + [650]
+
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        disposal=2,
+        optimize=True,
+    )
+    output.seek(0)
+    return discord.File(output, filename="mines_board.gif")
 
 
 class MinesView(CasinoV2View):
@@ -1183,7 +1234,7 @@ class MinesView(CasinoV2View):
             for col_index in range(5):
                 index = row_index * 5 + col_index
                 button = discord.ui.Button(
-                    label="◆",
+                    label="?",
                     style=discord.ButtonStyle.secondary,
                     custom_id=f"mine:{index}",
                     disabled=bool(self.result_text),
@@ -1205,8 +1256,7 @@ class MinesView(CasinoV2View):
                     button.style = discord.ButtonStyle.success
                     button.disabled = True
                 else:
-                    button.label = "◆"
-                    button.emoji = EMOJI_SAFE
+                    button.label = "?"
                     button.style = discord.ButtonStyle.secondary
 
                 button.callback = self.make_callback(index)
@@ -1238,7 +1288,7 @@ class MinesView(CasinoV2View):
             discord.ui.TextDisplay(body),
             discord.ui.Separator(visible=True),
             discord.ui.MediaGallery(
-                discord.MediaGalleryItem(media="attachment://mines_board.png")
+                discord.MediaGalleryItem(media="attachment://mines_board.gif")
             ),
             *rows,
             discord.ui.ActionRow(cashout),
@@ -1316,6 +1366,10 @@ def mines_result_v2(
     view.add_item(
         discord.ui.Container(
             discord.ui.TextDisplay(text),
+            discord.ui.MediaGallery(
+                discord.ui.MediaGalleryItem(media="attachment://mines_board.gif"),
+                discord.ui.MediaGalleryItem(media="attachment://game_result.png"),
+            ),
             accent_color=0x57F287 if won else 0xED4245,
         )
     )
@@ -6329,12 +6383,12 @@ async def mines_reveal_all(
 
         if (
             isinstance(item, discord.ui.Button)
-            and item.custom_id == "mine_cashout"
+            and (item.custom_id or "").startswith("mine_cashout:")
         ):
             item.disabled = True
 
 
-async def mines_click_impl(
+async def _mines_click_locked(
     bot_instance: CasinoBot,
     interaction: discord.Interaction,
     game: MinesGame,
@@ -6382,10 +6436,8 @@ async def mines_click_impl(
             button.style = discord.ButtonStyle.danger
             button.disabled = True
 
-        await mines_reveal_all(
-            game,
-            view,
-        )
+        board_file = create_mines_board_gif(game, flip_index=index)
+        await mines_reveal_all(game, view)
 
         await bot_instance.settle_loss(
             game.user_id,
@@ -6398,19 +6450,10 @@ async def mines_click_impl(
             None,
         )
 
-        embed = mines_embed(
-            game,
-            revealed=True,
-            result=(
-                f"<:blast:1557392029766525018> You hit a mine and lost "
-                f"**{money(game.amount)}**."
-            ),
-        )
-
         result_file = create_game_result_image("Mines", "LOSS", game.amount, Decimal("0"), "Mine hit")
         await interaction.edit_original_response(
             view=mines_result_v2(game, "LOSS", Decimal("0"), game.multiplier),
-            attachments=[result_file],
+            attachments=[board_file, result_file],
         )
 
         return
@@ -6453,24 +6496,13 @@ async def mines_click_impl(
             None,
         )
 
-        await mines_reveal_all(
-            game,
-            view,
-        )
-
-        embed = mines_embed(
-            game,
-            revealed=True,
-            result=(
-                f"<:Party:1557392288131584001> All safe tiles cleared!\n"
-                f"**Won:** {money(payout)}"
-            ),
-        )
+        board_file = create_mines_board_gif(game, flip_index=index)
+        await mines_reveal_all(game, view)
 
         result_file = create_game_result_image("Mines", "WIN", game.amount, payout, "All safe tiles cleared")
         await interaction.edit_original_response(
             view=mines_result_v2(game, "WIN", payout, game.multiplier),
-            attachments=[result_file],
+            attachments=[board_file, result_file],
         )
 
         await bot_instance.check_rank_up(
@@ -6479,14 +6511,30 @@ async def mines_click_impl(
 
         return
 
-    embed = mines_embed(
-        game
-    )
-
+    view.rebuild()
+    board_file = create_mines_board_gif(game, flip_index=index)
     await interaction.edit_original_response(
-        embed=embed,
+        content=None,
+        attachments=[board_file],
         view=view,
     )
+
+
+async def mines_click_impl(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    index: int,
+    view: MinesView,
+):
+    if game.action_lock.locked():
+        await interaction.response.send_message(
+            "Your previous Mines action is still processing. Please try again in a moment.",
+            ephemeral=True,
+        )
+        return
+    async with game.action_lock:
+        await _mines_click_locked(bot_instance, interaction, game, index, view)
 
 
 async def mines_cashout_impl(
@@ -6495,7 +6543,22 @@ async def mines_cashout_impl(
     game: MinesGame,
     view: MinesView,
 ):
+    if game.action_lock.locked():
+        await interaction.response.send_message(
+            "Your previous Mines action is still processing. Please try again in a moment.",
+            ephemeral=True,
+        )
+        return
+    async with game.action_lock:
+        await _mines_cashout_locked(bot_instance, interaction, game, view)
 
+
+async def _mines_cashout_locked(
+    bot_instance: CasinoBot,
+    interaction: discord.Interaction,
+    game: MinesGame,
+    view: MinesView,
+):
     if game.finished:
 
         await interaction.response.send_message(
@@ -6537,18 +6600,11 @@ async def mines_cashout_impl(
         view,
     )
 
-    embed = mines_embed(
-        game,
-        revealed=True,
-        result=(
-            f"<:money_bag:1557393182956847226> Cashed out for **{money(payout)}**."
-        ),
-    )
-
+    board_file = create_mines_board_gif(game)
     result_file = create_game_result_image("Mines", "CASHED OUT", game.amount, payout, "Player cashed out")
     await interaction.edit_original_response(
         view=mines_result_v2(game, "CASHED OUT", payout, game.multiplier),
-        attachments=[result_file],
+        attachments=[board_file, result_file],
     )
 
     await bot_instance.check_rank_up(
@@ -6652,6 +6708,7 @@ class MinesLobbyView(CasinoV2View):
     def __init__(self, game: MinesGame):
         super().__init__(timeout=300)
         self.game = game
+        self.start_lock = asyncio.Lock()
         self.rebuild()
 
     def rebuild(self):
@@ -6689,28 +6746,38 @@ class MinesLobbyView(CasinoV2View):
         if interaction.user.id != self.game.user_id:
             await interaction.response.send_message("This Mines game belongs to another player.", ephemeral=True)
             return
-        if getattr(self.game, "started", False):
-            await interaction.response.send_message("This Mines game has already started.", ephemeral=True)
+        if self.start_lock.locked():
+            await interaction.response.send_message("Mines is starting. Please wait a moment.", ephemeral=True)
             return
+        async with self.start_lock:
+            if getattr(self.game, "started", False):
+                await interaction.response.send_message("This Mines game has already started.", ephemeral=True)
+                return
+            if self.game.bot.active_mines.get(self.game.user_id) is not self.game:
+                await interaction.response.send_message("This Mines game is no longer active.", ephemeral=True)
+                return
 
-        deducted = await bot.deduct_bet(
-            self.game.user_id,
-            self.game.amount,
-            "mines",
-        )
-        if not deducted:
-            await interaction.response.send_message(
-                "Your balance changed before the game started. Please try again.",
-                ephemeral=True,
+            deducted = await self.game.bot.deduct_bet(
+                self.game.user_id,
+                self.game.amount,
+                "mines",
             )
-            return
+            if not deducted:
+                await interaction.response.send_message(
+                    "Your balance changed before the game started. Please try again.",
+                    ephemeral=True,
+                )
+                return
 
-        self.game.started = True
-        board_file = create_mines_board_image(self.game)
-        await interaction.response.edit_message(
-            content=None, embed=None, view=MinesView(self.game),
-            attachments=[board_file],
-        )
+            self.game.started = True
+            board_file = create_mines_board_gif(self.game)
+            await interaction.response.edit_message(
+                content=None,
+                embed=None,
+                view=MinesView(self.game),
+                attachments=[board_file],
+            )
+            self.stop()
 
 
 @prefix_command(name="mines")
@@ -8031,58 +8098,112 @@ async def join_rain(
 
         return
 
-    # --------------------------------------------------------
-    # OWNER CANNOT JOIN OWN RAIN
-    # --------------------------------------------------------
+    lock = rain.setdefault("join_lock", asyncio.Lock())
+    async with lock:
+        if self.active_rains.get(rain_id) is not rain:
+            await interaction.response.send_message(
+                "This rain has already ended.",
+                ephemeral=True,
+            )
+            return
 
-    if interaction.user.id == rain["user_id"]:
+        expires_at = rain.get("expires_at")
+        if expires_at is not None and time.monotonic() >= expires_at:
+            await interaction.response.send_message(
+                "This rain has already ended.",
+                ephemeral=True,
+            )
+            return
 
-        await interaction.response.send_message(
-            "You cannot join your own rain.",
-            ephemeral=True,
-        )
+        if interaction.user.id == rain["user_id"]:
+            await interaction.response.send_message(
+                "You cannot join your own rain.",
+                ephemeral=True,
+            )
+            return
 
-        return
+        if interaction.user.id in rain["players"]:
+            await interaction.response.send_message(
+                "You already joined this rain.",
+                ephemeral=True,
+            )
+            return
 
-    # --------------------------------------------------------
-    # ALREADY JOINED
-    # --------------------------------------------------------
-
-    if interaction.user.id in rain["players"]:
-
-        await interaction.response.send_message(
-            "You already joined this rain.",
-            ephemeral=True,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # JOIN
-    # --------------------------------------------------------
-
-    rain["players"].add(
-        interaction.user.id
-    )
+        rain["players"].add(interaction.user.id)
+        player_order = rain.setdefault("player_order", [])
+        if interaction.user.id not in player_order:
+            player_order.append(interaction.user.id)
 
     await interaction.response.send_message(
         "You joined the rain.",
         ephemeral=True,
     )
 
+    message = getattr(interaction, "message", None)
+    if message and message.embeds:
+        update_lock = rain.setdefault("count_update_lock", asyncio.Lock())
+        async with update_lock:
+            if self.active_rains.get(rain_id) is not rain:
+                return
+            try:
+                embed = message.embeds[0].copy()
+                player_count = len(rain["players"])
+                remaining = max(0, int((expires_at or time.monotonic()) - time.monotonic()))
+                remaining_text = f"{remaining // 60}m {remaining % 60:02d}s remaining"
+                field_index = next(
+                    (index for index, field in enumerate(embed.fields) if field.name == "Players"),
+                    None,
+                )
+                value = (
+                    f"{player_count} player joined · {remaining_text}"
+                    if player_count == 1
+                    else f"{player_count} players joined · {remaining_text}"
+                )
+                if field_index is None:
+                    embed.add_field(name="Players", value=value, inline=False)
+                else:
+                    embed.set_field_at(field_index, name="Players", value=value, inline=False)
+                await message.edit(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as exc:
+                print(f"[RAIN] Could not update the live player count: {type(exc).__name__}: {exc}")
+
 
 CasinoBot.join_rain = join_rain
 
 
+def _split_rain_pool(amount: Decimal, players: list[int]) -> dict[int, Decimal]:
+    """Split a rain to ledger precision and spread leftover units by join order."""
+    if not players:
+        return {}
+    ledger_unit = Decimal("0.00000001")
+    distributable_amount = amount.quantize(ledger_unit, rounding=ROUND_DOWN)
+    total_units = int(distributable_amount / ledger_unit)
+    base_units, extra_units = divmod(total_units, len(players))
+    if base_units <= 0:
+        return {}
+    return {
+        user_id: ledger_unit * Decimal(base_units + (1 if index < extra_units else 0))
+        for index, user_id in enumerate(players)
+    }
+
+
 async def _send_rain_summary(channel, rain, *, paid_players=(), status="Paid out", detail=""):
     amount = D(rain.get("amount", 0))
-    count = len(paid_players)
+    paid_count = len(paid_players)
+    joined_count = len(rain.get("players", ()))
     embed = discord.Embed(
         title=f"{money(amount)} Rain",
         description=f"Hosted by {rain.get('owner_mention', 'Unknown user')}",
         color=GAME_COLOR,
     )
-    embed.add_field(name="Players", value=f"{count} players · {status}", inline=False)
+    embed.add_field(
+        name="Players",
+        value=f"{joined_count} joined · {paid_count} paid · {status}",
+        inline=False,
+    )
     embed.add_field(
         name="User Message",
         value=str(rain.get("message") or "Join before the timer ends.")[:1000],
@@ -8090,8 +8211,12 @@ async def _send_rain_summary(channel, rain, *, paid_players=(), status="Paid out
     )
     if detail:
         embed.add_field(name="Result", value=detail[:1000], inline=False)
-    if status == "Paid out" and count:
-        embed.add_field(name="Payout", value=f"Paid out to **{count} players**.", inline=False)
+    if status == "Paid out" and paid_count:
+        embed.add_field(
+            name="Payout",
+            value=f"Paid out to **{paid_count} players**.",
+            inline=False,
+        )
     banner = create_rain_banner(amount)
     embed.set_image(url="attachment://pacepot_rain.png")
     view = RainResultView(paid_players)
@@ -8141,9 +8266,7 @@ async def finish_rain(
         rain["amount"]
     )
 
-    players = list(
-        rain["players"]
-    )
+    players = list(rain.get("player_order") or sorted(rain["players"]))
 
     # --------------------------------------------------------
     # GET CHANNEL
@@ -8214,16 +8337,8 @@ async def finish_rain(
     # --------------------------------------------------------
 
     player_count = len(players)
-
-    share = (
-        amount
-        / Decimal(player_count)
-    ).quantize(
-        Decimal("0.01"),
-        rounding=ROUND_DOWN,
-    )
-
-    if share <= Decimal("0"):
+    payout_by_player = _split_rain_pool(amount, players)
+    if not payout_by_player:
 
         await self.db.change_balance(
             rain["user_id"],
@@ -8249,12 +8364,13 @@ async def finish_rain(
     failed = []
 
     for user_id in players:
+        player_payout = payout_by_player[user_id]
 
         try:
 
             credited = await self.db.change_balance(
                 user_id,
-                share,
+                player_payout,
                 kind="rain",
                 note=rain_id,
             )
@@ -8312,35 +8428,11 @@ async def finish_rain(
         return
 
     # --------------------------------------------------------
-    # CALCULATE UNUSED AMOUNT
-    # --------------------------------------------------------
-
-    distributed = (
-        share
-        * Decimal(len(successful))
+    distributed = sum(
+        (payout_by_player[user_id] for user_id in successful),
+        Decimal("0"),
     )
-
-    remainder = (
-        amount
-        - distributed
-    ).quantize(
-        Decimal("0.01"),
-        rounding=ROUND_DOWN,
-    )
-
-    # --------------------------------------------------------
-    # RETURN FAILED PLAYER SHARES + ROUNDING REMAINDER
-    # TO THE RAIN OWNER
-    # --------------------------------------------------------
-
-    if failed:
-
-        failed_amount = (
-            share
-            * Decimal(len(failed))
-        )
-
-        remainder += failed_amount
+    remainder = amount - distributed
 
     if remainder > Decimal("0"):
 
@@ -8364,7 +8456,11 @@ async def finish_rain(
         rain,
         paid_players=successful,
         status="Paid out",
-        detail=f"**{money(share)} each**",
+        detail=(
+            f"**{money(distributed)}** distributed across **{len(successful)}** "
+            f"of **{player_count}** joined players."
+            + (f" {len(failed)} failed share(s) were returned to the host." if failed else "")
+        ),
     )
 
 
@@ -8543,6 +8639,8 @@ async def rain_command(
         "channel_id": rain_channel.id,
         "source_channel_id": interaction.channel_id,
         "players": set(),
+        "player_order": [],
+        "expires_at": time.monotonic() + seconds,
         "message": rain_text,
     }
 
@@ -8560,7 +8658,7 @@ async def rain_command(
         )
         rain_embed.add_field(
             name="Players",
-            value=f"0 players · Open for {seconds // 60}m {seconds % 60:02d}s",
+            value=f"0 players joined · Open for {seconds // 60}m {seconds % 60:02d}s",
             inline=False,
         )
         rain_embed.add_field(name="User Message", value=rain_text, inline=False)
@@ -20101,51 +20199,99 @@ async def owner_command(interaction: PrefixInteraction, action: str = "list", us
     )
 
 
+GAME_COMMAND_NAMES = {
+    "blackjack", "roulette", "mines", "hilo", "tower", "coinflip", "dice",
+    "limbo", "market", "stake", "frog-run", "crash", "horses",
+}
+
+
+def _prefix_command_usage(command) -> str:
+    original = getattr(command.callback, "__prefix_original__", None)
+    usage = []
+    if original is not None:
+        try:
+            params = list(inspect.signature(original).parameters.values())[1:]
+            for param in params:
+                token = f"<{param.name}>" if param.default is inspect._empty else f"[{param.name}]"
+                usage.append(token)
+        except (TypeError, ValueError):
+            pass
+    line = f".{command.name}"
+    if usage:
+        line += " " + " ".join(usage)
+    aliases = [alias for alias in (command.aliases or []) if alias]
+    if aliases:
+        line += "  ·  " + ", ".join(f".{alias}" for alias in aliases[:3])
+    return line
+
+
 def create_games_image() -> discord.File:
-    """Show only real, registered games, including the new Crash and Horses."""
-    games_catalog = [
-        ("BLACKJACK", "blackjack"),
-        ("ROULETTE", "roulette"),
-        ("MINES", "mines"),
-        ("HILO", "hilo"),
-        ("TOWER", "tower"),
-        ("COINFLIP", "coinflip"),
-        ("DICE", "dice"),
-        ("LIMBO", "limbo"),
-        ("MARKET", "market"),
-        ("STAKE", "stake"),
-        ("FROG RUN", "frog-run"),
-        ("CRASH", "crash"),
-        ("HORSES", "horses"),
+    """Show registered game commands and usage, keeping the game list out of .help."""
+    labels = {
+        "blackjack": "BLACKJACK",
+        "roulette": "ROULETTE",
+        "mines": "MINES",
+        "hilo": "HILO",
+        "tower": "TOWER",
+        "coinflip": "COINFLIP",
+        "dice": "DICE",
+        "limbo": "LIMBO",
+        "market": "MARKET",
+        "frog-run": "FROG RUN",
+        "crash": "CRASH",
+        "horses": "HORSES",
+    }
+    games = [
+        (labels[name], bot.get_command(name))
+        for name in labels
+        if bot.get_command(name) is not None
     ]
-    games = [label for label, command in games_catalog if bot.get_command(command)]
-    cols, card_w, card_h, gap = 5, 204, 190, 20
-    rows = max(1, (len(games) + cols - 1) // cols)
-    width, height = 1200, max(610, 145 + rows * (card_h + gap) + 35)
-    image, draw = _waifu_canvas(width, height, "Available games")
-    start_x, start_y = 40, 132
-    for index, name in enumerate(games):
-        row, col = divmod(index, cols)
-        x = start_x + col * (card_w + gap)
-        y = start_y + row * (card_h + gap)
-        draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=25, fill=WAIFU_PANEL_ALT, outline=WAIFU_EDGE, width=3)
-        cx, cy = x + card_w // 2, y + 67
-        draw.ellipse((cx - 45, cy - 45, cx + 45, cy + 45), fill=(27, 74, 53), outline=WAIFU_ACCENT, width=3)
-        if name == "CRASH":
-            draw.line((cx - 30, cy + 25, cx - 10, cy + 12, cx + 1, cy + 10, cx + 12, cy - 10, cx + 28, cy - 27), fill=(194, 255, 95), width=7, joint="curve")
-            draw.polygon([(cx + 22, cy - 30), (cx + 38, cy - 35), (cx + 33, cy - 18)], fill=(194, 255, 95))
-        elif name == "HORSES":
-            draw.ellipse((cx - 27, cy - 13, cx + 22, cy + 13), fill=(225, 173, 111))
-            draw.polygon([(cx + 10, cy - 9), (cx + 23, cy - 31), (cx + 37, cy - 26), (cx + 24, cy + 1)], fill=(225, 173, 111))
-            draw.ellipse((cx + 27, cy - 37, cx + 43, cy - 22), fill=(225, 173, 111))
-            draw.line((cx - 12, cy + 7, cx - 18, cy + 29, cx - 24, cy + 31), fill=(49, 42, 38), width=4)
-            draw.line((cx + 12, cy + 7, cx + 18, cy + 29, cx + 24, cy + 31), fill=(49, 42, 38), width=4)
-        else:
-            draw.ellipse((cx - 24, cy - 24, cx + 24, cy + 24), outline=WAIFU_TEXT, width=5)
-            draw.ellipse((cx - 7, cy - 7, cx + 7, cy + 7), fill=WAIFU_ACCENT)
-            if name in {"LIMBO", "HILO"}:
-                draw.line((cx - 25, cy + 25, cx - 7, cy + 12, cx + 3, cy + 5, cx + 23, cy - 24), fill=WAIFU_ACCENT, width=5)
-        draw.text((cx, y + 148), name, font=_waifu_font(19, True), fill=WAIFU_TEXT, anchor="mm")
+    games.sort(key=lambda item: item[1].name.casefold())
+
+    width, margin, column_gap = 1800, 48, 24
+    columns = 2
+    card_width = (width - 2 * margin - column_gap) // columns
+    card_height, row_gap = 76, 14
+    rows = max(1, (len(games) + columns - 1) // columns)
+    height = max(620, 160 + rows * (card_height + row_gap) + 38)
+    image, draw = _waifu_canvas(width, height, "Game commands")
+    draw.text(
+        (margin, 87),
+        "Command examples and aliases · use either . or , as the prefix",
+        font=_waifu_font(18),
+        fill=WAIFU_MUTED,
+    )
+    start_y = 132
+    for index, (label, command) in enumerate(games):
+        row, col = divmod(index, columns)
+        x = margin + col * (card_width + column_gap)
+        y = start_y + row * (card_height + row_gap)
+        draw.rounded_rectangle(
+            (x, y, x + card_width, y + card_height),
+            radius=18,
+            fill=WAIFU_PANEL_ALT,
+            outline=WAIFU_EDGE,
+            width=2,
+        )
+        draw.text(
+            (x + 18, y + 11),
+            label,
+            font=_waifu_font(17, True),
+            fill=WAIFU_TEXT,
+        )
+        usage = _prefix_command_usage(command)
+        font_size = 16
+        usage_font = _waifu_font(font_size, True)
+        while font_size > 11 and draw.textbbox((0, 0), usage, font=usage_font)[2] > card_width - 36:
+            font_size -= 1
+            usage_font = _waifu_font(font_size, True)
+        draw.text(
+            (x + 18, y + 40),
+            usage,
+            font=usage_font,
+            fill=WAIFU_MUTED,
+        )
+
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     output.seek(0)
@@ -20153,14 +20299,12 @@ def create_games_image() -> discord.File:
 
 
 def create_help_image(user_id: Optional[int] = None) -> discord.File:
-    """Build the help list from registered commands so stale entries disappear."""
-    game_names = {
-        "blackjack", "roulette", "mines", "hilo", "tower", "coinflip", "dice",
-        "limbo", "market", "stake", "frog-run", "crash", "horses",
-    }
-    groups = {"GAMES": [], "ACCOUNT & REWARDS": [], "ADMIN / OWNER": []}
+    """Show account and admin commands; game commands live under .games."""
+    groups = {"ACCOUNT & REWARDS": [], "ADMIN / OWNER": []}
     show_admin = user_id is not None and _is_owner_or_admin_id(user_id)
     for command in sorted(bot.commands, key=lambda item: item.name.casefold()):
+        if command.name in GAME_COMMAND_NAMES:
+            continue
         callback = command.callback
         strict_owner = bool(getattr(callback, "__prefix_bot_owner_only__", False))
         admin_only = bool(getattr(callback, "__prefix_owner_only__", False))
@@ -20168,10 +20312,9 @@ def create_help_image(user_id: Optional[int] = None) -> discord.File:
             if show_admin:
                 groups["ADMIN / OWNER"].append(command)
             continue
-        group = "GAMES" if command.name in game_names else "ACCOUNT & REWARDS"
-        groups[group].append(command)
+        groups["ACCOUNT & REWARDS"].append(command)
 
-    columns = [("GAMES", groups["GAMES"]), ("ACCOUNT & REWARDS", groups["ACCOUNT & REWARDS"])]
+    columns = [("ACCOUNT & REWARDS", groups["ACCOUNT & REWARDS"])]
     if show_admin:
         columns.append(("ADMIN / OWNER", groups["ADMIN / OWNER"]))
     width, margin, gap = 1800, 48, 24
